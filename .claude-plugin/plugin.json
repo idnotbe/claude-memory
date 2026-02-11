@@ -1,0 +1,33 @@
+{
+  "name": "claude-memory",
+  "version": "1.0.0",
+  "description": "Structured memory management for Claude Code. Auto-captures decisions, runbooks, constraints, tech debt, session summaries, and preferences as JSON files with intelligent retrieval.",
+  "author": {
+    "name": "idnotbe",
+    "url": "https://github.com/idnotbe"
+  },
+  "hooks": "./hooks/hooks.json",
+  "commands": [
+    "./commands/memory.md",
+    "./commands/memory-config.md",
+    "./commands/memory-search.md",
+    "./commands/memory-save.md"
+  ],
+  "skills": [
+    "./skills/memory-management"
+  ],
+  "homepage": "https://github.com/idnotbe/claude-memory",
+  "repository": "https://github.com/idnotbe/claude-memory",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "context",
+    "knowledge-management",
+    "session-state",
+    "decisions",
+    "runbooks"
+  ],
+  "engines": {
+    "claude-code": ">=1.0.0"
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://claude-memory.dev/schemas/constraint.schema.json",
+  "title": "Constraint Memory",
+  "description": "Schema for constraint category content",
+  "type": "object",
+  "required": ["schema_version", "category", "id", "title", "created_at", "updated_at", "tags", "content"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "category": { "const": "constraint" },
+    "id": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,78}[a-z0-9])?$" },
+    "title": { "type": "string", "maxLength": 120 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "related_files": { "type": "array", "items": { "type": "string" } },
+    "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+    "content": {
+      "type": "object",
+      "required": ["kind", "rule", "impact", "severity", "active"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["limitation", "gap", "policy", "technical"],
+          "description": "Type of constraint"
+        },
+        "rule": {
+          "type": "string",
+          "description": "The constraint stated clearly in one sentence"
+        },
+        "impact": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "What this prevents or affects"
+        },
+        "workarounds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Known ways to work around this"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "description": "How much this constrains work"
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether this constraint is currently in effect"
+        },
+        "expires": {
+          "type": "string",
+          "description": "Condition or date when this may no longer apply"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

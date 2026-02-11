@@ -1,0 +1,47 @@
+{
+  "memory_root": ".claude/memory",
+  "categories": {
+    "session_summary": {
+      "enabled": true,
+      "folder": "sessions",
+      "auto_capture": true,
+      "retention_days": 90
+    },
+    "decision": {
+      "enabled": true,
+      "folder": "decisions",
+      "auto_capture": true,
+      "retention_days": 0
+    },
+    "runbook": {
+      "enabled": true,
+      "folder": "runbooks",
+      "auto_capture": true,
+      "retention_days": 0
+    },
+    "constraint": {
+      "enabled": true,
+      "folder": "constraints",
+      "auto_capture": true,
+      "retention_days": 0
+    },
+    "tech_debt": {
+      "enabled": true,
+      "folder": "tech-debt",
+      "auto_capture": true,
+      "retention_days": 0
+    },
+    "preference": {
+      "enabled": true,
+      "folder": "preferences",
+      "auto_capture": true,
+      "retention_days": 0
+    }
+  },
+  "auto_commit": false,
+  "max_memories_per_category": 100,
+  "retrieval": {
+    "max_inject": 5,
+    "match_strategy": "title_tags"
+  }
+}

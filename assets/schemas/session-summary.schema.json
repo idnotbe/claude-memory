@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://claude-memory.dev/schemas/session_summary.schema.json",
+  "title": "Session Summary Memory",
+  "description": "Schema for session_summary category content",
+  "type": "object",
+  "required": ["schema_version", "category", "id", "title", "created_at", "updated_at", "tags", "content"],
+  "allOf": [
+    {
+      "properties": {
+        "schema_version": { "const": "1.0" },
+        "category": { "const": "session_summary" },
+        "id": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,78}[a-z0-9])?$" },
+        "title": { "type": "string", "maxLength": 120 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "related_files": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+      }
+    }
+  ],
+  "properties": {
+    "schema_version": true,
+    "category": true,
+    "id": true,
+    "title": true,
+    "created_at": true,
+    "updated_at": true,
+    "tags": true,
+    "related_files": true,
+    "confidence": true,
+    "content": {
+      "type": "object",
+      "required": ["goal", "outcome", "completed", "next_actions"],
+      "properties": {
+        "goal": {
+          "type": "string",
+          "description": "What the session aimed to accomplish"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["success", "partial", "blocked", "abandoned"],
+          "description": "Session outcome"
+        },
+        "completed": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tasks confirmed done"
+        },
+        "in_progress": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tasks started but not finished"
+        },
+        "blockers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "What is preventing progress"
+        },
+        "next_actions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Concrete next steps"
+        },
+        "key_changes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Files/modules changed"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
