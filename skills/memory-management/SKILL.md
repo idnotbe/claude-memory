@@ -3,7 +3,7 @@ name: memory-management
 description: Knowledge about the claude-memory system for managing structured project memories
 globs:
   - ".claude/memory/**"
-  - ".claude/memory-config.json"
+  - ".claude/memory/memory-config.json"
 triggers:
   - "remember"
   - "forget"
