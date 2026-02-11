@@ -6,7 +6,7 @@ Structured memory management plugin for [Claude Code](https://claude.ai/code). A
 
 claude-memory gives Claude Code persistent, structured memory across sessions. Instead of losing context when a conversation ends, important information is automatically saved as categorized JSON files and retrieved when relevant.
 
-**Auto-capture** (Stop hook): After each conversation turn, the plugin evaluates whether anything worth remembering happened and saves it to the appropriate category.
+**Auto-capture** (6 parallel Stop hooks): After each conversation turn, 6 per-category hooks evaluate in parallel whether anything worth remembering happened. Each hook is focused on exactly one category, running independently for better isolation and reliability.
 
 **Auto-retrieval** (UserPromptSubmit hook): When you send a message, the plugin checks if any stored memories are relevant and injects them as context.
 
@@ -136,15 +136,36 @@ python hooks/scripts/memory_index.py --validate --root .claude/memory
 python hooks/scripts/memory_index.py --query "authentication" --root .claude/memory
 ```
 
+## Architecture
+
+### 6 Parallel Stop Hooks
+
+Each memory category has its own dedicated Stop hook. All 6 hooks fire in parallel after each conversation turn:
+
+| Hook | Trigger Criteria |
+|------|-----------------|
+| SESSION_SUMMARY | Meaningful work completed or project state changed |
+| DECISION | Choice made between alternatives with stated rationale |
+| RUNBOOK | Non-trivial error diagnosed, fixed, AND verified |
+| CONSTRAINT | Persistent limitation discovered from external factors |
+| TECH_DEBT | Work explicitly deferred with acknowledged cost/risk |
+| PREFERENCE | New convention established for future consistency |
+
+Each hook independently evaluates its single triage question. If the answer is NO, it exits immediately (~100 tokens). Only hooks that match actually write files.
+
+### Index Race Condition
+
+Since hooks run in parallel, multiple hooks writing to `index.md` simultaneously is theoretically possible (e.g., a session that produces both a decision and a tech_debt entry). In practice this is rare, and if it occurs, `memory_index.py --rebuild` fixes the index.
+
 ## Token Cost
 
 The plugin adds overhead to each conversation turn:
 
 - **Retrieval** (per user message): ~700-1000 tokens (reading index.md + matching)
-- **Capture** (per assistant response): ~800 tokens (no-op) to ~2600 tokens (when saving)
-- **Typical session** (10 messages, 1 save): ~17,600 tokens total overhead
+- **Capture** (per assistant response): 6 hooks x ~100 tokens each for fast-exit = ~600 tokens (no-op). When 1 category triggers: ~1100 tokens total.
+- **Typical session** (10 messages, 1-2 saves): ~12,000-15,000 tokens total overhead
 
-For context, a typical Claude Code session uses 50,000-200,000 tokens. The plugin adds roughly 10-35% overhead.
+For context, a typical Claude Code session uses 50,000-200,000 tokens. The plugin adds roughly 6-15% overhead (improved from v1's 10-35%).
 
 ## License
 
