@@ -197,5 +197,4 @@ Rules for index:
 - `categories.<name>.auto_capture` -- enable/disable auto-capture (default: true)
 - `categories.<name>.retention_days` -- auto-expire after N days (0 = permanent; 90 for sessions)
 - `retrieval.max_inject` -- max memories injected per prompt (default: 5)
-- `retrieval.match_strategy` -- how to match (default: title_tags)
 - `max_memories_per_category` -- max files per folder (default: 100)

@@ -118,7 +118,6 @@ Key settings:
 | `categories.*.auto_capture` | `true` | Enable/disable auto-capture for a category |
 | `categories.*.retention_days` | `0` (permanent) | Auto-expire after N days (90 for sessions) |
 | `retrieval.max_inject` | `5` | Max memories injected per prompt |
-| `retrieval.match_strategy` | `title_tags` | How to match memories to prompts |
 | `max_memories_per_category` | `100` | Max files per category folder |
 
 ## Index Maintenance

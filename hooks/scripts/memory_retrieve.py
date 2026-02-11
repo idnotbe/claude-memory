@@ -101,11 +101,25 @@ def main():
     if not prompt_words:
         sys.exit(0)
 
-    # Score each entry by keyword overlap
+    # Score each entry by word-boundary matching (not substring)
     scored = []
     for entry in entries:
         entry_lower = entry.lower()
-        score = sum(1 for w in prompt_words if w in entry_lower)
+        # Tokenize entry into words for set intersection
+        entry_words = set()
+        for ew in entry_lower.split():
+            cleaned_ew = ew.strip(".,;:!?\"'()[]{}->")
+            if cleaned_ew:
+                entry_words.add(cleaned_ew)
+        # Exact word matches (set intersection)
+        exact_matches = len(prompt_words & entry_words)
+        # Prefix matches for 4+ char prompt words (e.g., "auth" matches "authentication")
+        prefix_matches = 0
+        for pw in prompt_words:
+            if len(pw) >= 4 and pw not in entry_words:
+                if any(ew.startswith(pw) for ew in entry_words):
+                    prefix_matches += 1
+        score = exact_matches * 2 + prefix_matches  # Weight exact matches higher
         if score > 0:
             # Extract category tag for priority sorting
             cat = ""
