@@ -6,9 +6,9 @@ Structured memory management plugin for [Claude Code](https://claude.ai/code). A
 
 claude-memory gives Claude Code persistent, structured memory across sessions. Instead of losing context when a conversation ends, important information is automatically saved as categorized JSON files and retrieved when relevant.
 
-**Auto-capture** (6 parallel Stop hooks): After each conversation turn, 6 per-category hooks evaluate in parallel whether anything worth remembering happened. Each hook is focused on exactly one category, running independently for better isolation and reliability.
+**Auto-capture** (6 parallel Stop hooks): After each conversation turn, 6 lightweight triage hooks evaluate in parallel whether anything worth remembering happened. Each hook runs on Haiku and evaluates exactly one category. If triggered, the hook blocks the stop and the main agent (with full tool access) writes the memory file.
 
-**Auto-retrieval** (UserPromptSubmit hook): When you send a message, the plugin checks if any stored memories are relevant and injects them as context.
+**Auto-retrieval** (UserPromptSubmit hook): When you send a message, a Python script reads the memory index and injects relevant entries as context for Claude.
 
 ## Memory Categories
 
@@ -138,40 +138,53 @@ python hooks/scripts/memory_index.py --query "authentication" --root .claude/mem
 
 ## Architecture
 
-### 6 Parallel Stop Hooks
+### Two-Phase Auto-Capture
 
-Each memory category has its own dedicated Stop hook. All 6 hooks fire in parallel after each conversation turn:
+Auto-capture uses a two-phase mechanism:
 
-| Hook | Trigger Criteria |
-|------|-----------------|
-| SESSION_SUMMARY | Meaningful work completed or project state changed |
-| DECISION | Choice made between alternatives with stated rationale |
-| RUNBOOK | Non-trivial error diagnosed, fixed, AND verified |
-| CONSTRAINT | Persistent limitation discovered from external factors |
-| TECH_DEBT | Work explicitly deferred with acknowledged cost/risk |
-| PREFERENCE | New convention established for future consistency |
+**Phase 1: Triage** (Haiku, parallel). Six lightweight prompt hooks run in parallel after each conversation turn. Each evaluates exactly one category using a ~120-token prompt. Haiku returns either "approve" (nothing to save) or "block" with a reason describing what to save.
 
-Each hook independently evaluates its single triage question. If the answer is NO, it exits immediately (~100 tokens). Only hooks that match actually write files.
+**Phase 2: Write** (main agent, sequential). If any hooks block, the main agent continues with full tool access. It receives the hook reasons as instructions and writes the memory files following the SKILL.md format guide. The `stop_hook_active` flag in the hook input prevents infinite loops -- when the main agent stops again after writing, all hooks see `stop_hook_active: true` and approve immediately.
+
+| Hook | Triage Question |
+|------|----------------|
+| SESSION_SUMMARY | Was a specific task completed, file modified with intent, or project decision made? |
+| DECISION | Was a choice made between alternatives with stated rationale ("chose X because Y")? |
+| RUNBOOK | Was a non-trivial error diagnosed, fixed, AND verified? (all three required) |
+| CONSTRAINT | Was an enduring limitation from external factors discovered? |
+| TECH_DEBT | Was work explicitly deferred with acknowledged cost/risk ("deferring X because Y")? |
+| PREFERENCE | Was a new convention deliberately established for future consistency? |
+
+### Auto-Retrieval
+
+The UserPromptSubmit hook uses a Python command script (`hooks/scripts/memory_retrieve.py`) that:
+1. Reads the user's prompt from stdin (hook input JSON)
+2. Reads `.claude/memory/index.md`
+3. Matches entries against the prompt using keyword scoring
+4. Outputs relevant entries (max 5) to stdout, which gets injected as context for Claude
+
+This is faster and more reliable than a prompt-based retrieval hook, since it does deterministic keyword matching without LLM overhead.
 
 ### Shared Index
 
-The 6 hooks are independent in triage and capture logic but share `index.md` for discoverability. Since hooks run in parallel, multiple hooks writing to `index.md` simultaneously is theoretically possible (e.g., a session that produces both a decision and a tech_debt entry). In practice this is rare for a single-user CLI tool, and if it occurs, `memory_index.py --rebuild` fixes the index.
+The 6 category hooks share `index.md` for discoverability. Since the main agent writes files sequentially in Phase 2 (not the hooks themselves), there are no race conditions on index.md writes. If the index gets out of sync for any reason, `memory_index.py --rebuild` fixes it.
 
 ## Token Cost
 
-The plugin adds overhead to each conversation turn. Actual cost depends on Claude Code's hook execution model (whether conversation context is replicated per hook or shared).
+The plugin adds overhead to each conversation turn.
 
-**Prompt text overhead** (always incurred):
-- **Retrieval** (per user message): ~250 tokens prompt + index.md reading
-- **Capture** (per assistant response): ~2,520 tokens total prompt text (6 hooks x ~420 each)
+**Phase 1: Triage** (always incurred, runs on Haiku):
+- **6 Stop hooks**: ~720 tokens total prompt text (6 x ~120 tokens each)
+- **Retrieval**: Near zero LLM cost (Python script, no model call)
+- **Haiku output**: ~10-20 tokens per hook (JSON response)
 
-**Output tokens** (varies):
-- Fast-exit (no save): near zero per hook
-- One category triggers: ~500 output tokens
+**Phase 2: Write** (only when a hook triggers, runs on main model):
+- **1 category triggers**: ~500-1,500 tokens (read index, write JSON, update index)
+- **Multiple categories trigger**: Proportionally more, but rare in a single turn
 
-**Estimated per-session overhead** (10 messages, 1-2 saves): Prompt text contributes ~28,000 tokens. If your project has additional Stop hooks (e.g., active-context updater), total Stop-phase overhead is cumulative.
+**Estimated per-session overhead** (10 messages, 1-2 saves): Triage runs on Haiku (fast, cheap). Writes run on the main model but only when triggered. Total overhead is significantly lower than v2 because triage prompts are ~5x shorter and run on a smaller model.
 
-For a typical Claude Code session (50,000-200,000 tokens), expect roughly 10-20% overhead from this plugin alone.
+**Requirements**: Python 3 for the retrieval script.
 
 ## License
 
