@@ -153,19 +153,25 @@ Each memory category has its own dedicated Stop hook. All 6 hooks fire in parall
 
 Each hook independently evaluates its single triage question. If the answer is NO, it exits immediately (~100 tokens). Only hooks that match actually write files.
 
-### Index Race Condition
+### Shared Index
 
-Since hooks run in parallel, multiple hooks writing to `index.md` simultaneously is theoretically possible (e.g., a session that produces both a decision and a tech_debt entry). In practice this is rare, and if it occurs, `memory_index.py --rebuild` fixes the index.
+The 6 hooks are independent in triage and capture logic but share `index.md` for discoverability. Since hooks run in parallel, multiple hooks writing to `index.md` simultaneously is theoretically possible (e.g., a session that produces both a decision and a tech_debt entry). In practice this is rare for a single-user CLI tool, and if it occurs, `memory_index.py --rebuild` fixes the index.
 
 ## Token Cost
 
-The plugin adds overhead to each conversation turn:
+The plugin adds overhead to each conversation turn. Actual cost depends on Claude Code's hook execution model (whether conversation context is replicated per hook or shared).
 
-- **Retrieval** (per user message): ~700-1000 tokens (reading index.md + matching)
-- **Capture** (per assistant response): 6 hooks x ~100 tokens each for fast-exit = ~600 tokens (no-op). When 1 category triggers: ~1100 tokens total.
-- **Typical session** (10 messages, 1-2 saves): ~12,000-15,000 tokens total overhead
+**Prompt text overhead** (always incurred):
+- **Retrieval** (per user message): ~250 tokens prompt + index.md reading
+- **Capture** (per assistant response): ~2,520 tokens total prompt text (6 hooks x ~420 each)
 
-For context, a typical Claude Code session uses 50,000-200,000 tokens. The plugin adds roughly 6-15% overhead (improved from v1's 10-35%).
+**Output tokens** (varies):
+- Fast-exit (no save): near zero per hook
+- One category triggers: ~500 output tokens
+
+**Estimated per-session overhead** (10 messages, 1-2 saves): Prompt text contributes ~28,000 tokens. If your project has additional Stop hooks (e.g., active-context updater), total Stop-phase overhead is cumulative.
+
+For a typical Claude Code session (50,000-200,000 tokens), expect roughly 10-20% overhead from this plugin alone.
 
 ## License
 
