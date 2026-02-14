@@ -12,20 +12,37 @@ arguments:
 
 Save a memory manually:
 
-1. Read .claude/memory/memory-config.json to validate the category exists
+1. Read `.claude/memory/memory-config.json` to validate the category exists
 2. If category is invalid, list available categories and ask user to choose
-3. Generate a descriptive kebab-case filename from the content
-4. Create the JSON file with full schema:
+3. Generate a descriptive kebab-case slug from the content (this becomes both the filename and the `id` field)
+4. Create the JSON object with full schema:
    - schema_version: "1.0"
    - category: the selected category
    - id: kebab-case slug matching the filename (without .json)
    - title: human-readable title (max 120 chars)
    - created_at / updated_at: current ISO 8601 UTC timestamp
-   - tags: extracted keywords (minimum 1)
+   - tags: extracted keywords (minimum 1, maximum 12)
+   - record_status: "active"
+   - changes: []
+   - times_updated: 0
+   - related_files: [] (populate if relevant files are mentioned)
+   - confidence: 0.7-0.9 (0.9+ only for explicitly confirmed facts)
    - content: structured per the category schema
-5. Update .claude/memory/index.md with a one-line entry
-6. Confirm: show the filename created and a brief summary
+5. Write the JSON to `/tmp/.memory-write-pending.json`
+6. Call: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_write.py --action create --category <cat> --target <memory_root>/<folder>/<slug>.json --input /tmp/.memory-write-pending.json`
+   - memory_write.py handles schema validation, atomic writes, and index.md updates
+7. Confirm: show the filename created and a brief summary
 
 The content argument is natural language. Structure it into the appropriate
 JSON schema for the category. Ask the user for missing required fields
 (e.g., for a decision: what were the alternatives? why was this chosen?).
+
+**Category folder mapping**:
+| Category | Folder |
+|----------|--------|
+| session_summary | sessions/ |
+| decision | decisions/ |
+| runbook | runbooks/ |
+| constraint | constraints/ |
+| tech_debt | tech-debt/ |
+| preference | preferences/ |

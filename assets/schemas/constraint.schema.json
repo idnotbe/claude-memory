@@ -15,6 +15,27 @@
     "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
     "related_files": { "type": "array", "items": { "type": "string" } },
     "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+    "record_status": { "type": "string", "enum": ["active", "retired", "archived"], "default": "active" },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["date", "summary"],
+        "properties": {
+          "date": { "type": "string", "format": "date-time" },
+          "summary": { "type": "string", "maxLength": 300 },
+          "field": { "type": "string" },
+          "old_value": {},
+          "new_value": {}
+        }
+      },
+      "maxItems": 50
+    },
+    "times_updated": { "type": "integer", "default": 0 },
+    "retired_at": { "type": "string", "format": "date-time" },
+    "retired_reason": { "type": "string", "maxLength": 300 },
+    "archived_at": { "type": "string", "format": "date-time" },
+    "archived_reason": { "type": "string", "maxLength": 300 },
     "content": {
       "type": "object",
       "required": ["kind", "rule", "impact", "severity", "active"],

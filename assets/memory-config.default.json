@@ -5,7 +5,8 @@
       "enabled": true,
       "folder": "sessions",
       "auto_capture": true,
-      "retention_days": 90
+      "retention_days": 90,
+      "max_retained": 5
     },
     "decision": {
       "enabled": true,
@@ -43,5 +44,9 @@
   "retrieval": {
     "max_inject": 5,
     "match_strategy": "title_tags"
+  },
+  "delete": {
+    "grace_period_days": 30,
+    "archive_retired": true
   }
 }

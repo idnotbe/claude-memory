@@ -6,7 +6,7 @@ Structured memory management plugin for [Claude Code](https://claude.ai/code). A
 
 claude-memory gives Claude Code persistent, structured memory across sessions. Instead of losing context when a conversation ends, important information is automatically saved as categorized JSON files and retrieved when relevant.
 
-**Auto-capture** (6 parallel Stop hooks): After each conversation turn, 6 lightweight triage hooks evaluate in parallel whether anything worth remembering happened. Each hook runs on Haiku and evaluates exactly one category. If triggered, the hook blocks the stop and the main agent (with full tool access) writes the memory file.
+**Auto-capture** (6 parallel Stop hooks): After each conversation turn, 6 lightweight triage hooks evaluate in parallel whether anything worth remembering happened. Each hook runs on Sonnet and evaluates exactly one category. If triggered, the hook blocks the stop and the main agent (with full tool access) writes the memory file.
 
 **Auto-retrieval** (UserPromptSubmit hook): When you send a message, a Python script reads the memory index and injects relevant entries as context for Claude.
 
@@ -141,7 +141,7 @@ python hooks/scripts/memory_index.py --query "authentication" --root .claude/mem
 
 Auto-capture uses a two-phase mechanism:
 
-**Phase 1: Triage** (Haiku, parallel). Six lightweight prompt hooks run in parallel after each conversation turn. Each evaluates exactly one category using a ~120-token prompt. Haiku returns either "approve" (nothing to save) or "block" with a reason describing what to save.
+**Phase 1: Triage** (Sonnet, parallel). Six lightweight prompt hooks run in parallel after each conversation turn. Each evaluates exactly one category using a ~120-token prompt. Sonnet returns either "approve" (nothing to save) or "block" with a reason describing what to save.
 
 **Phase 2: Write** (main agent, sequential). If any hooks block, the main agent continues with full tool access. It receives the hook reasons as instructions and writes the memory files following the SKILL.md format guide. The `stop_hook_active` flag in the hook input prevents infinite loops -- when the main agent stops again after writing, all hooks see `stop_hook_active: true` and approve immediately.
 
@@ -172,18 +172,47 @@ The 6 category hooks share `index.md` for discoverability. Since the main agent 
 
 The plugin adds overhead to each conversation turn.
 
-**Phase 1: Triage** (always incurred, runs on Haiku):
+**Phase 1: Triage** (always incurred, runs on Sonnet):
 - **6 Stop hooks**: ~720 tokens total prompt text (6 x ~120 tokens each)
 - **Retrieval**: Near zero LLM cost (Python script, no model call)
-- **Haiku output**: ~10-20 tokens per hook (JSON response)
+- **Sonnet output**: ~10-20 tokens per hook (JSON response)
 
 **Phase 2: Write** (only when a hook triggers, runs on main model):
 - **1 category triggers**: ~500-1,500 tokens (read index, write JSON, update index)
 - **Multiple categories trigger**: Proportionally more, but rare in a single turn
 
-**Estimated per-session overhead** (10 messages, 1-2 saves): Triage runs on Haiku (fast, cheap). Writes run on the main model but only when triggered. Total overhead is significantly lower than v2 because triage prompts are ~5x shorter and run on a smaller model.
+**Estimated per-session overhead** (10 messages, 1-2 saves): Triage runs on Sonnet. Writes run on the main model but only when triggered. 
 
 **Requirements**: Python 3 for the retrieval script.
+
+
+## Testing
+
+**Current state:** Tests exist in `tests/` with 6 test files (2,169 LOC) covering all 6 scripts. No CI/CD yet.
+
+**Framework:** pytest
+
+```bash
+# Install test dependencies
+pip install pytest pydantic>=2.0
+
+# Run tests
+pytest tests/ -v
+```
+
+**Key files that need test coverage:**
+
+| Script | Role |
+|--------|------|
+| `hooks/scripts/memory_retrieve.py` | Keyword-based retrieval (stdlib only) |
+| `hooks/scripts/memory_index.py` | Index rebuild/validate/query CLI (stdlib only) |
+| `hooks/scripts/memory_candidate.py` | Candidate selection for update/delete (stdlib only) |
+| `hooks/scripts/memory_write.py` | Schema-enforced write operations (requires pydantic v2) |
+| `hooks/scripts/memory_write_guard.py` | PreToolUse write guard (stdlib only) |
+| `hooks/scripts/memory_validate_hook.py` | PostToolUse validation + quarantine (pydantic v2 optional) |
+
+See `TEST-PLAN.md` for the full prioritized test plan including security considerations.
+See `CLAUDE.md` for development guidance and security notes.
 
 ## License
 

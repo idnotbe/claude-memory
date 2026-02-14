@@ -1,5 +1,5 @@
 {
-  "description": "v3.0.1: 6 triage-only Stop hooks (Sonnet evaluates, main agent writes) + 1 command retrieval hook (Python). See SKILL.md for file format instructions.",
+  "description": "v4.0.0: 6 triage Stop hooks with CUD classification + PreToolUse/PostToolUse Write guards + UserPromptSubmit retrieval. See SKILL.md for file format instructions.",
   "hooks": {
     "Stop": [
       {
@@ -10,7 +10,7 @@
             "model": "sonnet",
             "timeout": 30,
             "statusMessage": "Checking for session summary...",
-            "prompt": "You evaluate whether meaningful work was completed in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was a specific task completed, a file modified with intent, or a project decision made? Ignore trivial interactions (greetings, simple Q&A, pure exploration without conclusions).\n3. If no meaningful work, respond with: {\"ok\": true}\n4. If meaningful work occurred, respond with: {\"ok\": false, \"reason\": \"Save a SESSION_SUMMARY memory capturing: <summarize work in 1 sentence>. Only keep the latest session summary -- overwrite any previous one. Check .claude/memory/index.md for the existing session entry. Use memory-management skill for JSON format and file paths.\"}\n\nRespond with valid JSON only. No other text."
+            "prompt": "You evaluate whether meaningful work was completed in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was a specific task completed, a file modified with intent, or a project decision made? Ignore trivial interactions (greetings, simple Q&A, pure exploration without conclusions).\n3. If no meaningful work, respond with: {\"ok\": true}\n4. If meaningful, respond with: {\"ok\": false, \"reason\": \"Save a SESSION_SUMMARY memory capturing: <summarize work in 1 sentence>. Only keep the last 5 session summaries -- retire older ones. Check .claude/memory/index.md for existing session entries. Use memory-management skill for JSON format and file paths.\"}\n\nAlso output lifecycle_event and cud_recommendation:\n- lifecycle_event: \"resolved\"|\"removed\"|\"reversed\"|\"superseded\"|\"deprecated\"|null\n- cud_recommendation: \"CREATE\"|\"UPDATE\"|\"DELETE\"\n  - CREATE: This is new information not previously saved.\n  - UPDATE: This modifies, corrects, or extends something previously saved.\n  - DELETE: A previously saved item is now resolved/removed/deprecated.\nInclude these fields in your JSON response alongside ok and reason.\n\nRespond with valid JSON only. No other text."
           }
         ]
       },
@@ -22,7 +22,7 @@
             "model": "sonnet",
             "timeout": 30,
             "statusMessage": "Checking for decisions...",
-            "prompt": "You evaluate whether a decision was made in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was a choice made between alternatives with stated rationale? Must have a clear 'chose X because Y' pattern -- not just discussion of options.\n3. If no decision was made, respond with: {\"ok\": true}\n4. If a decision was made, respond with: {\"ok\": false, \"reason\": \"Save a DECISION memory about: <summarize decision in 1 sentence>. Check .claude/memory/index.md for existing entries to update rather than duplicate. Use memory-management skill for JSON format and file paths.\"}\n\nRespond with valid JSON only. No other text."
+            "prompt": "You evaluate whether a decision was made in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was a choice made between alternatives with stated rationale? Must have a clear 'chose X because Y' pattern -- not just discussion of options.\n3. If no decision was made, respond with: {\"ok\": true}\n4. If meaningful, respond with: {\"ok\": false, \"reason\": \"Save a DECISION memory about: <summarize decision in 1 sentence>. Check .claude/memory/index.md for existing entries to update rather than duplicate. Use memory-management skill for JSON format and file paths.\"}\n\nAlso output lifecycle_event and cud_recommendation:\n- lifecycle_event: \"resolved\"|\"removed\"|\"reversed\"|\"superseded\"|\"deprecated\"|null\n- cud_recommendation: \"CREATE\"|\"UPDATE\"|\"DELETE\"\n  - CREATE: This is new information not previously saved.\n  - UPDATE: This modifies, corrects, or extends something previously saved.\n  - DELETE: A previously saved item is now resolved/removed/deprecated.\nInclude these fields in your JSON response alongside ok and reason.\n\nRespond with valid JSON only. No other text."
           }
         ]
       },
@@ -34,7 +34,7 @@
             "model": "sonnet",
             "timeout": 30,
             "statusMessage": "Checking for runbook entries...",
-            "prompt": "You evaluate whether an error was fully resolved in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was a non-trivial error (a) diagnosed with root cause, (b) fixed, AND (c) verified working? All three are required.\n3. If not all three present, respond with: {\"ok\": true}\n4. If fully resolved, respond with: {\"ok\": false, \"reason\": \"Save a RUNBOOK memory for: <error symptom and fix in 1 sentence>. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for JSON format and file paths.\"}\n\nRespond with valid JSON only. No other text."
+            "prompt": "You evaluate whether an error was fully resolved in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was a non-trivial error (a) diagnosed with root cause, (b) fixed, AND (c) verified working? All three are required.\n3. If not all three present, respond with: {\"ok\": true}\n4. If meaningful, respond with: {\"ok\": false, \"reason\": \"Save a RUNBOOK memory for: <error symptom and fix in 1 sentence>. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for JSON format and file paths.\"}\n\nAlso output lifecycle_event and cud_recommendation:\n- lifecycle_event: \"resolved\"|\"removed\"|\"reversed\"|\"superseded\"|\"deprecated\"|null\n- cud_recommendation: \"CREATE\"|\"UPDATE\"|\"DELETE\"\n  - CREATE: This is new information not previously saved.\n  - UPDATE: This modifies, corrects, or extends something previously saved.\n  - DELETE: A previously saved item is now resolved/removed/deprecated.\nInclude these fields in your JSON response alongside ok and reason.\n\nRespond with valid JSON only. No other text."
           }
         ]
       },
@@ -46,7 +46,7 @@
             "model": "sonnet",
             "timeout": 30,
             "statusMessage": "Checking for constraints...",
-            "prompt": "You evaluate whether a persistent limitation was discovered in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was an enduring limitation from external factors discovered (API limits, platform restrictions, legal requirements, infrastructure constraints)? Must be a persistent wall, not a temporary blocker or fixable bug.\n3. If no constraint discovered, respond with: {\"ok\": true}\n4. If a constraint was discovered, respond with: {\"ok\": false, \"reason\": \"Save a CONSTRAINT memory about: <the limitation and its impact in 1 sentence>. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for JSON format and file paths.\"}\n\nRespond with valid JSON only. No other text."
+            "prompt": "You evaluate whether a persistent limitation was discovered in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was an enduring limitation from external factors discovered (API limits, platform restrictions, legal requirements, infrastructure constraints)? Must be a persistent wall, not a temporary blocker or fixable bug.\n3. If no constraint discovered, respond with: {\"ok\": true}\n4. If meaningful, respond with: {\"ok\": false, \"reason\": \"Save a CONSTRAINT memory about: <the limitation and its impact in 1 sentence>. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for JSON format and file paths.\"}\n\nAlso output lifecycle_event and cud_recommendation:\n- lifecycle_event: \"resolved\"|\"removed\"|\"reversed\"|\"superseded\"|\"deprecated\"|null\n- cud_recommendation: \"CREATE\"|\"UPDATE\"|\"DELETE\"\n  - CREATE: This is new information not previously saved.\n  - UPDATE: This modifies, corrects, or extends something previously saved.\n  - DELETE: A previously saved item is now resolved/removed/deprecated.\nInclude these fields in your JSON response alongside ok and reason.\n\nRespond with valid JSON only. No other text."
           }
         ]
       },
@@ -58,7 +58,7 @@
             "model": "sonnet",
             "timeout": 30,
             "statusMessage": "Checking for tech debt...",
-            "prompt": "You evaluate whether work was explicitly deferred in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was work explicitly deferred with acknowledged cost or risk? Must have a clear 'deferring X because Y' pattern -- not just a TODO or wish list item.\n3. If nothing was deferred, respond with: {\"ok\": true}\n4. If work was deferred, respond with: {\"ok\": false, \"reason\": \"Save a TECH_DEBT memory about: <what was deferred and why in 1 sentence>. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for JSON format and file paths.\"}\n\nRespond with valid JSON only. No other text."
+            "prompt": "You evaluate whether work was explicitly deferred in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was work explicitly deferred with acknowledged cost or risk? Must have a clear 'deferring X because Y' pattern -- not just a TODO or wish list item.\n3. If nothing was deferred, respond with: {\"ok\": true}\n4. If meaningful, respond with: {\"ok\": false, \"reason\": \"Save a TECH_DEBT memory about: <what was deferred and why in 1 sentence>. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for JSON format and file paths.\"}\n\nAlso output lifecycle_event and cud_recommendation:\n- lifecycle_event: \"resolved\"|\"removed\"|\"reversed\"|\"superseded\"|\"deprecated\"|null\n- cud_recommendation: \"CREATE\"|\"UPDATE\"|\"DELETE\"\n  - CREATE: This is new information not previously saved.\n  - UPDATE: This modifies, corrects, or extends something previously saved.\n  - DELETE: A previously saved item is now resolved/removed/deprecated.\nInclude these fields in your JSON response alongside ok and reason.\n\nRespond with valid JSON only. No other text."
           }
         ]
       },
@@ -70,7 +70,33 @@
             "model": "sonnet",
             "timeout": 30,
             "statusMessage": "Checking for preferences...",
-            "prompt": "You evaluate whether a new convention was established in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was a new convention deliberately established for future consistency? Must be a style, tool, or workflow choice intended to apply going forward -- not following an existing convention or a one-time exception.\n3. If no new convention, respond with: {\"ok\": true}\n4. If a new convention was established, respond with: {\"ok\": false, \"reason\": \"Save a PREFERENCE memory about: <the convention and rationale in 1 sentence>. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for JSON format and file paths.\"}\n\nRespond with valid JSON only. No other text."
+            "prompt": "You evaluate whether a new convention was established in this conversation turn.\n\nHook input: $ARGUMENTS\n\nRULES:\n1. If stop_hook_active is true in the input above, respond with: {\"ok\": true}\n2. Evaluate: Was a new convention deliberately established for future consistency? Must be a style, tool, or workflow choice intended to apply going forward -- not following an existing convention or a one-time exception.\n3. If no new convention, respond with: {\"ok\": true}\n4. If meaningful, respond with: {\"ok\": false, \"reason\": \"Save a PREFERENCE memory about: <the convention and rationale in 1 sentence>. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for JSON format and file paths.\"}\n\nAlso output lifecycle_event and cud_recommendation:\n- lifecycle_event: \"resolved\"|\"removed\"|\"reversed\"|\"superseded\"|\"deprecated\"|null\n- cud_recommendation: \"CREATE\"|\"UPDATE\"|\"DELETE\"\n  - CREATE: This is new information not previously saved.\n  - UPDATE: This modifies, corrects, or extends something previously saved.\n  - DELETE: A previously saved item is now resolved/removed/deprecated.\nInclude these fields in your JSON response alongside ok and reason.\n\nRespond with valid JSON only. No other text."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_write_guard.py\"",
+            "timeout": 5,
+            "statusMessage": "Checking memory write path..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_validate_hook.py\"",
+            "timeout": 10,
+            "statusMessage": "Validating memory file..."
           }
         ]
       }
