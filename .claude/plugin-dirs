@@ -1,0 +1,14 @@
+# Claude Code plugin directories for this project.
+# Used by ccyolo (bash function) to load plugins via --plugin-dir flags.
+#
+# Format:
+#   - One directory path per line
+#   - Lines starting with # are comments
+#   - ~ expands to $HOME
+#   - Paths must be absolute (or start with ~)
+#   - Missing directories produce a warning on stderr
+#
+# To add/remove plugins, edit this file and restart ccyolo.
+# Full reference: .claude/ccyolo.md
+
+~/projects/vibe-check
