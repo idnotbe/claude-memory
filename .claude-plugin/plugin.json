@@ -6,7 +6,6 @@
     "name": "idnotbe",
     "url": "https://github.com/idnotbe"
   },
-  "hooks": "./hooks/hooks.json",
   "commands": [
     "./commands/memory.md",
     "./commands/memory-config.md",
@@ -26,8 +25,5 @@
     "session-state",
     "decisions",
     "runbooks"
-  ],
-  "engines": {
-    "claude-code": ">=1.0.0"
-  }
+  ]
 }

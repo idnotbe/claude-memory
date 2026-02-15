@@ -34,10 +34,10 @@ if os.path.isfile(_venv_python) and os.path.realpath(sys.executable) != os.path.
         os.execv(_venv_python, [_venv_python] + sys.argv)
 
 import argparse
-import fcntl
 import hashlib
 import json
 import re
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1128,49 +1128,90 @@ def _check_path_containment(target_abs: Path, memory_root: Path, action_label: s
 
 
 class _flock_index:
-    """Context manager for flock on index.md. No-op fallback on non-Unix."""
+    """Portable lock for index mutations. Uses mkdir (atomic on all FS including NFS)."""
+
+    _LOCK_TIMEOUT = 5.0    # Max seconds to wait for lock
+    _STALE_AGE = 60.0      # Seconds before a lock is considered stale
+    _POLL_INTERVAL = 0.05   # Seconds between retry attempts
 
     def __init__(self, index_path: Path):
-        self.index_path = index_path
-        self.lock_path = index_path.parent / ".index.lock"
-        self.lock_fd = None
+        self.lock_dir = index_path.parent / ".index.lockdir"
+        self.acquired = False
 
     def __enter__(self):
-        try:
-            self.lock_fd = open(self.lock_path, "w")
-            fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
-        except (OSError, AttributeError):
-            # Non-Unix or other error: proceed without lock
-            pass
-        return self
+        deadline = time.monotonic() + self._LOCK_TIMEOUT
+        while True:
+            try:
+                os.mkdir(self.lock_dir)
+                self.acquired = True
+                return self
+            except FileExistsError:
+                # Lock held by another process -- check for stale
+                try:
+                    mtime = self.lock_dir.stat().st_mtime
+                    if (time.time() - mtime) > self._STALE_AGE:
+                        # Stale lock -- break it with warning
+                        try:
+                            os.rmdir(self.lock_dir)
+                        except OSError:
+                            pass
+                        print(
+                            "[WARN] Broke stale index lock (older than 60s)",
+                            file=sys.stderr,
+                        )
+                        continue
+                except OSError:
+                    pass  # Lock dir disappeared between check and stat -- retry
+
+                if time.monotonic() >= deadline:
+                    print(
+                        "[WARN] Index lock timeout; proceeding without lock",
+                        file=sys.stderr,
+                    )
+                    return self
+                time.sleep(self._POLL_INTERVAL)
+            except OSError:
+                # mkdir failed for non-existence reason (permissions, etc.)
+                # Proceed without lock rather than failing the write
+                print(
+                    "[WARN] Could not create lock directory; proceeding without lock",
+                    file=sys.stderr,
+                )
+                return self
 
     def __exit__(self, *args):
-        if self.lock_fd:
+        if self.acquired:
             try:
-                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
-                self.lock_fd.close()
-            except (OSError, AttributeError):
+                os.rmdir(self.lock_dir)
+            except OSError:
                 pass
 
 
 def _resolve_memory_root(target: str) -> tuple[Path, Path]:
-    """Derive memory_root and index_path from the target path."""
+    """Derive memory_root and index_path from the target path.
+
+    Requires .claude/memory marker in the path. Fails closed if missing.
+    """
     target_path = Path(target)
-    parts = target_path.parts
-    # Find memory directory marker: look for ".claude" followed by "memory"
+    # Resolve to absolute for consistent part scanning
+    target_abs = (
+        Path.cwd() / target_path
+        if not target_path.is_absolute()
+        else target_path
+    )
+    parts = target_abs.parts
     _dc = ".clau" + "de"
     for i, part in enumerate(parts):
         if part == "memory" and i > 0 and parts[i - 1] == _dc:
             memory_root = Path(*parts[: i + 1])
             break
     else:
-        # Fallback: go up 2 from target dir (category_dir -> memory)
-        target_abs = (
-            Path.cwd() / target_path
-            if not target_path.is_absolute()
-            else target_path
+        print(
+            f"PATH_ERROR\ntarget: {target}\n"
+            f"fix: Target path must contain '.claude/memory/' components. "
+            f"Example: .claude/memory/decisions/my-decision.json"
         )
-        memory_root = target_abs.parent.parent
+        sys.exit(1)
 
     memory_root_abs = (
         Path.cwd() / memory_root

@@ -217,6 +217,19 @@ def main():
     root = Path(args.root)
     index_path = root / "index.md"
 
+    # Rebuild index on demand if missing (derived artifact pattern)
+    if not index_path.exists() and root.is_dir():
+        import subprocess
+        index_tool = Path(__file__).parent / "memory_index.py"
+        if index_tool.exists():
+            try:
+                subprocess.run(
+                    [sys.executable, str(index_tool), "--rebuild", "--root", str(root)],
+                    capture_output=True, timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                pass
+
     if not index_path.exists():
         print(f"ERROR: index.md not found at {index_path}", file=sys.stderr)
         sys.exit(1)

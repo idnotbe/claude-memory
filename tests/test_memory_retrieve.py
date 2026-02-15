@@ -215,7 +215,7 @@ class TestRetrieveIntegration:
         }
         stdout, rc = self._run_retrieve(hook_input)
         assert rc == 0
-        assert "RELEVANT MEMORIES" in stdout
+        assert "<memory-context" in stdout or "RELEVANT MEMORIES" in stdout
         assert "use-jwt" in stdout
 
     def test_no_match_no_output(self, tmp_path):

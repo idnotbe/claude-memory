@@ -153,6 +153,21 @@ def check_recency(file_path: Path) -> tuple[bool, bool]:
         return False, False
 
 
+def _sanitize_title(title: str) -> str:
+    """Sanitize a title for safe injection into prompt context."""
+    # Strip control characters
+    title = re.sub(r'[\x00-\x1f\x7f]', '', title)
+    # Strip zero-width and bidirectional override Unicode characters
+    title = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060-\u2069\ufeff]', '', title)
+    # Strip index-format injection markers
+    title = title.replace(" -> ", " - ").replace("#tags:", "")
+    # Escape XML-sensitive characters to prevent data boundary breakout
+    title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Truncate to 120 chars (matches write-side max_length)
+    title = title.strip()[:120]
+    return title
+
+
 def main():
     # Read hook input from stdin
     try:
@@ -174,6 +189,20 @@ def main():
     memory_root = Path(cwd) / ".claude" / "memory"
     index_path = memory_root / "index.md"
 
+    # Rebuild index on demand if missing (derived artifact pattern).
+    # index.md may be .gitignored -- rebuild from authoritative JSON files.
+    if not index_path.exists() and memory_root.is_dir():
+        import subprocess
+        index_tool = Path(__file__).parent / "memory_index.py"
+        if index_tool.exists():
+            try:
+                subprocess.run(
+                    [sys.executable, str(index_tool), "--rebuild", "--root", str(memory_root)],
+                    capture_output=True, timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                pass
+
     if not index_path.exists():
         sys.exit(0)
 
@@ -187,9 +216,20 @@ def main():
             retrieval = config.get("retrieval", {})
             if not retrieval.get("enabled", True):
                 sys.exit(0)
-            max_inject = retrieval.get("max_inject", 5)
+            raw_inject = retrieval.get("max_inject", 5)
+            try:
+                max_inject = max(0, min(20, int(raw_inject)))
+            except (ValueError, TypeError, OverflowError):
+                max_inject = 5
+                print(
+                    f"[WARN] Invalid max_inject value: {raw_inject!r}; using default 5",
+                    file=sys.stderr,
+                )
         except (json.JSONDecodeError, KeyError, OSError):
             pass
+
+    if max_inject == 0:
+        sys.exit(0)
 
     # Parse index entries
     entries = []
@@ -251,12 +291,15 @@ def main():
     final.sort(key=lambda x: (-x[0], x[1]))
     top = final[:max_inject]
 
-    # Output as plain text (added to Claude's context on exit 0)
-    print("RELEVANT MEMORIES (from .claude/memory/):")
+    # Output with data-boundary markers and retrieval-side sanitization.
+    # Titles are re-sanitized here as defense-in-depth (write-side also sanitizes).
+    print("<memory-context source=\".claude/memory/\">")
     for _, _, entry in top:
-        print(entry["raw"])
-    print()
-    print("Read the referenced files above if you need detailed context for this task.")
+        safe_title = _sanitize_title(entry["title"])
+        tags = entry.get("tags", set())
+        tags_str = f" #tags:{','.join(sorted(tags))}" if tags else ""
+        print(f"- [{entry['category']}] {safe_title} -> {entry['path']}{tags_str}")
+    print("</memory-context>")
 
 
 if __name__ == "__main__":

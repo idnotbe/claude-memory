@@ -7,3 +7,20 @@ __pycache__/
 
 # Test artifacts
 .pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.mcp.json
+
+# Environment
+.env
+.env.*
+
+# Windows reserved filename artifact
+nul
+
+# Memory index is a derived artifact (rebuilt on demand from JSON source files)
+.claude/memory/index.md
