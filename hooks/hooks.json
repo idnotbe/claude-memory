@@ -1,70 +1,15 @@
 {
-  "description": "v4.1.0: 6 triage Stop hooks (natural-language prompts) + PreToolUse/PostToolUse Write guards + UserPromptSubmit retrieval. See SKILL.md for file format instructions.",
+  "description": "v5.0.0: 1 deterministic command-type Stop hook (memory_triage.py) + PreToolUse/PostToolUse Write guards + UserPromptSubmit retrieval. See SKILL.md for file format instructions.",
   "hooks": {
     "Stop": [
       {
         "matcher": "*",
         "hooks": [
           {
-            "type": "prompt",
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_triage.py\"",
             "timeout": 30,
-            "statusMessage": "Checking for session summary...",
-            "prompt": "Evaluate whether meaningful work was completed in this conversation that should be saved as a SESSION_SUMMARY memory.\n\nContext: $ARGUMENTS\n\nIf stop_hook_active is true in the context above, allow stopping.\n\nMeaningful work includes: specific tasks completed, files modified with intent, or project decisions made. Trivial interactions like greetings, simple Q&A, or exploration without conclusions do not count.\n\nIf nothing meaningful was done, allow stopping. If meaningful work was done, do not allow stopping and explain what should be saved. Only keep the last 5 session summaries -- retire older ones. Check .claude/memory/index.md for existing session entries. Use memory-management skill for file format and paths.\n\nStart your explanation with a [CUD:CREATE|EVENT:none] prefix indicating the action (CREATE for new info, UPDATE for modifying existing, DELETE for resolved/removed) and lifecycle event (resolved, removed, reversed, superseded, deprecated, or none)."
-          }
-        ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "prompt",
-            "timeout": 30,
-            "statusMessage": "Checking for decisions...",
-            "prompt": "Evaluate whether a decision was made in this conversation that should be saved as a DECISION memory.\n\nContext: $ARGUMENTS\n\nIf stop_hook_active is true in the context above, allow stopping.\n\nA decision means a choice was made between alternatives with stated rationale -- a clear 'chose X because Y' pattern. Discussion of options without a final choice does not count.\n\nIf no decision was made, allow stopping. If a decision was made, do not allow stopping and explain what decision should be saved. Check .claude/memory/index.md for existing entries to update rather than duplicate. Use memory-management skill for file format and paths.\n\nStart your explanation with a [CUD:CREATE|EVENT:none] prefix indicating the action (CREATE for new info, UPDATE for modifying existing, DELETE for resolved/removed) and lifecycle event (resolved, removed, reversed, superseded, deprecated, or none)."
-          }
-        ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "prompt",
-            "timeout": 30,
-            "statusMessage": "Checking for runbook entries...",
-            "prompt": "Evaluate whether an error was fully resolved in this conversation that should be saved as a RUNBOOK memory.\n\nContext: $ARGUMENTS\n\nIf stop_hook_active is true in the context above, allow stopping.\n\nA fully resolved error requires all three: (a) root cause diagnosed, (b) fix applied, AND (c) verified working. If any of these three is missing, it does not qualify.\n\nIf no error was fully resolved, allow stopping. If one was, do not allow stopping and explain the error symptom and fix. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for file format and paths.\n\nStart your explanation with a [CUD:CREATE|EVENT:none] prefix indicating the action (CREATE for new info, UPDATE for modifying existing, DELETE for resolved/removed) and lifecycle event (resolved, removed, reversed, superseded, deprecated, or none)."
-          }
-        ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "prompt",
-            "timeout": 30,
-            "statusMessage": "Checking for constraints...",
-            "prompt": "Evaluate whether a persistent limitation was discovered in this conversation that should be saved as a CONSTRAINT memory.\n\nContext: $ARGUMENTS\n\nIf stop_hook_active is true in the context above, allow stopping.\n\nA constraint is an enduring limitation from external factors: API limits, platform restrictions, legal requirements, infrastructure constraints. It must be a persistent wall, not a temporary blocker or fixable bug.\n\nIf no constraint was discovered, allow stopping. If one was, do not allow stopping and explain the limitation and its impact. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for file format and paths.\n\nStart your explanation with a [CUD:CREATE|EVENT:none] prefix indicating the action (CREATE for new info, UPDATE for modifying existing, DELETE for resolved/removed) and lifecycle event (resolved, removed, reversed, superseded, deprecated, or none)."
-          }
-        ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "prompt",
-            "timeout": 30,
-            "statusMessage": "Checking for tech debt...",
-            "prompt": "Evaluate whether work was explicitly deferred in this conversation that should be saved as a TECH_DEBT memory.\n\nContext: $ARGUMENTS\n\nIf stop_hook_active is true in the context above, allow stopping.\n\nDeferred work means a clear 'deferring X because Y' pattern with acknowledged cost or risk. Simple TODOs or wish list items do not count.\n\nIf nothing was deferred, allow stopping. If work was deferred, do not allow stopping and explain what was deferred and why. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for file format and paths.\n\nStart your explanation with a [CUD:CREATE|EVENT:none] prefix indicating the action (CREATE for new info, UPDATE for modifying existing, DELETE for resolved/removed) and lifecycle event (resolved, removed, reversed, superseded, deprecated, or none)."
-          }
-        ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "prompt",
-            "timeout": 30,
-            "statusMessage": "Checking for preferences...",
-            "prompt": "Evaluate whether a new convention was established in this conversation that should be saved as a PREFERENCE memory.\n\nContext: $ARGUMENTS\n\nIf stop_hook_active is true in the context above, allow stopping.\n\nA convention is a style, tool, or workflow choice deliberately established for future consistency. Following an existing convention or a one-time exception does not count.\n\nIf no new convention was established, allow stopping. If one was, do not allow stopping and explain the convention and its rationale. Check .claude/memory/index.md for existing entries to update. Use memory-management skill for file format and paths.\n\nStart your explanation with a [CUD:CREATE|EVENT:none] prefix indicating the action (CREATE for new info, UPDATE for modifying existing, DELETE for resolved/removed) and lifecycle event (resolved, removed, reversed, superseded, deprecated, or none)."
+            "statusMessage": "Evaluating session for memories..."
           }
         ]
       }

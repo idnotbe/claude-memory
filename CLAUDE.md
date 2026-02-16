@@ -12,7 +12,7 @@ Structured memory plugin for Claude Code. Auto-captures decisions, runbooks, con
 
 | Hook Type | What It Does |
 |-----------|-------------|
-| Stop (x6) | Triage hooks (Sonnet) -- one per category, evaluates whether to save |
+| Stop (x1) | Deterministic triage hook (command type) -- keyword heuristic, evaluates all 6 categories |
 | UserPromptSubmit | Retrieval hook -- Python keyword matcher injects relevant memories |
 | PreToolUse:Write | Write guard -- blocks direct writes to memory directory |
 | PostToolUse:Write | Validation hook -- schema-validates any memory JSON, quarantines invalid |
@@ -21,6 +21,7 @@ Structured memory plugin for Claude Code. Auto-captures decisions, runbooks, con
 
 | File | Role | Dependencies |
 |------|------|-------------|
+| hooks/scripts/memory_triage.py | Stop hook: keyword triage for 6 memory categories | stdlib only |
 | hooks/scripts/memory_retrieve.py | Keyword-based retrieval, injects context | stdlib only |
 | hooks/scripts/memory_index.py | Index rebuild, validate, query CLI | stdlib only |
 | hooks/scripts/memory_candidate.py | ACE candidate selection for update/delete | stdlib only |
