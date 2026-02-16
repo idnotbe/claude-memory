@@ -4,6 +4,7 @@
     "session_summary": {
       "enabled": true,
       "folder": "sessions",
+      "description": "High-level summary of work done in a coding session, including goals, outcomes, and next steps",
       "auto_capture": true,
       "retention_days": 90,
       "max_retained": 5
@@ -11,30 +12,35 @@
     "decision": {
       "enabled": true,
       "folder": "decisions",
+      "description": "Architectural and technical choices with rationale -- why X was chosen over Y",
       "auto_capture": true,
       "retention_days": 0
     },
     "runbook": {
       "enabled": true,
       "folder": "runbooks",
+      "description": "Step-by-step procedures for diagnosing and fixing specific errors or issues",
       "auto_capture": true,
       "retention_days": 0
     },
     "constraint": {
       "enabled": true,
       "folder": "constraints",
+      "description": "External limitations, platform restrictions, and hard boundaries that cannot be changed",
       "auto_capture": true,
       "retention_days": 0
     },
     "tech_debt": {
       "enabled": true,
       "folder": "tech-debt",
+      "description": "Known shortcuts, deferred work, and technical cleanup tasks with justification",
       "auto_capture": true,
       "retention_days": 0
     },
     "preference": {
       "enabled": true,
       "folder": "preferences",
+      "description": "User conventions, tool choices, coding standards, and workflow preferences",
       "auto_capture": true,
       "retention_days": 0
     }
@@ -44,6 +50,31 @@
   "retrieval": {
     "max_inject": 5,
     "match_strategy": "title_tags"
+  },
+  "triage": {
+    "enabled": true,
+    "max_messages": 50,
+    "thresholds": {
+      "decision": 0.4,
+      "runbook": 0.4,
+      "constraint": 0.5,
+      "tech_debt": 0.4,
+      "preference": 0.4,
+      "session_summary": 0.6
+    },
+    "parallel": {
+      "enabled": true,
+      "category_models": {
+        "session_summary": "haiku",
+        "decision": "sonnet",
+        "runbook": "haiku",
+        "constraint": "sonnet",
+        "tech_debt": "haiku",
+        "preference": "haiku"
+      },
+      "verification_model": "sonnet",
+      "default_model": "haiku"
+    }
   },
   "delete": {
     "grace_period_days": 30,

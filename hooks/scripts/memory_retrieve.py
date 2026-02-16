@@ -117,6 +117,33 @@ def score_entry(prompt_words: set[str], entry: dict) -> int:
     return score
 
 
+def score_description(prompt_words: set[str], description_tokens: set[str]) -> int:
+    """Score prompt against category description tokens.
+
+    Lower weight than tag matches (1 point per exact match, capped).
+    Prefix matches (4+ chars) contribute 0.5 points (floored to int at end).
+    Total capped at 2 to prevent descriptions from dominating scoring.
+    """
+    if not description_tokens or not prompt_words:
+        return 0
+
+    score = 0.0
+
+    # Exact matches: 1 point each
+    exact = prompt_words & description_tokens
+    score += len(exact) * 1.0
+
+    # Prefix matches on remaining tokens (4+ char prompt words)
+    already_matched = exact
+    for pw in prompt_words - already_matched:
+        if len(pw) >= 4:
+            if any(dt.startswith(pw) for dt in description_tokens):
+                score += 0.5
+
+    # Cap at 2 to prevent descriptions from dominating
+    return min(2, int(score))
+
+
 def check_recency(file_path: Path) -> tuple[bool, bool]:
     """Read a JSON memory file and check recency and retired status.
 
@@ -157,12 +184,12 @@ def _sanitize_title(title: str) -> str:
     """Sanitize a title for safe injection into prompt context."""
     # Strip control characters
     title = re.sub(r'[\x00-\x1f\x7f]', '', title)
-    # Strip zero-width and bidirectional override Unicode characters
-    title = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060-\u2069\ufeff]', '', title)
+    # Strip zero-width, bidirectional override, and tag Unicode characters
+    title = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060-\u2069\ufeff\U000e0000-\U000e007f]', '', title)
     # Strip index-format injection markers
     title = title.replace(" -> ", " - ").replace("#tags:", "")
     # Escape XML-sensitive characters to prevent data boundary breakout
-    title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', '&quot;')
     # Truncate to 120 chars (matches write-side max_length)
     title = title.strip()[:120]
     return title
@@ -208,6 +235,7 @@ def main():
 
     # Check retrieval config
     max_inject = 5
+    category_descriptions: dict[str, str] = {}
     config_path = memory_root / "memory-config.json"
     if config_path.exists():
         try:
@@ -225,6 +253,14 @@ def main():
                     f"[WARN] Invalid max_inject value: {raw_inject!r}; using default 5",
                     file=sys.stderr,
                 )
+            # Load category descriptions
+            categories_raw = config.get("categories", {})
+            if isinstance(categories_raw, dict):
+                for cat_key, cat_val in categories_raw.items():
+                    if isinstance(cat_val, dict):
+                        desc = cat_val.get("description", "")
+                        if isinstance(desc, str) and desc:
+                            category_descriptions[cat_key.lower()] = desc[:500]
         except (json.JSONDecodeError, KeyError, OSError):
             pass
 
@@ -251,13 +287,22 @@ def main():
     if not prompt_words:
         sys.exit(0)
 
-    # Pass 1: Score each entry by text matching (title + tags)
+    # Pre-tokenize category descriptions for scoring
+    desc_tokens_by_cat: dict[str, set[str]] = {}
+    for cat_key, desc in category_descriptions.items():
+        desc_tokens_by_cat[cat_key.upper()] = tokenize(desc)
+
+    # Pass 1: Score each entry by text matching (title + tags + description)
     scored = []
     for entry in entries:
-        score = score_entry(prompt_words, entry)
-        if score > 0:
+        text_score = score_entry(prompt_words, entry)
+        # Add description-based score for the entry's category
+        cat_desc_tokens = desc_tokens_by_cat.get(entry["category"], set())
+        if cat_desc_tokens:
+            text_score += score_description(prompt_words, cat_desc_tokens)
+        if text_score > 0:
             priority = CATEGORY_PRIORITY.get(entry["category"], 10)
-            scored.append((score, priority, entry))
+            scored.append((text_score, priority, entry))
 
     if not scored:
         sys.exit(0)
@@ -293,7 +338,18 @@ def main():
 
     # Output with data-boundary markers and retrieval-side sanitization.
     # Titles are re-sanitized here as defense-in-depth (write-side also sanitizes).
-    print("<memory-context source=\".claude/memory/\">")
+    # Include category descriptions when available for richer context.
+    desc_attr = ""
+    if category_descriptions:
+        # Build compact desc mapping for the output header
+        desc_parts = []
+        for cat_key, desc in sorted(category_descriptions.items()):
+            safe_desc = _sanitize_title(desc)
+            desc_parts.append(f"{cat_key}={safe_desc}")
+        if desc_parts:
+            desc_attr = " descriptions=\"" + "; ".join(desc_parts) + "\""
+
+    print(f"<memory-context source=\".claude/memory/\"{desc_attr}>")
     for _, _, entry in top:
         safe_title = _sanitize_title(entry["title"])
         tags = entry.get("tags", set())

@@ -152,3 +152,91 @@ class TestValidateHookIntegration:
         hook_input = {"tool_input": {}}
         stdout, stderr, rc = self._run_validate_hook(hook_input)
         assert rc == 0
+
+    # --- Config file exemption tests ---
+
+    def test_config_file_skips_validation(self):
+        """memory-config.json should NOT be validated or quarantined."""
+        hook_input = {
+            "tool_input": {
+                "file_path": "/home/user/project/.claude/memory/memory-config.json",
+            }
+        }
+        stdout, stderr, rc = self._run_validate_hook(hook_input)
+        assert rc == 0
+        # Should NOT produce a deny decision
+        if stdout.strip():
+            output = json.loads(stdout)
+            hook_output = output.get("hookSpecificOutput", {})
+            assert hook_output.get("permissionDecision") != "deny"
+
+    def test_config_file_not_quarantined(self, tmp_path):
+        """Write a real config file and verify it is not renamed/quarantined."""
+        # Create a .claude/memory/ directory structure
+        mem_dir = tmp_path / ".claude" / "memory"
+        mem_dir.mkdir(parents=True)
+        config_file = mem_dir / "memory-config.json"
+        config_data = {
+            "retrieval": {"enabled": True, "max_inject": 5},
+            "triage": {"enabled": True},
+        }
+        config_file.write_text(json.dumps(config_data, indent=2))
+
+        hook_input = {
+            "tool_input": {
+                "file_path": str(config_file),
+            }
+        }
+        stdout, stderr, rc = self._run_validate_hook(hook_input)
+        assert rc == 0
+
+        # Config file should still exist with its original name (not quarantined)
+        assert config_file.exists(), "Config file was quarantined (renamed)"
+        # No .invalid files should exist
+        quarantined = list(mem_dir.glob("memory-config.json.invalid.*"))
+        assert len(quarantined) == 0, (
+            f"Config file was quarantined: {quarantined}"
+        )
+
+    def test_config_file_in_subdirectory_still_validated(self, tmp_path):
+        """memory-config.json inside a category subfolder should NOT be exempted."""
+        mem_dir = tmp_path / ".claude" / "memory" / "decisions"
+        mem_dir.mkdir(parents=True)
+        fake_config = mem_dir / "memory-config.json"
+        # Write a file that looks like config but is in a subfolder
+        fake_config.write_text(json.dumps({"retrieval": {"enabled": True}}))
+
+        hook_input = {
+            "tool_input": {
+                "file_path": str(fake_config),
+            }
+        }
+        stdout, stderr, rc = self._run_validate_hook(hook_input)
+        assert rc == 0
+        # Should be quarantined (not exempted) since it's in a subfolder
+        quarantined = list(mem_dir.glob("memory-config.json.invalid.*"))
+        assert len(quarantined) >= 1 or "deny" in stdout, (
+            "memory-config.json in subdirectory was incorrectly exempted"
+        )
+
+    def test_memory_files_still_validated(self, tmp_path):
+        """Regular memory files should still go through validation and quarantine."""
+        mem_dir = tmp_path / ".claude" / "memory" / "decisions"
+        mem_dir.mkdir(parents=True)
+        bad_file = mem_dir / "bad-decision.json"
+        # Write an invalid memory file (missing required fields)
+        bad_file.write_text(json.dumps({"title": "bad", "category": "decision"}))
+
+        hook_input = {
+            "tool_input": {
+                "file_path": str(bad_file),
+            }
+        }
+        stdout, stderr, rc = self._run_validate_hook(hook_input)
+        assert rc == 0
+
+        # The invalid memory file should be quarantined
+        quarantined = list(mem_dir.glob("bad-decision.json.invalid.*"))
+        assert len(quarantined) >= 1 or "deny" in stdout, (
+            "Invalid memory file was not quarantined"
+        )

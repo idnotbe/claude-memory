@@ -1,6 +1,8 @@
-# claude-memory -- Development Guide
+# claude-memory -- Development Guide (v5.0.0)
 
 Structured memory plugin for Claude Code. Auto-captures decisions, runbooks, constraints, tech debt, session summaries, and preferences as JSON files with intelligent retrieval.
+
+Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the previous 6 prompt-type Stop hooks.
 
 ## Golden Rules
 
@@ -12,24 +14,49 @@ Structured memory plugin for Claude Code. Auto-captures decisions, runbooks, con
 
 | Hook Type | What It Does |
 |-----------|-------------|
-| Stop (x1) | Deterministic triage hook (command type) -- keyword heuristic, evaluates all 6 categories |
+| Stop (x1) | Deterministic triage hook (command type) -- keyword heuristic, evaluates all 6 categories, outputs structured `<triage_data>` JSON + per-category context files for parallel subagent consumption |
 | UserPromptSubmit | Retrieval hook -- Python keyword matcher injects relevant memories |
 | PreToolUse:Write | Write guard -- blocks direct writes to memory directory |
-| PostToolUse:Write | Validation hook -- schema-validates any memory JSON, quarantines invalid |
+| PostToolUse:Write | Validation hook -- schema-validates any memory JSON, quarantines invalid (detection-only: PostToolUse deny cannot prevent writes, only inform) |
+
+### Write Actions
+
+`memory_write.py` supports 6 actions: `create`, `update`, `delete` (soft retire), `archive`, `unarchive`, and `restore`. The `delete` action sets `record_status="retired"` (soft delete with grace period). `archive`/`unarchive` handle long-term preservation (`active` <-> `archived`). `restore` transitions `retired` -> `active` (clears retirement fields, re-adds to index).
+
+### Parallel Per-Category Processing
+
+When the Stop hook triggers categories, it produces:
+1. **Human-readable message** (backwards-compatible) listing triggered categories
+2. **`<triage_data>` JSON block** with per-category scores, context file paths, and model assignments
+3. **Context files** at `/tmp/.memory-triage-context-<CATEGORY>.txt` with generous transcript excerpts
+
+The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku/sonnet/opus per `triage.parallel.category_models` config) for parallel drafting, then runs verification subagents, then saves via memory_write.py. See `skills/memory-management/SKILL.md` for the full 4-phase flow.
 
 ## Key Files
 
 | File | Role | Dependencies |
 |------|------|-------------|
-| hooks/scripts/memory_triage.py | Stop hook: keyword triage for 6 memory categories | stdlib only |
+| hooks/scripts/memory_triage.py | Stop hook: keyword triage for 6 categories + structured output + context files | stdlib only |
 | hooks/scripts/memory_retrieve.py | Keyword-based retrieval, injects context | stdlib only |
 | hooks/scripts/memory_index.py | Index rebuild, validate, query CLI | stdlib only |
 | hooks/scripts/memory_candidate.py | ACE candidate selection for update/delete | stdlib only |
-| hooks/scripts/memory_write.py | Schema-enforced create/update/delete | pydantic v2 |
+| hooks/scripts/memory_write.py | Schema-enforced CRUD + lifecycle (archive/unarchive/restore) | pydantic v2 |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
 
-Config: memory-config.json | Schemas: assets/schemas/*.schema.json | Manifest: plugin.json
+Config: memory-config.json | Defaults: assets/memory-config.default.json | Schemas: assets/schemas/*.schema.json | Manifest: plugin.json | Hooks: hooks/hooks.json
+
+`$CLAUDE_PLUGIN_ROOT` is set by Claude Code to the plugin's installation directory. It is used in all command files for portable script paths.
+
+### Venv Bootstrap
+
+`memory_write.py` and `memory_validate_hook.py` require pydantic v2. If pydantic is not importable, `memory_write.py` re-execs under `.venv/bin/python3` via `os.execv()`. The `.venv` is resolved relative to the plugin root (i.e., `~/.claude/plugins/claude-memory/.venv`), not the project's `.venv`.
+
+### Config Architecture
+
+Config keys fall into two categories:
+- **Script-read** (parsed by Python scripts): `triage.enabled`, `triage.max_messages`, `triage.thresholds.*`, `triage.parallel.*`, `retrieval.enabled`, `retrieval.max_inject`, `delete.grace_period_days`, `categories.*.description` (used by triage and retrieval scripts)
+- **Agent-interpreted** (read by LLM via SKILL.md instructions, not by Python): `memory_root`, `categories.*.enabled`, `categories.*.folder` (informational mapping), `categories.*.description` (category purpose text for triage context files and retrieval output), `categories.*.auto_capture`, `categories.*.retention_days`, `auto_commit`, `max_memories_per_category`, `retrieval.match_strategy`, `delete.archive_retired`
 
 ## Testing
 
@@ -54,22 +81,43 @@ Config: memory-config.json | Schemas: assets/schemas/*.schema.json | Manifest: p
 
 See TEST-PLAN.md for the full prioritized test plan with security considerations.
 
+## Development Workflow
+
+**Adding a new hook script:**
+1. Create the script in `hooks/scripts/`
+2. Add the hook entry to `hooks/hooks.json` (type, matcher, command, timeout)
+3. Update CLAUDE.md Key Files table
+4. Add tests in `tests/`
+
+**Modifying a hook script:**
+1. Make changes
+2. Run `python3 -m py_compile hooks/scripts/<script>.py` to verify syntax
+3. Run `pytest tests/ -v` to verify tests pass
+4. Update documentation if behavior changes
+
+**Updating schemas:**
+1. Modify Pydantic models in `memory_write.py` (source of truth for validation)
+2. Update corresponding JSON schema in `assets/schemas/`
+3. Update SKILL.md "Memory JSON Format" section
+4. Run tests to verify compatibility
+
 ## Security Considerations
 
-These are the known security-relevant gaps that tests must cover:
+These are the known security-relevant areas that tests must cover:
 
-1. **Prompt injection via memory titles** -- Memory entries are injected verbatim into context (memory_retrieve.py:141-145). Crafted titles can manipulate agent behavior. Titles are written unsanitized in memory_index.py:81 and memory_write.py.
+1. **Prompt injection via memory titles** -- Memory entries are injected into context by the retrieval hook. Crafted titles can manipulate agent behavior. Mitigation is multi-layered: `memory_write.py` auto-fix sanitizes titles on write (strips control chars, replaces ` -> ` with ` - `, removes `#tags:` substring), and `memory_retrieve.py` re-sanitizes on read as defense-in-depth. Remaining gap: `memory_index.py` rebuilds index from JSON without re-sanitizing (trusts write-side sanitization). Tests should verify the sanitization chain end-to-end.
 
-2. **Unclamped max_inject** -- memory_retrieve.py:65-76 reads max_inject from config without validation or clamping. Extreme values (negative, very large) cause unexpected behavior.
+2. **max_inject clamping** -- `memory_retrieve.py` clamps max_inject to [0, 20] with fallback to default 5 on parse failure. Tests should verify this clamping holds for edge cases (negative, very large, non-integer values).
 
 3. **Config manipulation** -- memory-config.json is read with no integrity check. Malicious config can disable retrieval, set extreme max_inject, or alter category behavior.
 
-4. **Index format fragility** -- Index lines use delimiter patterns. Titles containing these strings can corrupt parsing in memory_candidate.py.
+4. **Index format fragility** -- Index lines use delimiter patterns (` -> ` and `#tags:`). Titles containing these strings can corrupt parsing in `memory_candidate.py` and `memory_retrieve.py`.
 
 ## Quick Smoke Check
 
 ```bash
 # Compile check all scripts
+python3 -m py_compile hooks/scripts/memory_triage.py
 python3 -m py_compile hooks/scripts/memory_retrieve.py
 python3 -m py_compile hooks/scripts/memory_index.py
 python3 -m py_compile hooks/scripts/memory_candidate.py

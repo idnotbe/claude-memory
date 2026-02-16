@@ -7,7 +7,17 @@ arguments:
     required: false
 ---
 
-Parse the argument to determine which subcommand to run. If no argument is given (or argument is empty), run the **status** display. Otherwise, match the first flag:
+Parse the argument to determine which subcommand to run. If no argument is given (or argument is empty), run the **status** display. Otherwise, match the first flag.
+
+**Examples:**
+```
+/memory                          # Show status and statistics
+/memory --retire old-api-design  # Soft-delete a memory
+/memory --archive legacy-notes   # Preserve indefinitely
+/memory --restore old-api-design # Undo retirement within grace period
+/memory --gc                     # Clean up expired retirements
+/memory --list-archived          # See all archived memories
+```
 
 ## Status (no arguments)
 
@@ -63,23 +73,13 @@ Restore an archived memory to active status.
 
 ## --restore <slug>
 
-Restore a retired memory within the 30-day grace period.
+Restore a retired memory to active status.
 
 1. Find the memory file matching `<slug>` by scanning all category folders for `<slug>.json`
 2. If not found, report error
 3. Read the file. If record_status is not "retired", report error (can only restore retired memories)
-4. Check `retired_at` timestamp:
-   - If more than 30 days ago, report error: "Grace period expired. Memory is eligible for GC and cannot be restored."
-   - If more than 7 days ago, show staleness warning: "This memory was retired N days ago. Content may be outdated. Proceed?"
-5. Modify the JSON:
-   - Set `record_status` to `"active"`
-   - Remove `retired_at` and `retired_reason` fields
-   - Append to `changes[]`: `{ "date": "<now>", "summary": "Restored from retired by user" }`
-   - Increment `times_updated`
-6. Write the modified JSON to `/tmp/.memory-write-pending.json`
-7. Call: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_write.py --action update --category <cat> --target <path> --input /tmp/.memory-write-pending.json --hash <md5_of_original>`
-8. Rebuild index to include the restored entry: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_index.py --rebuild --root <memory_root>`
-9. Report result
+4. Call: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_write.py --action restore --target <path>`
+5. Report result
 
 ## --gc
 
@@ -87,12 +87,8 @@ Garbage collect retired memories past the 30-day grace period.
 
 1. Read `.claude/memory/memory-config.json` to get `delete.grace_period_days` (default: 30)
 2. Call: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_index.py --gc --root <memory_root>`
-3. If `--gc` is not yet supported by memory_index.py, perform manually:
-   - Scan all category folders for `.json` files
-   - For each file with `record_status == "retired"`, check `retired_at`
-   - If `retired_at` is older than grace_period_days, delete the file
-   - Report how many files were purged
-4. Report result: number of memories purged, remaining retired count
+3. Report result: number of memories purged, remaining retired count
+4. If files were deleted, suggest running `--rebuild` to update the index
 
 ## --list-archived
 

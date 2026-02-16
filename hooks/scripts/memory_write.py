@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Schema-enforced memory write tool for claude-memory plugin.
 
-Handles CREATE, UPDATE, and DELETE operations with Pydantic validation,
-mechanical merge protections, OCC, atomic writes, and index management.
+Handles CREATE, UPDATE, DELETE, ARCHIVE, UNARCHIVE, and RESTORE operations
+with Pydantic validation, mechanical merge protections, OCC, atomic writes,
+and index management.
 
 Usage:
   python3 memory_write.py --action create --category decision \
@@ -394,8 +395,7 @@ def add_to_index(index_path: Path, line: str) -> None:
     content = "\n".join(all_lines)
     if not content.endswith("\n"):
         content += "\n"
-    with open(index_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    atomic_write_text(str(index_path), content)
 
 
 def remove_from_index(index_path: Path, target_path: str) -> None:
@@ -405,8 +405,7 @@ def remove_from_index(index_path: Path, target_path: str) -> None:
     content = "\n".join(filtered)
     if not content.endswith("\n"):
         content += "\n"
-    with open(index_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    atomic_write_text(str(index_path), content)
 
 
 def update_index_entry(index_path: Path, old_path: str, new_line: str) -> None:
@@ -427,8 +426,7 @@ def update_index_entry(index_path: Path, old_path: str, new_line: str) -> None:
     content = "\n".join(new_lines)
     if not content.endswith("\n"):
         content += "\n"
-    with open(index_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    atomic_write_text(str(index_path), content)
 
 
 def _read_index_lines(index_path: Path) -> list[str]:
@@ -455,11 +453,10 @@ def file_md5(path: str) -> Optional[str]:
         return None
 
 
-def atomic_write_json(target: str, data: dict) -> None:
-    """Write JSON atomically via unique tmp + rename."""
+def atomic_write_text(target: str, content: str) -> None:
+    """Write text atomically via unique tmp + rename."""
     import tempfile
     target_dir = os.path.dirname(target) or "."
-    content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     fd, tmp_path = tempfile.mkstemp(dir=target_dir, suffix=".tmp", prefix=".mw-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -471,6 +468,12 @@ def atomic_write_json(target: str, data: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def atomic_write_json(target: str, data: dict) -> None:
+    """Write JSON atomically via unique tmp + rename."""
+    content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    atomic_write_text(target, content)
 
 
 # ---------------------------------------------------------------------------
@@ -1082,14 +1085,100 @@ def do_unarchive(args, memory_root: Path, index_path: Path) -> int:
     return 0
 
 
+def do_restore(args, memory_root: Path, index_path: Path) -> int:
+    """Handle --action restore (retired -> active)."""
+    target = Path(args.target)
+    target_abs = Path.cwd() / target if not target.is_absolute() else target
+
+    # Path traversal check
+    if _check_path_containment(target_abs, memory_root, "RESTORE"):
+        return 1
+
+    if not target_abs.exists():
+        print(f"RESTORE_ERROR\ntarget: {args.target}\nfix: File does not exist.")
+        return 1
+
+    # Read existing
+    try:
+        with open(target_abs, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"READ_ERROR\ntarget: {args.target}\nerror: {e}")
+        return 1
+
+    # Already active? Idempotent success
+    if data.get("record_status", "active") == "active":
+        result = {"status": "already_active", "target": str(target)}
+        print(json.dumps(result))
+        return 0
+
+    # Only retired memories can be restored
+    if data.get("record_status") != "retired":
+        print(
+            f"RESTORE_ERROR\ntarget: {args.target}\n"
+            f"record_status: {data.get('record_status', 'active')}\n"
+            f"fix: Only retired memories can be restored. "
+            f"Use --action unarchive for archived memories."
+        )
+        return 1
+
+    # Set active status
+    data["record_status"] = "active"
+    data["updated_at"] = now_utc()
+    # Clear retirement fields
+    data.pop("retired_at", None)
+    data.pop("retired_reason", None)
+
+    # Add change entry
+    changes = data.get("changes") or []
+    changes.append({
+        "date": now_utc(),
+        "summary": "Restored: returned to active from retired",
+        "field": "record_status",
+        "old_value": "retired",
+        "new_value": "active",
+    })
+    if len(changes) > CHANGES_CAP:
+        changes = changes[-CHANGES_CAP:]
+    data["changes"] = changes
+
+    rel_path = str(target)
+
+    # flock on index
+    with _flock_index(index_path):
+        atomic_write_json(str(target_abs), data)
+        index_line = build_index_line(data, rel_path)
+        add_to_index(index_path, index_line)
+
+    result = {
+        "status": "restored",
+        "target": str(target),
+    }
+    print(json.dumps(result))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _read_input(input_path: str) -> Optional[dict]:
-    """Read JSON from input temp file."""
+    """Read JSON from input temp file.
+
+    Validates that the input path is within /tmp/ and contains no path
+    traversal components (defense-in-depth against subagent manipulation).
+    """
+    # Defense-in-depth: input files must be in /tmp/ with no traversal
+    resolved = os.path.realpath(input_path)
+    if not resolved.startswith("/tmp/") or ".." in input_path:
+        print(
+            f"SECURITY_ERROR\npath: {input_path}\n"
+            f"resolved: {resolved}\n"
+            f"fix: Input file must be a /tmp/ path with no '..' components."
+        )
+        return None
     try:
-        with open(input_path, "r", encoding="utf-8") as f:
+        with open(resolved, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         print(
@@ -1232,7 +1321,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["create", "update", "delete", "archive", "unarchive"],
+        choices=["create", "update", "delete", "archive", "unarchive", "restore"],
     )
     parser.add_argument("--category", choices=list(CATEGORY_FOLDERS.keys()))
     parser.add_argument(
@@ -1243,7 +1332,7 @@ def main():
         "--hash",
         help="MD5 hash of existing file for OCC (update only)",
     )
-    parser.add_argument("--reason", help="Reason for deletion (delete only)")
+    parser.add_argument("--reason", help="Reason for deletion or archival (delete/archive)")
 
     args = parser.parse_args()
 
@@ -1272,6 +1361,8 @@ def main():
         return do_archive(args, memory_root, index_path)
     elif args.action == "unarchive":
         return do_unarchive(args, memory_root, index_path)
+    elif args.action == "restore":
+        return do_restore(args, memory_root, index_path)
 
     return 1
 

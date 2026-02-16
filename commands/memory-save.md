@@ -3,12 +3,20 @@ name: memory:save
 description: Manually save a memory to a specific category
 arguments:
   - name: category
-    description: Category name (session_summary, decision, runbook, constraint, tech_debt, preference, or custom)
+    description: Category name (session_summary, decision, runbook, constraint, tech_debt, preference)
     required: true
   - name: content
     description: What to remember (natural language description)
     required: true
 ---
+
+**Examples:**
+```
+/memory:save decision "We chose Vitest over Jest for speed and ESM support"
+/memory:save preference "Always use single quotes and 2-space indentation"
+/memory:save runbook "Docker build fails with OOM -- fix: increase Docker memory to 4GB"
+/memory:save constraint "Discourse Managed Pro does not allow custom plugins"
+```
 
 Save a memory manually:
 

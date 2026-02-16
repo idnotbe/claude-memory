@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import collections
 import json
+import math
 import os
 import re
 import select
@@ -463,16 +464,38 @@ def set_stop_flag(cwd: str) -> None:
 # Configuration
 # ---------------------------------------------------------------------------
 
+VALID_MODELS = {"haiku", "sonnet", "opus"}
+
+DEFAULT_PARALLEL_CONFIG: dict = {
+    "enabled": True,
+    "category_models": {
+        "session_summary": "haiku",
+        "decision": "sonnet",
+        "runbook": "haiku",
+        "constraint": "sonnet",
+        "tech_debt": "haiku",
+        "preference": "haiku",
+    },
+    "verification_model": "sonnet",
+    "default_model": "haiku",
+}
+
+VALID_CATEGORY_KEYS = set(DEFAULT_PARALLEL_CONFIG["category_models"].keys())
+
+
 def load_config(cwd: str) -> dict:
     """Load triage configuration from memory-config.json.
 
-    Returns a dict with keys: enabled, max_messages, thresholds.
+    Returns a dict with keys: enabled, max_messages, thresholds, parallel,
+    category_descriptions.
     Falls back to defaults on any error.
     """
     config: dict = {
         "enabled": True,
         "max_messages": DEFAULT_MAX_MESSAGES,
         "thresholds": dict(DEFAULT_THRESHOLDS),
+        "parallel": _deep_copy_parallel_defaults(),
+        "category_descriptions": {},
     }
 
     config_path = Path(cwd) / ".claude" / "memory" / "memory-config.json"
@@ -501,18 +524,239 @@ def load_config(cwd: str) -> dict:
         except (ValueError, TypeError):
             pass
 
-    # thresholds
+    # thresholds (case-insensitive key matching: accept both UPPERCASE and lowercase)
     if "thresholds" in triage and isinstance(triage["thresholds"], dict):
+        # Normalize user keys to UPPERCASE for matching against DEFAULT_THRESHOLDS
+        user_thresholds = {k.upper(): v for k, v in triage["thresholds"].items()}
         for cat, default_val in DEFAULT_THRESHOLDS.items():
-            raw_val = triage["thresholds"].get(cat)
+            raw_val = user_thresholds.get(cat)
             if raw_val is not None:
                 try:
                     val = float(raw_val)
+                    # Reject NaN and Inf (CPython json.loads accepts these)
+                    if math.isnan(val) or math.isinf(val):
+                        continue
                     config["thresholds"][cat] = max(0.0, min(1.0, val))
                 except (ValueError, TypeError):
                     pass
 
+    # parallel config
+    config["parallel"] = _parse_parallel_config(triage.get("parallel"))
+
+    # category descriptions (agent-interpreted, not used by triage scoring)
+    categories_raw = raw.get("categories", {})
+    if isinstance(categories_raw, dict):
+        descs: dict[str, str] = {}
+        for cat_key, cat_val in categories_raw.items():
+            if isinstance(cat_val, dict):
+                desc = cat_val.get("description", "")
+                desc = desc if isinstance(desc, str) else ""
+                descs[cat_key.lower()] = desc[:500]
+        config["category_descriptions"] = descs
+
     return config
+
+
+def _deep_copy_parallel_defaults() -> dict:
+    """Return a fresh copy of DEFAULT_PARALLEL_CONFIG."""
+    return {
+        "enabled": DEFAULT_PARALLEL_CONFIG["enabled"],
+        "category_models": dict(DEFAULT_PARALLEL_CONFIG["category_models"]),
+        "verification_model": DEFAULT_PARALLEL_CONFIG["verification_model"],
+        "default_model": DEFAULT_PARALLEL_CONFIG["default_model"],
+    }
+
+
+def _parse_parallel_config(raw: object) -> dict:
+    """Parse and validate the triage.parallel config section.
+
+    Returns a validated parallel config dict. Falls back to defaults
+    for any invalid or missing values.
+    """
+    defaults = _deep_copy_parallel_defaults()
+
+    if not isinstance(raw, dict):
+        return defaults
+
+    # enabled
+    if "enabled" in raw:
+        defaults["enabled"] = bool(raw["enabled"])
+
+    # default_model (parse first, used as fallback for category_models)
+    if "default_model" in raw:
+        val = str(raw["default_model"]).lower()
+        if val in VALID_MODELS:
+            defaults["default_model"] = val
+
+    # verification_model
+    if "verification_model" in raw:
+        val = str(raw["verification_model"]).lower()
+        if val in VALID_MODELS:
+            defaults["verification_model"] = val
+
+    # category_models
+    if "category_models" in raw and isinstance(raw["category_models"], dict):
+        for cat_key in VALID_CATEGORY_KEYS:
+            raw_val = raw["category_models"].get(cat_key)
+            if raw_val is not None:
+                val = str(raw_val).lower()
+                if val in VALID_MODELS:
+                    defaults["category_models"][cat_key] = val
+                # Invalid model value: keep the default for this category
+
+    return defaults
+
+
+# ---------------------------------------------------------------------------
+# Context file generation
+# ---------------------------------------------------------------------------
+
+# Lines of context to include before/after each keyword match
+CONTEXT_WINDOW_LINES = 10
+
+# Maximum context file size in bytes (prevents oversized subagent prompts)
+MAX_CONTEXT_FILE_BYTES = 50_000  # 50 KB
+
+
+def _find_match_line_indices(lines: list[str], category: str) -> list[int]:
+    """Find line indices where primary patterns match for a category."""
+    cfg = CATEGORY_PATTERNS.get(category)
+    if not cfg:
+        return []
+
+    indices: list[int] = []
+    for idx, line in enumerate(lines):
+        for pat in cfg["primary"]:
+            if pat.search(line):
+                indices.append(idx)
+                break  # One match per line is enough
+    return indices
+
+
+def _extract_context_excerpt(
+    lines: list[str],
+    match_indices: list[int],
+    window: int = CONTEXT_WINDOW_LINES,
+) -> str:
+    """Extract merged context windows around match indices.
+
+    Returns a single string with non-overlapping excerpts separated by
+    '---' markers. Each excerpt includes +/- window lines around the match.
+    """
+    if not match_indices or not lines:
+        return ""
+
+    # Build merged ranges (avoid overlapping excerpts)
+    ranges: list[tuple[int, int]] = []
+    for idx in sorted(set(match_indices)):
+        start = max(0, idx - window)
+        end = min(len(lines), idx + window + 1)
+        if ranges and start <= ranges[-1][1]:
+            # Merge with previous range
+            ranges[-1] = (ranges[-1][0], end)
+        else:
+            ranges.append((start, end))
+
+    parts: list[str] = []
+    for start, end in ranges:
+        parts.append("\n".join(lines[start:end]))
+
+    return "\n---\n".join(parts)
+
+
+def write_context_files(
+    text: str,
+    metrics: dict[str, int],
+    results: list[dict],
+    *,
+    category_descriptions: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Write per-category context files to /tmp/.
+
+    Returns a dict mapping category name -> context file path.
+    For text-based categories, includes generous transcript excerpts
+    around keyword matches. For SESSION_SUMMARY, includes activity metrics.
+    """
+    lines = text.split("\n")
+    context_paths: dict[str, str] = {}
+
+    for r in results:
+        category = r["category"]
+        cat_lower = category.lower()
+        score = r["score"]
+        snippets = r.get("snippets", [])
+        path = f"/tmp/.memory-triage-context-{cat_lower}.txt"
+
+        try:
+            parts: list[str] = [
+                f"Category: {cat_lower}",
+                f"Score: {score:.2f}",
+            ]
+
+            # Add description if provided
+            if category_descriptions:
+                desc = category_descriptions.get(cat_lower, "")
+                if desc:
+                    parts.append(f"Description: {_sanitize_snippet(desc)}")
+
+            parts.append("")
+
+            parts.append("<transcript_data>")
+            if category == "SESSION_SUMMARY":
+                parts.append("Activity Metrics:")
+                parts.append(f"  Tool uses: {metrics.get('tool_uses', 0)}")
+                parts.append(f"  Distinct tools: {metrics.get('distinct_tools', 0)}")
+                parts.append(f"  Exchanges: {metrics.get('exchanges', 0)}")
+            else:
+                # Text-based category: include generous context excerpts
+                match_indices = _find_match_line_indices(lines, category)
+                excerpt = _extract_context_excerpt(lines, match_indices)
+                if excerpt:
+                    parts.append("Relevant transcript excerpts:")
+                    parts.append("")
+                    parts.append(excerpt)
+            parts.append("</transcript_data>")
+
+            if snippets:
+                parts.append("")
+                parts.append("Key snippets:")
+                for s in snippets:
+                    parts.append(f"  - {s}")
+
+            content = "\n".join(parts)
+
+            # Truncate if exceeds max size (prevents oversized subagent prompts)
+            content_bytes = content.encode("utf-8")
+            if len(content_bytes) > MAX_CONTEXT_FILE_BYTES:
+                # Truncate at byte boundary, decode safely
+                truncated = content_bytes[:MAX_CONTEXT_FILE_BYTES].decode(
+                    "utf-8", errors="ignore"
+                )
+                content = truncated + "\n</transcript_data>\n[Truncated: context exceeded 50KB]"
+
+            # Secure file creation: O_CREAT|O_WRONLY|O_TRUNC|O_NOFOLLOW
+            # prevents symlink attacks and sets restrictive permissions
+            fd = os.open(
+                path,
+                os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+                0o600,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+
+            context_paths[cat_lower] = path
+        except OSError:
+            # Non-critical: subagent can still work without context file
+            pass
+
+    return context_paths
 
 
 # ---------------------------------------------------------------------------
@@ -539,11 +783,21 @@ def _sanitize_snippet(text: str) -> str:
     return text.strip()[:120]
 
 
-def format_block_message(results: list[dict]) -> str:
+def format_block_message(
+    results: list[dict],
+    context_paths: dict[str, str],
+    parallel_config: dict,
+    *,
+    category_descriptions: dict[str, str] | None = None,
+) -> str:
     """Format the stderr message for exit 2 (block stop).
 
-    Produces a human-readable message that Claude can understand and act on.
+    Produces a human-readable message that Claude can understand and act on,
+    followed by a structured <triage_data> JSON block for programmatic parsing.
     """
+    if not results:
+        return ""
+
     lines: list[str] = [
         "The following items should be saved as memories before stopping:",
     ]
@@ -551,17 +805,69 @@ def format_block_message(results: list[dict]) -> str:
         category = r["category"]
         score = r["score"]
         snippets = r.get("snippets", [])
+        # Build description hint for human-readable line
+        desc_hint = ""
+        if category_descriptions:
+            desc = category_descriptions.get(category.lower(), "")
+            if desc:
+                # Sanitize description (untrusted input)
+                desc_hint = f" ({_sanitize_snippet(desc)})"
         if snippets:
             summary = _sanitize_snippet(snippets[0])
-            lines.append(f"- [{category}] {summary} (score: {score:.2f})")
+            lines.append(f"- [{category}]{desc_hint} {summary} (score: {score:.2f})")
         else:
-            lines.append(f"- [{category}] Significant activity detected (score: {score:.2f})")
+            lines.append(f"- [{category}]{desc_hint} Significant activity detected (score: {score:.2f})")
 
     lines.append("")
     lines.append(
         "Use the memory-management skill to save each item. "
         "After saving, you may stop."
     )
+
+    # Build structured triage data
+    triage_categories = []
+    for r in results:
+        category = r["category"]
+        # Emit lowercase in structured data to match downstream scripts
+        # (memory_candidate.py argparse expects lowercase category names)
+        cat_lower = category.lower()
+        entry = {
+            "category": cat_lower,
+            "score": round(r["score"], 4),
+        }
+        if category_descriptions:
+            desc = category_descriptions.get(cat_lower, "")
+            if desc:
+                entry["description"] = desc
+        ctx_path = context_paths.get(cat_lower)
+        if ctx_path:
+            entry["context_file"] = ctx_path
+        triage_categories.append(entry)
+
+    triage_data = {
+        "categories": triage_categories,
+        "parallel_config": {
+            "enabled": parallel_config.get("enabled", True),
+            "category_models": parallel_config.get(
+                "category_models",
+                DEFAULT_PARALLEL_CONFIG["category_models"],
+            ),
+            "verification_model": parallel_config.get(
+                "verification_model",
+                DEFAULT_PARALLEL_CONFIG["verification_model"],
+            ),
+            "default_model": parallel_config.get(
+                "default_model",
+                DEFAULT_PARALLEL_CONFIG["default_model"],
+            ),
+        },
+    }
+
+    lines.append("")
+    lines.append("<triage_data>")
+    lines.append(json.dumps(triage_data, indent=2))
+    lines.append("</triage_data>")
+
     return "\n".join(lines)
 
 
@@ -635,7 +941,20 @@ def _run_triage() -> int:
     if results:
         # Block stop: create flag and output message
         set_stop_flag(cwd)
-        message = format_block_message(results)
+
+        # Write per-category context files for subagent consumption
+        cat_descs = config.get("category_descriptions", {})
+        context_paths = write_context_files(
+            text, metrics, results,
+            category_descriptions=cat_descs,
+        )
+
+        # Format message with structured triage data
+        parallel_config = config.get("parallel", _deep_copy_parallel_defaults())
+        message = format_block_message(
+            results, context_paths, parallel_config,
+            category_descriptions=cat_descs,
+        )
         print(message, file=sys.stderr)
         return 2
     else:

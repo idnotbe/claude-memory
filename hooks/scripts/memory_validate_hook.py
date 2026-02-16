@@ -35,6 +35,9 @@ _DC = ".clau" + "de"
 _MEM = "mem" + "ory"
 MEMORY_DIR_SEGMENT = "/{}/{}/".format(_DC, _MEM)
 
+# Config file basename (runtime construction to match guardian convention)
+_CONFIG_BASENAME = "mem" + "ory-config.json"
+
 # Reverse mapping: folder name -> category value
 FOLDER_TO_CATEGORY = {
     "sessions": "session_summary",
@@ -155,6 +158,17 @@ def main():
         "WARNING: Write to memory file bypassed PreToolUse guard: {}".format(resolved),
         file=sys.stderr,
     )
+
+    # Config file is not a memory record -- skip schema validation.
+    # Only exempt when the file is directly in the memory root, not in a subfolder.
+    if os.path.basename(resolved) == _CONFIG_BASENAME:
+        norm = resolved.replace(os.sep, "/")
+        idx = norm.find(MEMORY_DIR_SEGMENT)
+        if idx >= 0:
+            after_mem = norm[idx + len(MEMORY_DIR_SEGMENT):]
+            if "/" not in after_mem:
+                sys.exit(0)
+        # If in a subfolder, fall through to validation
 
     # Non-JSON files in memory dir (e.g. index.md) should be blocked outright
     if not resolved.endswith(".json"):

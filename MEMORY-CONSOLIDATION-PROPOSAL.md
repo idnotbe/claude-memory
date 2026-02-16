@@ -1,3 +1,13 @@
+> **WARNING: HISTORICAL DOCUMENT -- DO NOT IMPLEMENT FROM THIS SPEC**
+>
+> This is a historical design document for ACE v4.2. The v5.0.0 architecture differs significantly:
+> - **Hooks**: 1 command-type Stop hook replaced the 6 prompt-type hooks described here
+> - **CUD verification**: 2-layer system (Python + subagent) replaced the 3-layer system (Python + Sonnet triage + Opus write-phase)
+> - **Triage output**: `<triage_data>` JSON with categories/scores/context_files replaced `lifecycle_event`/`cud_recommendation` fields (which no longer exist)
+> - **Locking**: `mkdir`-based portable locking replaced `fcntl.flock`
+>
+> See README.md for current documentation and CLAUDE.md for current architecture.
+
 # Memory Consolidation Proposal: Adaptive Consolidation Engine (ACE)
 
 **Version**: 4.2 (Final)

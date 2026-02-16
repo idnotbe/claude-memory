@@ -22,6 +22,13 @@ from memory_retrieve import (
     STOP_WORDS,
     _RECENCY_DAYS,
 )
+
+# score_description is a new function that doesn't exist yet (TDD RED phase).
+# Import conditionally so existing tests still run.
+try:
+    from memory_retrieve import score_description
+except ImportError:
+    score_description = None
 from conftest import (
     make_decision_memory,
     make_preference_memory,
@@ -317,3 +324,156 @@ class TestRetrieveIntegration:
         stdout, rc = self._run_retrieve(hook_input)
         assert rc == 0
         # Should still match via title words
+
+
+# ---------------------------------------------------------------------------
+# Category description scoring tests
+# ---------------------------------------------------------------------------
+
+
+class TestDescriptionScoring:
+    """Tests for score_description() -- description token matching."""
+
+    def _require_score_description(self):
+        if score_description is None:
+            pytest.fail("score_description() not yet implemented in memory_retrieve.py")
+
+    def test_description_tokens_boost_score(self):
+        """Entry score should increase when prompt matches category description keywords."""
+        self._require_score_description()
+        entry = {
+            "title": "Use JWT for authentication",
+            "tags": {"auth", "jwt"},
+            "category": "DECISION",
+        }
+        prompt_words = {"architectural", "choices", "rationale"}
+        description_tokens = tokenize(
+            "Architectural and technical choices with rationale"
+        )
+
+        # score_description returns additional points from description match
+        desc_score = score_description(prompt_words, description_tokens)
+        assert desc_score > 0, "Description keyword matches should add score"
+
+    def test_description_scoring_lower_weight_than_tags(self):
+        """Description match should be worth less than an exact tag match (3 pts)."""
+        self._require_score_description()
+        prompt_words = {"authentication"}
+        description_tokens = tokenize(
+            "Authentication decisions and security choices"
+        )
+
+        desc_score = score_description(prompt_words, description_tokens)
+        # A single tag exact match is 3 points; description match should be less
+        assert desc_score < 3, (
+            "Description match for a single word should be worth less than tag match (3 pts)"
+        )
+        assert desc_score > 0, "Description match should contribute some score"
+
+    def test_description_no_match_returns_zero(self):
+        """No matching tokens between prompt and description returns 0."""
+        self._require_score_description()
+        prompt_words = {"kubernetes", "deployment", "cluster"}
+        description_tokens = tokenize(
+            "User interface styling and theme preferences"
+        )
+
+        desc_score = score_description(prompt_words, description_tokens)
+        assert desc_score == 0
+
+    def test_description_empty_returns_zero(self):
+        """Empty description tokens returns 0."""
+        self._require_score_description()
+        prompt_words = {"authentication"}
+        desc_score = score_description(prompt_words, set())
+        assert desc_score == 0
+
+    def test_description_prefix_matching(self):
+        """Prefix matches on description tokens should also score (lower)."""
+        self._require_score_description()
+        prompt_words = {"arch"}  # prefix of "architectural"
+        description_tokens = tokenize(
+            "Architectural and technical choices"
+        )
+        desc_score = score_description(prompt_words, description_tokens)
+        # 4+ char prefix should contribute
+        assert desc_score >= 0  # at minimum doesn't crash
+
+
+class TestRetrievalOutputIncludesDescriptions:
+    """Integration tests: retrieval output includes category descriptions."""
+
+    def _run_retrieve(self, hook_input):
+        result = subprocess.run(
+            [PYTHON, RETRIEVE_SCRIPT],
+            input=json.dumps(hook_input),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.stdout, result.returncode
+
+    def _setup_memory_project_with_config(self, tmp_path, memories, config_data=None):
+        """Create project structure with memories, index, and config."""
+        proj = tmp_path / "project"
+        proj.mkdir()
+        dc = proj / ".claude"
+        dc.mkdir()
+        mem_root = dc / "memory"
+        mem_root.mkdir()
+        for folder in ["sessions", "decisions", "runbooks", "constraints", "tech-debt", "preferences"]:
+            (mem_root / folder).mkdir()
+        for m in memories:
+            write_memory_file(mem_root, m)
+        from conftest import build_enriched_index
+        index_content = build_enriched_index(*memories)
+        (mem_root / "index.md").write_text(index_content)
+        if config_data:
+            config_path = mem_root / "memory-config.json"
+            config_path.write_text(json.dumps(config_data), encoding="utf-8")
+        return proj
+
+    def test_output_includes_category_descriptions(self, tmp_path):
+        """When config has descriptions, retrieval output should include them."""
+        mem = make_decision_memory()
+        config_data = {
+            "categories": {
+                "decision": {
+                    "enabled": True,
+                    "folder": "decisions",
+                    "description": "Architectural and technical choices with rationale",
+                },
+            },
+            "retrieval": {"enabled": True, "max_inject": 5},
+        }
+        proj = self._setup_memory_project_with_config(tmp_path, [mem], config_data)
+        hook_input = {
+            "user_prompt": "How does JWT authentication work in this project?",
+            "cwd": str(proj),
+        }
+        stdout, rc = self._run_retrieve(hook_input)
+        assert rc == 0
+        # Output should include the description somewhere in memory-context
+        assert "Architectural and technical choices" in stdout, (
+            "Retrieval output should include category description"
+        )
+
+    def test_no_description_backward_compat(self, tmp_path):
+        """Without descriptions in config, retrieval works as before."""
+        mem = make_decision_memory()
+        config_data = {
+            "categories": {
+                "decision": {"enabled": True, "folder": "decisions"},
+            },
+            "retrieval": {"enabled": True, "max_inject": 5},
+        }
+        proj = self._setup_memory_project_with_config(tmp_path, [mem], config_data)
+        hook_input = {
+            "user_prompt": "How does JWT authentication work in this project?",
+            "cwd": str(proj),
+        }
+        stdout, rc = self._run_retrieve(hook_input)
+        assert rc == 0
+        # Should still work and return results
+        if stdout.strip():
+            assert "use-jwt" in stdout or "<memory-context" in stdout

@@ -17,6 +17,9 @@ _MARKER = "/{}/" + "{}" + "/"
 MEMORY_DIR_SEGMENT = _MARKER.format(_DOT_CLAUDE, _MEMORY)
 MEMORY_DIR_TAIL = "/{}/{}".format(_DOT_CLAUDE, _MEMORY)
 
+# Config file basename (runtime construction to match guardian convention)
+_CONFIG_BASENAME = "mem" + "ory-config.json"
+
 
 def main():
     try:
@@ -36,14 +39,30 @@ def main():
         resolved = os.path.normpath(os.path.abspath(file_path))
 
     # Allow writes to temp staging files used by the LLM
-    # Accept /tmp/.memory-write-pending*.json (any PID/session suffix)
+    # Accept /tmp/.memory-write-pending*.json, /tmp/.memory-draft-*.json,
+    # and /tmp/.memory-triage-context-*.txt (parallel triage temp files)
     basename = os.path.basename(resolved)
-    if (resolved.startswith("/tmp/")
-            and basename.startswith(".memory-write-pending")
-            and basename.endswith(".json")):
-        sys.exit(0)
+    if resolved.startswith("/tmp/"):
+        if (basename.startswith(".memory-write-pending") and basename.endswith(".json")):
+            sys.exit(0)
+        if (basename.startswith(".memory-draft-") and basename.endswith(".json")):
+            sys.exit(0)
+        if (basename.startswith(".memory-triage-context-") and basename.endswith(".txt")):
+            sys.exit(0)
 
+    # Allow writes to the plugin config file (not a memory record).
+    # Only exempt when the file is directly in the memory root, not in a subfolder
+    # (prevents bypass via decisions/memory-config.json etc.)
     normalized = resolved.replace(os.sep, "/")
+    if basename == _CONFIG_BASENAME:
+        idx = normalized.find(MEMORY_DIR_SEGMENT)
+        if idx >= 0:
+            after_mem = normalized[idx + len(MEMORY_DIR_SEGMENT):]
+            if "/" not in after_mem:
+                sys.exit(0)
+        else:
+            # Not in a memory directory at all -- allow (would pass anyway)
+            sys.exit(0)
     if MEMORY_DIR_SEGMENT in normalized or normalized.endswith(MEMORY_DIR_TAIL):
         plugin_root = "$CLAUDE_PLUGIN_ROOT"
         reason = (

@@ -10,6 +10,13 @@ arguments:
     required: false
 ---
 
+**Examples:**
+```
+/memory:search JWT authentication      # Find memories about JWT auth
+/memory:search rate limit              # Find rate limit related memories
+/memory:search --include-retired docker # Include retired/archived in search
+```
+
 Search for memories matching the query:
 
 1. Read `.claude/memory/index.md` for quick title/tag matching
@@ -30,6 +37,12 @@ Search for memories matching the query:
 in all category folders (not just the index) to find retired and archived memories
 matching the query. These are marked with their record_status in the output.
 
-Limit to 10 results maximum. Sort by relevance (tag matches score highest at 3 points,
-title word matches at 2 points, content matches at 1 point, with a recency bonus
-for memories updated within 30 days).
+Limit to 10 results maximum. Sort by relevance using index-based scoring:
+- Exact tag match: 3 points
+- Exact title word match: 2 points
+- Prefix match (4+ characters): 1 point
+- Recency bonus: +1 for memories updated within 30 days
+
+The scoring algorithm operates on index.md entries (titles and tags) only.
+For full content search, the Glob+Grep fallback path (step 3) provides
+broader matching without numeric scoring.
