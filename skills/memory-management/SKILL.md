@@ -187,7 +187,13 @@ Reject any draft with a non-conforming path.
 
 State the chosen action and one-line justification before each memory_write.py call.
 
-After all saves, enforce session rolling window if session_summary was created.
+After all saves, if session_summary was created, enforce the rolling window:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_enforce.py" --category session_summary
+```
+
+This replaces the previous inline Python enforcement. The script automatically reads `max_retained` from `memory-config.json` and retires the oldest sessions to stay within the limit.
 
 ### Write Pipeline Protections
 
@@ -266,12 +272,8 @@ The rolling window is enforced AFTER a new session summary is successfully creat
 
 1. **Count active sessions**: Scan `sessions/` folder, count only files with `record_status == "active"` (or field absent for pre-v4 files).
 2. **Check limit**: If active count > `max_retained` (default 5), identify the oldest session by `created_at` timestamp.
-3. **Deletion guard**: Before retiring the oldest session, check if it contains unique content not captured in other memories:
-   - Extract key items from the session's `completed[]`, `blockers[]`, and `next_actions[]` fields.
-   - Compare against index.md entries and other active session summaries.
-   - If the session references decisions, constraints, or tech debt items that do NOT appear in their respective category folders, log a warning to stderr: `"WARNING: Session <slug> contains unique content not captured elsewhere: <items>. Consider saving these before retirement."`
-   - The warning is informational only -- retirement still proceeds. The content is preserved during the 30-day grace period.
-4. **Retire oldest**: Call `memory_write.py --action retire --target <path> --reason "Session rolling window: exceeded max_retained limit"`.
+3. **Deletion guard**: Before retiring, warn if the session contains unique content not captured elsewhere. The warning is informational only -- retirement still proceeds. The content is preserved during the 30-day grace period.
+4. **Retire oldest**: Handled automatically by `memory_enforce.py`. The script acquires the index lock, scans for active sessions, and retires excess sessions in a single atomic operation. The retirement reason is "Session rolling window: exceeded max_retained limit".
 
 ### Configuration
 

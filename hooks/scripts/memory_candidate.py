@@ -18,7 +18,8 @@ import re
 import sys
 from pathlib import Path
 
-# Same stop words as memory_retrieve.py
+# Stop words for candidate scoring (subset of memory_search_engine.py's set;
+# engine adds 2-char stopwords 'as','am','us','vs' needed for FTS5's lower threshold)
 STOP_WORDS = frozenset({
     "a", "an", "the", "is", "was", "are", "were", "be", "been", "being",
     "do", "does", "did", "have", "has", "had", "will", "would", "could",
@@ -68,6 +69,10 @@ VALID_LIFECYCLE_EVENTS = frozenset({
 })
 
 # Tokenizer: extract word-like tokens (letters and digits)
+# NOTE: Uses len(w) > 2 filter (3+ char tokens). This intentionally differs from
+# memory_search_engine.py / memory_retrieve.py which use len(w) > 1 (2+ char tokens).
+# Shorter tokens improve retrieval recall but would add noise to candidate selection
+# scoring, where precision matters more. Do NOT "sync" these without testing impact.
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 # Index line parser: - [CAT] title -> path #tags:t1,t2,...

@@ -6,9 +6,9 @@ Issue 3: max_inject value clamping [0, 20]
 Issue 4: mkdir-based lock replacing flock
 Issue 5: Prompt injection defense (title sanitization + structured output)
 
-Tests marked with @pytest.mark.xfail(reason="pre-fix") are expected to FAIL
-on the current (unfixed) code and PASS after the corresponding fix is applied.
-When a fix is implemented, remove its xfail markers so CI catches regressions.
+Tests were originally marked with @pytest.mark.xfail(reason="pre-fix") before
+fixes were applied. All fixes are now implemented; xfail markers removed so
+regressions are caught properly.
 """
 
 import json
@@ -260,7 +260,6 @@ class TestIssue2ResolveMemoryRoot:
         assert "memory" in str(root)
         assert str(idx).endswith("index.md")
 
-    @pytest.mark.xfail(reason="pre-fix: fallback allows arbitrary paths")
     def test_path_without_marker_fails_closed(self, tmp_path):
         """Path without .claude/memory marker should fail with exit(1)."""
         from memory_write import _resolve_memory_root
@@ -316,7 +315,6 @@ class TestIssue2ResolveMemoryRoot:
         # Should find the first .claude/memory marker
         assert "memory" in str(root)
 
-    @pytest.mark.xfail(reason="pre-fix: fallback derives root from arbitrary path")
     def test_external_path_rejected_via_write(self, tmp_path):
         """Write operation with path outside .claude/memory/ should fail."""
         proj = tmp_path / "project"
@@ -343,7 +341,6 @@ class TestIssue2ResolveMemoryRoot:
         assert rc == 1
         assert "PATH_ERROR" in stdout
 
-    @pytest.mark.xfail(reason="pre-fix: fallback does not raise SystemExit")
     def test_error_message_includes_example(self, tmp_path):
         """Error message should include an example of correct path format."""
         from memory_write import _resolve_memory_root
@@ -380,7 +377,6 @@ class TestIssue3MaxInjectClamp:
         }
         return _run_retrieve(hook_input)
 
-    @pytest.mark.xfail(reason="pre-fix: negative max_inject used raw in slice")
     def test_max_inject_negative_clamped_to_zero(self, tmp_path):
         """max_inject: -1 should be clamped to 0 (injection disabled, exit 0)."""
         stdout, stderr, rc = self._run_with_config(
@@ -390,7 +386,6 @@ class TestIssue3MaxInjectClamp:
         # Clamped to 0 -> exit early, no output
         assert stdout.strip() == "" or "memory" not in stdout.lower()
 
-    @pytest.mark.xfail(reason="pre-fix: max_inject=0 produces empty output but still prints header")
     def test_max_inject_zero_exits_early(self, tmp_path):
         """max_inject: 0 should disable injection entirely."""
         stdout, stderr, rc = self._run_with_config(
@@ -413,7 +408,6 @@ class TestIssue3MaxInjectClamp:
         )
         assert rc == 0
 
-    @pytest.mark.xfail(reason="pre-fix: max_inject not clamped, allows 100+")
     def test_max_inject_hundred_clamped_to_twenty(self, tmp_path):
         """max_inject: 100 should be clamped to 20."""
         # Generate enough memories to test the limit
@@ -434,10 +428,9 @@ class TestIssue3MaxInjectClamp:
         # Count the memory output lines (they start with "- [" in current format).
         if stdout.strip():
             mem_lines = [l for l in stdout.split("\n")
-                         if l.strip().startswith("- [")]
+                         if l.strip().startswith("<result ")]
             assert len(mem_lines) <= 20
 
-    @pytest.mark.xfail(reason="pre-fix: string max_inject causes TypeError at slice")
     def test_max_inject_string_invalid_type(self, tmp_path):
         """max_inject: "five" should produce warning and use default 5."""
         stdout, stderr, rc = self._run_with_config(
@@ -454,7 +447,6 @@ class TestIssue3MaxInjectClamp:
         )
         assert rc == 0
 
-    @pytest.mark.xfail(reason="pre-fix: float max_inject causes TypeError at slice")
     def test_max_inject_float_coerced(self, tmp_path):
         """max_inject: 5.7 should be coerced to int(5) = 5."""
         stdout, stderr, rc = self._run_with_config(
@@ -482,7 +474,6 @@ class TestIssue3MaxInjectClamp:
         stdout, stderr, rc = _run_retrieve(hook_input)
         assert rc == 0
 
-    @pytest.mark.xfail(reason="pre-fix: string max_inject causes TypeError at slice")
     def test_max_inject_string_number_coerced(self, tmp_path):
         """max_inject: "5" (string) should be coerced to int 5."""
         stdout, stderr, rc = self._run_with_config(
@@ -512,11 +503,11 @@ class TestIssue4MkdirLock:
 
     def test_lock_acquire_and_release(self, tmp_path):
         """Lock should be acquired (dir created) and released (dir removed)."""
-        from memory_write import _flock_index
+        from memory_write import FlockIndex
 
         index_path = tmp_path / "index.md"
         index_path.write_text("# Index")
-        lock = _flock_index(index_path)
+        lock = FlockIndex(index_path)
 
         with lock:
             # After fix: .index.lockdir should exist
@@ -535,18 +526,18 @@ class TestIssue4MkdirLock:
 
     def test_lock_context_manager_protocol(self, tmp_path):
         """Lock should work as context manager without errors."""
-        from memory_write import _flock_index
+        from memory_write import FlockIndex
 
         index_path = tmp_path / "index.md"
         index_path.write_text("# Index")
 
         # Should not raise
-        with _flock_index(index_path) as ctx:
+        with FlockIndex(index_path) as ctx:
             assert ctx is not None
 
     def test_stale_lock_detection(self, tmp_path):
         """Stale lock (>60s old) should be broken and reacquired."""
-        from memory_write import _flock_index
+        from memory_write import FlockIndex
 
         index_path = tmp_path / "index.md"
         index_path.write_text("# Index")
@@ -558,7 +549,7 @@ class TestIssue4MkdirLock:
         stale_time = time.time() - 120  # 2 minutes ago
         os.utime(lock_dir, (stale_time, stale_time))
 
-        lock = _flock_index(index_path)
+        lock = FlockIndex(index_path)
         with lock:
             # After fix: stale lock should be broken and re-acquired
             if hasattr(lock, 'acquired'):
@@ -566,7 +557,7 @@ class TestIssue4MkdirLock:
 
     def test_lock_timeout(self, tmp_path):
         """Lock held by another process should timeout after ~5s."""
-        from memory_write import _flock_index
+        from memory_write import FlockIndex
 
         index_path = tmp_path / "index.md"
         index_path.write_text("# Index")
@@ -577,7 +568,7 @@ class TestIssue4MkdirLock:
         # Keep the mtime recent so it's not considered stale
         os.utime(lock_dir, None)  # current time
 
-        lock = _flock_index(index_path)
+        lock = FlockIndex(index_path)
         start = time.monotonic()
         with lock:
             elapsed = time.monotonic() - start
@@ -591,7 +582,7 @@ class TestIssue4MkdirLock:
 
     def test_permission_denied_handling(self, tmp_path):
         """Lock failure due to permissions should not crash."""
-        from memory_write import _flock_index
+        from memory_write import FlockIndex
 
         # Use a directory where mkdir will fail
         # (read-only parent directory)
@@ -603,7 +594,7 @@ class TestIssue4MkdirLock:
         # Make parent read-only to simulate permission denied
         os.chmod(ro_dir, 0o444)
         try:
-            lock = _flock_index(index_path)
+            lock = FlockIndex(index_path)
             # Should not crash, proceeds without lock
             with lock:
                 pass
@@ -613,12 +604,12 @@ class TestIssue4MkdirLock:
 
     def test_cleanup_on_normal_exit(self, tmp_path):
         """Lock directory should be cleaned up on normal exit."""
-        from memory_write import _flock_index
+        from memory_write import FlockIndex
 
         index_path = tmp_path / "index.md"
         index_path.write_text("# Index")
 
-        with _flock_index(index_path):
+        with FlockIndex(index_path):
             pass
 
         # After context manager exits, no lock artifact should remain
@@ -629,13 +620,13 @@ class TestIssue4MkdirLock:
 
     def test_cleanup_on_exception(self, tmp_path):
         """Lock directory should be cleaned up even if an exception occurs."""
-        from memory_write import _flock_index
+        from memory_write import FlockIndex
 
         index_path = tmp_path / "index.md"
         index_path.write_text("# Index")
 
         with pytest.raises(ValueError):
-            with _flock_index(index_path):
+            with FlockIndex(index_path):
                 raise ValueError("Simulated error")
 
         # Lock should still be released
@@ -754,7 +745,6 @@ class TestIssue5TitleSanitization:
             # At least one format should be present
             assert has_new_format or has_old_format
 
-    @pytest.mark.xfail(reason="pre-fix: raw index lines injected verbatim into output")
     def test_pre_sanitization_entries_cleaned(self, tmp_path):
         """Old entries with injection attempts should be sanitized on retrieval."""
         # Create a memory with a crafted title
@@ -929,7 +919,7 @@ class TestCrossIssueInteractions:
         assert rc == 0
         if stdout.strip():
             mem_lines = [l for l in stdout.split("\n")
-                         if l.strip().startswith("- [")]
+                         if l.strip().startswith("<result ")]
             assert len(mem_lines) <= 3
 
     def test_lock_not_needed_for_rebuild(self, tmp_path):

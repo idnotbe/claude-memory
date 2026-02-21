@@ -299,10 +299,16 @@ def auto_fix(data: dict, action: str) -> dict:
         original_title = data["title"]
         # Strip all control characters (null bytes, newlines, tabs, etc.)
         sanitized = re.sub(r'[\x00-\x1f\x7f]', '', original_title).strip()
-        # Strip Unicode format characters (zero-width space, RTL override, etc.)
-        sanitized = ''.join(c for c in sanitized if unicodedata.category(c) != 'Cf')
+        # Strip Unicode format characters and combining marks (zero-width, bidi, variation selectors, etc.)
+        sanitized = ''.join(c for c in sanitized if unicodedata.category(c) not in ('Cf', 'Mn'))
         # Strip index-injection markers
         sanitized = sanitized.replace(" -> ", " - ").replace("#tags:", "")
+        # Strip confidence label spoofing patterns (S5F defense-in-depth)
+        prev_t = None
+        while prev_t != sanitized:
+            prev_t = sanitized
+            sanitized = re.sub(r'\[\s*confidence\s*:[^\]]*\]', '', sanitized, flags=re.IGNORECASE)
+        sanitized = sanitized.strip()
         if sanitized != original_title:
             data["title"] = sanitized
             print("[AUTO-FIX] title: stripped control chars/index-injection markers", file=sys.stderr)
@@ -316,8 +322,16 @@ def auto_fix(data: dict, action: str) -> dict:
             sanitized = t.lower().strip()
             # Remove control characters (newlines, carriage returns, tabs, null bytes)
             sanitized = re.sub(r'[\x00-\x1f\x7f]', '', sanitized)
+            # Strip Cf+Mn Unicode categories (zero-width, bidi, combining marks, variation selectors)
+            sanitized = ''.join(c for c in sanitized if unicodedata.category(c) not in ('Cf', 'Mn'))
             # Remove index format characters (commas, arrow separator, tags prefix)
             sanitized = sanitized.replace(',', ' ').replace(' -> ', ' ').replace('#tags:', '')
+            # Strip confidence label spoofing patterns (S5F hardening)
+            # Broad regex catches whitespace/unicode variants; loop handles nesting
+            prev_tag = None
+            while prev_tag != sanitized:
+                prev_tag = sanitized
+                sanitized = re.sub(r'\[\s*confidence\s*:[^\]]*\]', '', sanitized, flags=re.IGNORECASE)
             sanitized = sanitized.strip()
             if sanitized:
                 sanitized_tags.append(sanitized)
@@ -649,6 +663,10 @@ def do_create(args, memory_root: Path, index_path: Path) -> int:
     if _check_path_containment(target_abs, memory_root, "CREATE"):
         return 1
 
+    # Validate directory components (S5F: block bracket injection in paths)
+    if _check_dir_components(target_abs, memory_root):
+        return 1
+
     # Ensure id matches filename
     expected_id = target_abs.stem
     if data.get("id") != expected_id:
@@ -671,7 +689,7 @@ def do_create(args, memory_root: Path, index_path: Path) -> int:
     rel_path = str(target)
 
     # OCC: flock on index -- anti-resurrection check inside lock
-    with _flock_index(index_path):
+    with FlockIndex(index_path):
         # Anti-resurrection check (inside flock to prevent TOCTOU)
         if target_abs.exists():
             try:
@@ -827,7 +845,7 @@ def do_update(args, memory_root: Path, index_path: Path) -> int:
     rel_path = str(target)
 
     # OCC: flock on index for atomic transaction
-    with _flock_index(index_path):
+    with FlockIndex(index_path):
         # OCC hash check inside flock to prevent TOCTOU
         if args.hash:
             current_hash = file_md5(str(target_abs))
@@ -872,47 +890,41 @@ def do_update(args, memory_root: Path, index_path: Path) -> int:
     return 0
 
 
-def do_retire(args, memory_root: Path, index_path: Path) -> int:
-    """Handle --action retire (soft retire)."""
-    target = Path(args.target)
-    target_abs = Path.cwd() / target if not target.is_absolute() else target
+def retire_record(target_abs: Path, reason: str, memory_root: Path, index_path: Path) -> dict:
+    """Core retire logic. Caller MUST hold FlockIndex.
 
-    # Path traversal check
-    if _check_path_containment(target_abs, memory_root, "RETIRE"):
-        return 1
+    Public API: used by do_retire() internally and by memory_enforce.py.
 
-    if not target_abs.exists():
-        print(f"RETIRE_ERROR\ntarget: {args.target}\nfix: File does not exist.")
-        return 1
+    Returns:
+        {"status": "retired", "target": str, "reason": str} on success
+        {"status": "already_retired", "target": str} if already retired (idempotent)
 
+    Raises:
+        json.JSONDecodeError: if target file has invalid JSON
+        OSError/FileNotFoundError: if target file cannot be read
+        ValueError: if target_abs is not under the project root (rel_path computation)
+        RuntimeError: if target is archived (must unarchive first)
+    """
     # Read existing
-    try:
-        with open(target_abs, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"READ_ERROR\ntarget: {args.target}\nerror: {e}")
-        return 1
+    with open(target_abs, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
     # Already retired? Idempotent success
     if data.get("record_status") == "retired":
-        result = {"status": "already_retired", "target": str(target)}
-        print(json.dumps(result))
-        return 0
+        return {"status": "already_retired", "target": str(target_abs)}
 
     # Block archived -> retired (must unarchive first)
     if data.get("record_status") == "archived":
-        print(
-            f"RETIRE_ERROR\ntarget: {args.target}\n"
-            f"fix: Archived memories must be unarchived before retiring. "
-            f"Use --action unarchive first."
+        raise RuntimeError(
+            "Archived memories must be unarchived before retiring. "
+            "Use --action unarchive first."
         )
-        return 1
 
     # Set retirement fields
     old_record_status = data.get("record_status", "active")
     data["record_status"] = "retired"
     data["retired_at"] = now_utc()
-    data["retired_reason"] = args.reason or "No reason provided"
+    data["retired_reason"] = reason
     data["updated_at"] = now_utc()
     # Clear archived fields (spec: retired records must not have archived fields)
     data.pop("archived_at", None)
@@ -931,18 +943,50 @@ def do_retire(args, memory_root: Path, index_path: Path) -> int:
         changes = changes[-CHANGES_CAP:]
     data["changes"] = changes
 
-    rel_path = str(target)
+    # Compute rel_path relative to project root (NOT CWD)
+    project_root = memory_root.parent.parent  # .claude/memory -> .claude -> project root
+    rel_path = str(target_abs.relative_to(project_root))
 
-    # OCC: flock on index
-    with _flock_index(index_path):
-        atomic_write_json(str(target_abs), data)
-        remove_from_index(index_path, rel_path)
+    atomic_write_json(str(target_abs), data)
+    remove_from_index(index_path, rel_path)
 
-    result = {
+    return {
         "status": "retired",
-        "target": str(target),
+        "target": str(target_abs),
         "reason": data["retired_reason"],
     }
+
+
+def do_retire(args, memory_root: Path, index_path: Path) -> int:
+    """Handle --action retire (soft retire)."""
+    target = Path(args.target)
+    target_abs = Path.cwd() / target if not target.is_absolute() else target
+
+    # Path traversal check
+    if _check_path_containment(target_abs, memory_root, "RETIRE"):
+        return 1
+
+    if not target_abs.exists():
+        print(f"RETIRE_ERROR\ntarget: {args.target}\nfix: File does not exist.")
+        return 1
+
+    reason = args.reason or "No reason provided"
+
+    with FlockIndex(index_path):
+        try:
+            result = retire_record(target_abs, reason, memory_root, index_path)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"READ_ERROR\ntarget: {args.target}\nerror: {e}")
+            return 1
+        except RuntimeError as e:
+            print(
+                f"RETIRE_ERROR\ntarget: {args.target}\n"
+                f"fix: {e}"
+            )
+            return 1
+
+    # Restore original CLI-relative target for backward-compatible output
+    result["target"] = str(target)
     print(json.dumps(result))
     return 0
 
@@ -1008,7 +1052,7 @@ def do_archive(args, memory_root: Path, index_path: Path) -> int:
     rel_path = str(target)
 
     # flock on index
-    with _flock_index(index_path):
+    with FlockIndex(index_path):
         atomic_write_json(str(target_abs), data)
         remove_from_index(index_path, rel_path)
 
@@ -1074,7 +1118,7 @@ def do_unarchive(args, memory_root: Path, index_path: Path) -> int:
     rel_path = str(target)
 
     # flock on index
-    with _flock_index(index_path):
+    with FlockIndex(index_path):
         atomic_write_json(str(target_abs), data)
         index_line = build_index_line(data, rel_path)
         add_to_index(index_path, index_line)
@@ -1147,7 +1191,7 @@ def do_restore(args, memory_root: Path, index_path: Path) -> int:
     rel_path = str(target)
 
     # flock on index
-    with _flock_index(index_path):
+    with FlockIndex(index_path):
         atomic_write_json(str(target_abs), data)
         index_line = build_index_line(data, rel_path)
         add_to_index(index_path, index_line)
@@ -1228,10 +1272,38 @@ def _check_path_containment(target_abs: Path, memory_root: Path, action_label: s
         return 1
 
 
-class _flock_index:
-    """Portable lock for index mutations. Uses mkdir (atomic on all FS including NFS)."""
+_SAFE_DIR_RE = re.compile(r'^[a-z0-9_.-]+$')
 
-    _LOCK_TIMEOUT = 5.0    # Max seconds to wait for lock
+
+def _check_dir_components(target_abs: Path, memory_root: Path) -> int:
+    """Validate directory components between memory_root and target are safe.
+
+    Rejects directory names containing brackets or other injection characters.
+    Returns 0 if ok, 1 if invalid. (S5F: path-based confidence injection fix)
+    """
+    try:
+        rel = target_abs.resolve().relative_to(memory_root.resolve())
+    except ValueError:
+        return 0  # path containment already checked separately
+    # Check each directory component (skip the filename)
+    for part in rel.parent.parts:
+        if not _SAFE_DIR_RE.match(part):
+            print(
+                f"PATH_ERROR\ntarget: {target_abs}\n"
+                f"fix: Directory name '{part}' contains invalid characters. "
+                f"Use only lowercase letters, numbers, dots, hyphens, and underscores."
+            )
+            return 1
+    return 0
+
+
+class FlockIndex:
+    """Portable lock for index mutations. Uses mkdir (atomic on all FS including NFS).
+
+    Public API: imported by memory_enforce.py.
+    """
+
+    _LOCK_TIMEOUT = 15.0   # Max seconds to wait for lock
     _STALE_AGE = 60.0      # Seconds before a lock is considered stale
     _POLL_INTERVAL = 0.05   # Seconds between retry attempts
 
@@ -1286,6 +1358,21 @@ class _flock_index:
                 os.rmdir(self.lock_dir)
             except OSError:
                 pass
+
+    def require_acquired(self) -> None:
+        """Raise TimeoutError if the lock was not acquired.
+
+        Call this inside a `with` block when strict lock enforcement is needed.
+        Existing callers (do_create, etc.) do NOT call this -- they continue
+        with the legacy "proceed without lock" behavior.
+
+        Public API: used by memory_enforce.py.
+        """
+        if not self.acquired:
+            raise TimeoutError(
+                "LOCK_TIMEOUT_ERROR: Index lock not acquired. "
+                "Another process may hold the lock. Retry later."
+            )
 
 
 def _resolve_memory_root(target: str) -> tuple[Path, Path]:

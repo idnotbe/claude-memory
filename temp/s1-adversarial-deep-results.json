@@ -1,0 +1,284 @@
+[
+  {
+    "id": "DEEP-A1-superset-user_id",
+    "desc": "Compound is superset or different partition of 'user_id'",
+    "status": "PASS",
+    "detail": "legacy={'id', 'user'}, compound={'user_id'}"
+  },
+  {
+    "id": "DEEP-A1-superset-react.fc",
+    "desc": "Compound is superset or different partition of 'react.fc'",
+    "status": "PASS",
+    "detail": "legacy={'react', 'fc'}, compound={'react.fc'}"
+  },
+  {
+    "id": "DEEP-A1-superset-rate-limiting",
+    "desc": "Compound is superset or different partition of 'rate-limiting'",
+    "status": "PASS",
+    "detail": "legacy={'rate', 'limiting'}, compound={'rate-limiting'}"
+  },
+  {
+    "id": "DEEP-A1-superset-v2.0",
+    "desc": "Compound is superset or different partition of 'v2.0'",
+    "status": "PASS",
+    "detail": "legacy={'v2'}, compound={'v2.0'}"
+  },
+  {
+    "id": "DEEP-A1-superset-a_b_c_d_e_f_g_h_i_j_",
+    "desc": "Compound is superset or different partition of 'a_b_c_d_e_f_g_h_i_j_k'",
+    "status": "PASS",
+    "detail": "legacy=set(), compound={'a_b_c_d_e_f_g_h_i_j_k'}"
+  },
+  {
+    "id": "DEEP-A1-superset-test_memory_retrieve",
+    "desc": "Compound is superset or different partition of 'test_memory_retrieve.py'",
+    "status": "PASS",
+    "detail": "legacy={'py', 'test', 'retrieve', 'memory'}, compound={'test_memory_retrieve.py'}"
+  },
+  {
+    "id": "DEEP-A1-superset-node.js",
+    "desc": "Compound is superset or different partition of 'node.js'",
+    "status": "PASS",
+    "detail": "legacy={'node', 'js'}, compound={'node.js'}"
+  },
+  {
+    "id": "DEEP-A1-superset-vue.js",
+    "desc": "Compound is superset or different partition of 'vue.js'",
+    "status": "PASS",
+    "detail": "legacy={'vue', 'js'}, compound={'vue.js'}"
+  },
+  {
+    "id": "DEEP-A1-superset-express.js",
+    "desc": "Compound is superset or different partition of 'express.js'",
+    "status": "PASS",
+    "detail": "legacy={'js', 'express'}, compound={'express.js'}"
+  },
+  {
+    "id": "DEEP-A1-superset-1.2.3.4",
+    "desc": "Compound is superset or different partition of '1.2.3.4'",
+    "status": "PASS",
+    "detail": "legacy=set(), compound={'1.2.3.4'}"
+  },
+  {
+    "id": "DEEP-A1-superset-my-cool-app",
+    "desc": "Compound is superset or different partition of 'my-cool-app'",
+    "status": "PASS",
+    "detail": "legacy={'app', 'cool'}, compound={'my-cool-app'}"
+  },
+  {
+    "id": "DEEP-A1-superset-UPPER_CASE_CONST",
+    "desc": "Compound is superset or different partition of 'UPPER_CASE_CONST'",
+    "status": "PASS",
+    "detail": "legacy={'const', 'upper', 'case'}, compound={'upper_case_const'}"
+  },
+  {
+    "id": "DEEP-A1-superset-camelCase",
+    "desc": "Compound is superset or different partition of 'camelCase'",
+    "status": "PASS",
+    "detail": "legacy={'camelcase'}, compound={'camelcase'}"
+  },
+  {
+    "id": "DEEP-A1-trailing-delim",
+    "desc": "'a-' with compound tokenizer -> empty (single char filtered)",
+    "status": "PASS",
+    "detail": "got set()"
+  },
+  {
+    "id": "DEEP-A1-ab-trailing",
+    "desc": "'ab-' with compound tokenizer -> {'ab'}",
+    "status": "PASS",
+    "detail": "got {'ab'}"
+  },
+  {
+    "id": "DEEP-A1-compound-vs-legacy",
+    "desc": "'ab-cd': compound={'ab-cd'} vs legacy={'ab','cd'}",
+    "status": "PASS",
+    "detail": "compound={'ab-cd'}, legacy={'cd', 'ab'}"
+  },
+  {
+    "id": "DEEP-A2-normal",
+    "desc": "Normal index line parses correctly",
+    "status": "PASS",
+    "detail": "got {'category': 'DECISION', 'title': 'JWT auth flow', 'path': '.claude/memory/decisions/jwt.json', 'tags': {'auth', 'jwt'}, 'raw': '- [DECISION] JWT auth flow -> .claude/memory/decisions/jwt.json #tags:auth,jwt'}"
+  },
+  {
+    "id": "DEEP-A2-arrow-in-title",
+    "desc": "Arrow in title: regex matches first ' -> '",
+    "status": "PASS",
+    "detail": "got {'category': 'DECISION', 'title': 'title -> fake/path', 'path': 'real/path', 'tags': {'hack'}, 'raw': '- [DECISION] title -> fake/path -> real/path #tags:hack'}"
+  },
+  {
+    "id": "DEEP-A2-arrow-title-val",
+    "desc": "Title captured as: 'title -> fake/path'",
+    "status": "PASS",
+    "detail": "path=real/path, tags={'hack'}"
+  },
+  {
+    "id": "DEEP-A2-tags-in-title",
+    "desc": "#tags: in title: regex behavior",
+    "status": "PASS",
+    "detail": "got {'category': 'DECISION', 'title': 'title #tags:fake', 'path': 'real/path', 'tags': {'real'}, 'raw': '- [DECISION] title #tags:fake -> real/path #tags:real'}"
+  },
+  {
+    "id": "DEEP-A2-tags-title-val",
+    "desc": "Title: 'title #tags:fake', tags: {'real'}",
+    "status": "PASS",
+    "detail": ""
+  },
+  {
+    "id": "DEEP-A2-empty-cat",
+    "desc": "Empty category fails to match [A-Z_]+ regex",
+    "status": "PASS",
+    "detail": "got None"
+  },
+  {
+    "id": "DEEP-A2-lowercase-cat",
+    "desc": "Lowercase category fails to match [A-Z_]+",
+    "status": "PASS",
+    "detail": "got None"
+  },
+  {
+    "id": "DEEP-A2-very-long",
+    "desc": "Very long title (10K chars) still parses",
+    "status": "PASS",
+    "detail": "title_len=10000"
+  },
+  {
+    "id": "DEEP-A2-newline",
+    "desc": "Newline in line fails to match (regex doesn't use DOTALL)",
+    "status": "PASS",
+    "detail": "got None"
+  },
+  {
+    "id": "DEEP-A2-path-traversal-parse",
+    "desc": "Path traversal in index line: parses but main() has containment check",
+    "status": "PASS",
+    "detail": "got {'category': 'DECISION', 'title': 'evil', 'path': '../../../etc/passwd', 'tags': {'hack'}, 'raw': '- [DECISION] evil -> ../../../etc/passwd #tags:hack'}"
+  },
+  {
+    "id": "DEEP-A3-double-encode",
+    "desc": "Double-encoded HTML: gets re-escaped (no unescape first)",
+    "status": "PASS",
+    "detail": "got '&amp;amp;lt;script&amp;amp;gt;'"
+  },
+  {
+    "id": "DEEP-A3-homoglyphs",
+    "desc": "Cyrillic homoglyphs pass through (not in strip list)",
+    "status": "PASS",
+    "detail": "got '\u0410\u0412\u0421\u0415' (len=4)"
+  },
+  {
+    "id": "DEEP-A3-rtl-override",
+    "desc": "RTL override U+202E stripped",
+    "status": "PASS",
+    "detail": "got 'normalesrever'"
+  },
+  {
+    "id": "DEEP-A3-zwj",
+    "desc": "Zero-width joiner U+200D stripped (in U+200B-U+200F range)",
+    "status": "PASS",
+    "detail": "got 'testjoiner'"
+  },
+  {
+    "id": "DEEP-A3-truncate-then-escape",
+    "desc": "120 '&' chars -> truncated then escaped (len=600)",
+    "status": "PASS",
+    "detail": "got len=600, expected 120*5=600"
+  },
+  {
+    "id": "DEEP-A3-escape-expansion",
+    "desc": "Escape expansion: output can exceed 120 chars (by design, escaping is after truncation)",
+    "status": "PASS",
+    "detail": "120 '&' -> 600 chars after escaping"
+  },
+  {
+    "id": "DEEP-A3-null-byte",
+    "desc": "Null byte stripped by control char regex",
+    "status": "PASS",
+    "detail": "got 'beforeafter'"
+  },
+  {
+    "id": "DEEP-A3-newline-tab",
+    "desc": "Newline and tab stripped by control char regex",
+    "status": "PASS",
+    "detail": "got 'line1line2tab'"
+  },
+  {
+    "id": "DEEP-A4-cap",
+    "desc": "6 matching words capped at 2 (got 2)",
+    "status": "PASS",
+    "detail": "got 2"
+  },
+  {
+    "id": "DEEP-A4-empty-prompt",
+    "desc": "Empty prompt -> 0",
+    "status": "PASS",
+    "detail": "got 0"
+  },
+  {
+    "id": "DEEP-A4-empty-desc",
+    "desc": "Empty desc -> 0",
+    "status": "PASS",
+    "detail": "got 0"
+  },
+  {
+    "id": "DEEP-A4-prefix-direction",
+    "desc": "Prefix match: checks if desc starts with prompt (not reverse)",
+    "status": "PASS",
+    "detail": "got 0"
+  },
+  {
+    "id": "DEEP-A4-prefix-forward",
+    "desc": "Prefix: 'auth' matches 'authentication' = 0.5 -> rounds to 1",
+    "status": "PASS",
+    "detail": "got 1"
+  },
+  {
+    "id": "DEEP-A4-rounding",
+    "desc": "1 exact + 1 prefix = 1.5, rounds to 2",
+    "status": "PASS",
+    "detail": "got 2"
+  },
+  {
+    "id": "DEEP-A4-bankers-rounding",
+    "desc": "0.5 rounds to 1 (not 0 via banker's rounding)",
+    "status": "PASS",
+    "detail": "got 1"
+  },
+  {
+    "id": "DEEP-A5-tokenize-split",
+    "desc": "Compound: {'user_id_field'} vs Legacy: {'id', 'field', 'user'}",
+    "status": "PASS",
+    "detail": "compound={'user_id_field'}, legacy={'id', 'field', 'user'}"
+  },
+  {
+    "id": "DEEP-A5-compound-prompt-scoring",
+    "desc": "Compound prompt token 'user_id_field' scores 1 against legacy-tokenized title",
+    "status": "PASS",
+    "detail": "got 1"
+  },
+  {
+    "id": "DEEP-A5-legacy-prompt-scoring",
+    "desc": "Legacy prompt tokens score 6 (3 exact matches * 2 = 6)",
+    "status": "PASS",
+    "detail": "got 6"
+  },
+  {
+    "id": "DEEP-A5-scoring-divergence",
+    "desc": "Compound vs legacy prompt scoring: 1 vs 6 (expected divergence)",
+    "status": "PASS",
+    "detail": "This is expected: compound tokens match differently than split legacy tokens"
+  },
+  {
+    "id": "DEEP-A6-large-alloc",
+    "desc": "3MB intermediate allocation: time=0.0022s, output_len=2000",
+    "status": "PASS",
+    "detail": "time=0.0022s"
+  },
+  {
+    "id": "DEEP-A6-100mb-alloc",
+    "desc": "100MB intermediate: time=0.0719s, output_len=2000",
+    "status": "PASS",
+    "detail": "time=0.0719s"
+  }
+]

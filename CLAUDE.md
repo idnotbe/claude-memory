@@ -15,7 +15,7 @@ Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the
 | Hook Type | What It Does |
 |-----------|-------------|
 | Stop (x1) | Deterministic triage hook (command type) -- keyword heuristic, evaluates all 6 categories, outputs structured `<triage_data>` JSON + per-category context files for parallel subagent consumption |
-| UserPromptSubmit | Retrieval hook -- Python keyword matcher injects relevant memories |
+| UserPromptSubmit | Retrieval hook -- FTS5 BM25 keyword matcher injects relevant memories (fallback: legacy keyword) |
 | PreToolUse:Write | Write guard -- blocks direct writes to memory directory |
 | PostToolUse:Write | Validation hook -- schema-validates any memory JSON, quarantines invalid (detection-only: PostToolUse deny cannot prevent writes, only inform) |
 
@@ -37,13 +37,17 @@ The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku
 | File | Role | Dependencies |
 |------|------|-------------|
 | hooks/scripts/memory_triage.py | Stop hook: keyword triage for 6 categories + structured output + context files | stdlib only |
-| hooks/scripts/memory_retrieve.py | Keyword-based retrieval, injects context | stdlib only |
+| hooks/scripts/memory_retrieve.py | FTS5 BM25 retrieval hook, injects context (fallback: legacy keyword) | stdlib + memory_search_engine |
+| hooks/scripts/memory_search_engine.py | Shared FTS5 engine, CLI search interface | stdlib + sqlite3 |
 | hooks/scripts/memory_index.py | Index rebuild, validate, query CLI | stdlib only |
 | hooks/scripts/memory_candidate.py | ACE candidate selection for update/retire | stdlib only |
 | hooks/scripts/memory_draft.py | Draft assembler: partial input → complete schema-valid JSON | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_write.py | Schema-enforced CRUD + lifecycle (retire/archive/unarchive/restore) | pydantic v2 |
+| hooks/scripts/memory_enforce.py | Rolling window enforcement: scans category, retires oldest beyond limit | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
+
+**Tokenizer note:** `memory_candidate.py` uses a 3+ char token minimum (`len(w) > 2`), while `memory_search_engine.py` / `memory_retrieve.py` use 2+ chars (`len(w) > 1`). This is intentional -- candidate selection needs higher precision; retrieval benefits from broader recall.
 
 Config: memory-config.json | Defaults: assets/memory-config.default.json | Schemas: assets/schemas/*.schema.json | Manifest: plugin.json | Hooks: hooks/hooks.json
 
@@ -114,6 +118,8 @@ These are the known security-relevant areas that tests must cover:
 
 4. **Index format fragility** -- Index lines use delimiter patterns (` -> ` and `#tags:`). Titles containing these strings can corrupt parsing in `memory_candidate.py` and `memory_retrieve.py`.
 
+5. **FTS5 query injection** -- Prevented: alphanumeric + `_.-` only, all tokens quoted. In-memory database (`:memory:`) -- no persistence attack surface. Parameterized queries (`MATCH ?`) prevent SQL injection.
+
 ## Quick Smoke Check
 
 ```bash
@@ -122,9 +128,14 @@ python3 -m py_compile hooks/scripts/memory_triage.py
 python3 -m py_compile hooks/scripts/memory_retrieve.py
 python3 -m py_compile hooks/scripts/memory_index.py
 python3 -m py_compile hooks/scripts/memory_candidate.py
+python3 -m py_compile hooks/scripts/memory_search_engine.py
 python3 -m py_compile hooks/scripts/memory_write.py
+python3 -m py_compile hooks/scripts/memory_enforce.py
 
 # Index operations (requires memory data)
 python3 hooks/scripts/memory_index.py --validate --root PATH_TO_MEMORY_ROOT
 python3 hooks/scripts/memory_index.py --rebuild --root PATH_TO_MEMORY_ROOT
+
+# FTS5 search (requires memory data)
+python3 hooks/scripts/memory_search_engine.py --query "test query" --root .claude/memory --mode search
 ```

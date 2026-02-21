@@ -125,6 +125,7 @@ def make_tech_debt_memory(
             "reason_deferred": "Migration requires client coordination",
             "impact": ["Dual maintenance burden"],
             "suggested_fix": ["Deprecate v1 endpoints", "Migrate clients"],
+            "acceptance_criteria": ["All clients migrated to v2", "v1 endpoints removed"],
         },
         "changes": [],
         "times_updated": times_updated,
@@ -157,7 +158,10 @@ def make_session_memory(
             "goal": "Write comprehensive tests",
             "outcome": "success",
             "completed": ["Test suite for all 6 scripts"],
+            "in_progress": ["Expanding edge case coverage"],
+            "blockers": ["Waiting on upstream schema changes"],
             "next_actions": ["Review test coverage"],
+            "key_changes": ["Added FTS5 search engine", "Updated conftest factories"],
         },
         "changes": [],
         "times_updated": times_updated,
@@ -188,6 +192,7 @@ def make_runbook_memory(
             "steps": ["Check connection pool size", "Restart connection pool", "Monitor"],
             "verification": "Query response time < 100ms",
             "root_cause": "Connection leak in ORM",
+            "environment": "Production PostgreSQL cluster",
         },
         "changes": [],
         "times_updated": 0,
@@ -325,3 +330,69 @@ def write_index(memory_root, *memories, path_prefix=".claude/memory"):
     with open(index_path, "w", encoding="utf-8") as f:
         f.write(content)
     return index_path
+
+
+# ---------------------------------------------------------------------------
+# Bulk memory fixture for benchmarks
+# ---------------------------------------------------------------------------
+
+# Keyword pools per category for realistic FTS5 content
+_BULK_KEYWORDS = {
+    "decision": [
+        "authentication", "database", "caching", "deployment", "migration",
+        "framework", "library", "protocol", "encryption", "compression",
+    ],
+    "session_summary": [
+        "refactoring", "debugging", "testing", "integration", "review",
+        "optimization", "deployment", "monitoring", "profiling", "cleanup",
+    ],
+    "runbook": [
+        "timeout", "crash", "memory_leak", "deadlock", "disk_full",
+        "certificate", "failover", "rollback", "scaling", "recovery",
+    ],
+    "constraint": [
+        "payload", "latency", "throughput", "retention", "compliance",
+        "budget", "concurrency", "availability", "bandwidth", "storage",
+    ],
+    "tech_debt": [
+        "deprecated", "legacy", "hardcoded", "workaround", "monolith",
+        "coupling", "duplication", "unmaintained", "untested", "fragile",
+    ],
+    "preference": [
+        "typescript", "python", "rust", "formatting", "linting",
+        "testing", "documentation", "naming", "architecture", "tooling",
+    ],
+}
+
+_BULK_FACTORIES = {
+    "decision": make_decision_memory,
+    "session_summary": make_session_memory,
+    "runbook": make_runbook_memory,
+    "constraint": make_constraint_memory,
+    "tech_debt": make_tech_debt_memory,
+    "preference": make_preference_memory,
+}
+
+
+@pytest.fixture
+def bulk_memories():
+    """Generate 500 diverse memory entries spread across all 6 categories.
+
+    Returns a list of 500 memory dicts with unique ids, titles, and tags.
+    Titles contain realistic keywords suitable for FTS5 benchmarking.
+    """
+    categories = list(_BULK_FACTORIES.keys())
+    memories = []
+    for i in range(500):
+        cat = categories[i % len(categories)]
+        keywords = _BULK_KEYWORDS[cat]
+        kw = keywords[i % len(keywords)]
+        kw2 = keywords[(i * 3 + 7) % len(keywords)]
+        factory = _BULK_FACTORIES[cat]
+        mem = factory(
+            id_val=f"bulk-{cat}-{i:04d}",
+            title=f"{kw} {kw2} item {i}",
+            tags=[kw, kw2, f"bulk{i}"],
+        )
+        memories.append(mem)
+    return memories

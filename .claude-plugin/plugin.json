@@ -9,11 +9,11 @@
   "commands": [
     "./commands/memory.md",
     "./commands/memory-config.md",
-    "./commands/memory-search.md",
     "./commands/memory-save.md"
   ],
   "skills": [
-    "./skills/memory-management"
+    "./skills/memory-management",
+    "./skills/memory-search"
   ],
   "homepage": "https://github.com/idnotbe/claude-memory",
   "repository": "https://github.com/idnotbe/claude-memory",

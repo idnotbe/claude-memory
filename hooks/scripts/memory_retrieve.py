@@ -7,7 +7,7 @@ Stdout is added to Claude's context automatically (exit 0).
 
 Supports enriched index lines with #tags: suffix for higher-weight matching.
 
-No external dependencies (stdlib only).
+No external dependencies (stdlib only + memory_search_engine.py).
 """
 
 import html
@@ -15,80 +15,32 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Words too common to be useful for matching
-STOP_WORDS = frozenset({
-    "a", "an", "the", "is", "was", "are", "were", "be", "been", "being",
-    "do", "does", "did", "have", "has", "had", "will", "would", "could",
-    "can", "should", "may", "might", "shall", "must",
-    "i", "you", "we", "they", "he", "she", "it", "me", "my", "your",
-    "this", "that", "these", "those", "what", "which", "who", "whom",
-    "how", "when", "where", "why", "if", "then", "else", "so",
-    "and", "or", "but", "not", "no", "yes", "to", "of", "in", "on",
-    "at", "for", "with", "from", "by", "about", "up", "out", "into",
-    "just", "also", "very", "too", "let", "please", "help", "need",
-    "want", "know", "think", "make", "like", "use", "get", "go", "see",
-    # Additional 2-char stopwords needed after lowering token length minimum to 2
-    "as", "am", "us", "vs",
-})
+# Import path safety: ensure sibling modules are findable regardless of cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Higher priority = injected first when multiple match
-CATEGORY_PRIORITY = {
-    "DECISION": 1,
-    "CONSTRAINT": 2,
-    "PREFERENCE": 3,
-    "RUNBOOK": 4,
-    "TECH_DEBT": 5,
-    "SESSION_SUMMARY": 6,
-}
-
-# Regex for enriched index lines: - [CAT] title -> path #tags:t1,t2,...
-_INDEX_RE = re.compile(
-    r"^-\s+\[([A-Z_]+)\]\s+(.+?)\s+->\s+(\S+)"
-    r"(?:\s+#tags:(.+))?$"
+from memory_search_engine import (  # noqa: E402
+    BODY_FIELDS,
+    CATEGORY_PRIORITY,
+    HAS_FTS5,
+    STOP_WORDS,
+    apply_threshold,
+    build_fts_index,
+    build_fts_query,
+    extract_body_text,
+    parse_index_line,
+    query_fts,
+    tokenize,
 )
-
-# Legacy tokenizer -- MUST be preserved for fallback scoring path
-_LEGACY_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-# New compound-preserving tokenizer -- for FTS5 query construction ONLY
-_COMPOUND_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_.\-]*[a-z0-9]|[a-z0-9]+")
 
 # How many top candidates to read JSON files for (recency + retired check)
 _DEEP_CHECK_LIMIT = 20
 
 # Recency window in days
 _RECENCY_DAYS = 30
-
-
-def tokenize(text: str, legacy: bool = False) -> set[str]:
-    """Tokenize text. Use legacy=True for fallback keyword scoring path."""
-    regex = _LEGACY_TOKEN_RE if legacy else _COMPOUND_TOKEN_RE
-    words = regex.findall(text.lower())
-    return {w for w in words if len(w) > 1 and w not in STOP_WORDS}
-
-
-def parse_index_line(line: str) -> dict | None:
-    """Parse an index line into components.
-
-    Returns dict with keys: category, title, path, tags, raw
-    or None if the line doesn't match.
-    Backward compatible: lines without #tags: get empty tag set.
-    """
-    m = _INDEX_RE.match(line.strip())
-    if not m:
-        return None
-    tags_str = m.group(4)
-    tags = [t.strip().lower() for t in tags_str.split(",") if t.strip()] if tags_str else []
-    return {
-        "category": m.group(1),
-        "title": m.group(2).strip(),
-        "path": m.group(3).strip(),
-        "tags": set(tags),
-        "raw": line.strip(),
-    }
 
 
 def score_entry(prompt_words: set[str], entry: dict) -> int:
@@ -166,9 +118,9 @@ def check_recency(file_path: Path) -> tuple[bool, bool]:
     except (OSError, json.JSONDecodeError):
         return False, False
 
-    # Check retired status
+    # Check retired/archived status
     record_status = data.get("record_status", "active")
-    if record_status == "retired":
+    if record_status in ("retired", "archived"):
         return True, False
 
     # Check recency
@@ -194,8 +146,8 @@ def _sanitize_title(title: str) -> str:
     """Sanitize a title for safe injection into prompt context."""
     # Strip control characters
     title = re.sub(r'[\x00-\x1f\x7f]', '', title)
-    # Strip zero-width, bidirectional override, and tag Unicode characters
-    title = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060-\u2069\ufeff\U000e0000-\U000e007f]', '', title)
+    # Strip zero-width, bidirectional override, tag Unicode chars, and combining marks/variation selectors
+    title = ''.join(c for c in title if unicodedata.category(c) not in ('Cf', 'Mn'))
     # Strip index-format injection markers
     title = title.replace(" -> ", " - ").replace("#tags:", "")
     # Truncate to 120 chars first (matches write-side max_length), then escape
@@ -206,158 +158,20 @@ def _sanitize_title(title: str) -> str:
     return title
 
 
-# ---------------------------------------------------------------------------
-# Body content extraction (Phase 1b)
-# ---------------------------------------------------------------------------
+def confidence_label(score: float, best_score: float) -> str:
+    """Map score to confidence bracket based on ratio to best score.
 
-BODY_FIELDS = {
-    "session_summary": ["goal", "outcome", "completed", "in_progress",
-                        "blockers", "next_actions", "key_changes"],
-    "decision":        ["context", "decision", "rationale", "consequences"],
-    "runbook":         ["trigger", "symptoms", "steps", "verification",
-                        "root_cause", "environment"],
-    "constraint":      ["rule", "impact", "workarounds"],
-    "tech_debt":       ["description", "reason_deferred", "impact",
-                        "suggested_fix", "acceptance_criteria"],
-    "preference":      ["topic", "value", "reason"],
-}
-
-
-def extract_body_text(data: dict) -> str:
-    """Extract searchable body text from memory JSON."""
-    category = data.get("category", "")
-    content = data.get("content", {})
-    if not isinstance(content, dict):
-        return ""
-    fields = BODY_FIELDS.get(category, [])
-    parts = []
-    for field in fields:
-        value = content.get(field)
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    for v in item.values():
-                        if isinstance(v, str):
-                            parts.append(v)
-    return " ".join(parts)[:2000]
-
-
-# ---------------------------------------------------------------------------
-# FTS5 availability check (Phase 1c)
-# ---------------------------------------------------------------------------
-
-try:
-    import sqlite3
-    _test = sqlite3.connect(":memory:")
-    _test.execute("CREATE VIRTUAL TABLE _t USING fts5(c)")
-    _test.close()
-    HAS_FTS5 = True
-except Exception:
-    HAS_FTS5 = False
-    print("[WARN] FTS5 unavailable; using keyword fallback", file=sys.stderr)
-
-
-# ---------------------------------------------------------------------------
-# FTS5 Engine Functions (Phase 2a)
-# ---------------------------------------------------------------------------
-
-def build_fts_index_from_index(index_path: Path) -> "sqlite3.Connection":
-    """Build FTS5 in-memory index from index.md (1 file read, no JSON parsing).
-
-    Parses index.md using parse_index_line(), creates an in-memory FTS5 table
-    with title/tags (indexed) and path/category (unindexed), inserts all entries.
-    Returns the sqlite3 connection (caller must close).
+    Works for both BM25 (negative, more negative = better) and legacy
+    (positive, higher = better) scores via abs().
     """
-    conn = sqlite3.connect(":memory:")
-    conn.execute("""CREATE VIRTUAL TABLE memories USING fts5(
-        title, tags, path UNINDEXED, category UNINDEXED
-    )""")
-    rows = []
-    for line in index_path.read_text(encoding="utf-8").splitlines():
-        parsed = parse_index_line(line)
-        if parsed:
-            rows.append((parsed["title"], " ".join(parsed["tags"]),
-                         parsed["path"], parsed["category"]))
-    conn.executemany("INSERT INTO memories VALUES (?, ?, ?, ?)", rows)
-    return conn
-
-
-def build_fts_query(tokens: list[str]) -> str | None:
-    """Build FTS5 MATCH query string from tokenized user prompt.
-
-    Smart wildcard strategy:
-    - Compound tokens (containing _, ., -): exact phrase match "user_id" (no wildcard)
-    - Single tokens: prefix wildcard "auth"* for broader matching
-
-    Returns None if no safe tokens remain after filtering.
-    """
-    safe = []
-    for t in tokens:
-        cleaned = re.sub(r'[^a-z0-9_.\-]', '', t.lower()).strip('_.-')
-        if cleaned and cleaned not in STOP_WORDS and len(cleaned) > 1:
-            # Compound tokens: exact phrase match (no wildcard)
-            # Single tokens: prefix wildcard for broader matching
-            if any(c in cleaned for c in '_.-'):
-                safe.append(f'"{cleaned}"')      # exact: "user_id"
-            else:
-                safe.append(f'"{cleaned}"*')     # prefix: "auth"*
-    if not safe:
-        return None
-    return " OR ".join(safe)
-
-
-def query_fts(conn: "sqlite3.Connection", fts_query: str, limit: int = 15) -> list[dict]:
-    """Execute FTS5 MATCH query and return ranked results.
-
-    Returns list of dicts with keys: title, tags (as set), path, category, score.
-    Score is the BM25 rank value (more negative = better match).
-    """
-    cursor = conn.execute(
-        "SELECT title, tags, path, category, rank FROM memories "
-        "WHERE memories MATCH ? ORDER BY rank LIMIT ?",
-        (fts_query, limit),
-    )
-    results = []
-    for title, tags_str, path, category, rank in cursor:
-        tags = set(t.strip() for t in tags_str.split() if t.strip()) if tags_str else set()
-        results.append({
-            "title": title,
-            "tags": tags,
-            "path": path,
-            "category": category,
-            "score": rank,
-        })
-    return results
-
-
-def apply_threshold(results: list[dict], mode: str = "auto") -> list[dict]:
-    """Apply Top-K threshold with 25% noise floor.
-
-    Limits: MAX_AUTO=3 for auto-inject, MAX_SEARCH=10 for explicit search.
-    Sorts by score (most negative = best), then CATEGORY_PRIORITY.
-    Discards results where abs(score) < 25% of abs(best_score).
-    """
-    MAX_AUTO = 3
-    MAX_SEARCH = 10
-    limit = MAX_AUTO if mode == "auto" else MAX_SEARCH
-
-    if not results:
-        return []
-
-    # Sort by score (most negative = best), then category priority
-    results.sort(key=lambda r: (r["score"], CATEGORY_PRIORITY.get(r["category"], 10)))
-
-    # Noise floor: discard results below 25% of best score
-    best_abs = abs(results[0]["score"])
-    if best_abs > 1e-10:
-        noise_floor = best_abs * 0.25
-        results = [r for r in results if abs(r["score"]) >= noise_floor]
-
-    return results[:limit]
+    if best_score == 0:
+        return "low"
+    ratio = abs(score) / abs(best_score)
+    if ratio >= 0.75:
+        return "high"
+    elif ratio >= 0.40:
+        return "medium"
+    return "low"
 
 
 def _check_path_containment(json_path: Path, memory_root_resolved: Path) -> bool:
@@ -370,14 +184,16 @@ def _check_path_containment(json_path: Path, memory_root_resolved: Path) -> bool
 
 
 def score_with_body(conn: "sqlite3.Connection", fts_query: str, user_prompt: str,
-                    top_k_paths: int, memory_root: Path, mode: str = "auto") -> list[dict]:
+                    top_k_paths: int, memory_root: Path, mode: str = "auto",
+                    max_inject: int | None = None) -> list[dict]:
     """Hybrid scoring: FTS5 title+tags ranking + body content bonus.
 
     Steps:
     1. Get initial rankings from FTS5 MATCH on title+tags
-    2. For top-K candidates, read JSON file, extract body text, compute body matches
-    3. Apply body bonus (capped at 3) to final score (more negative = better)
-    4. Apply threshold and return results
+    2. SECURITY: Pre-filter ALL entries for path containment
+    3. Check retired status on ALL path-contained entries (M2 fix)
+    4. For top-K non-retired candidates, extract body text and compute body bonus
+    5. Apply threshold and return results
 
     SECURITY: Path containment check prevents reading files outside memory_root.
     """
@@ -389,44 +205,66 @@ def score_with_body(conn: "sqlite3.Connection", fts_query: str, user_prompt: str
     project_root = memory_root.parent.parent
     memory_root_resolved = memory_root.resolve()
 
-    # SECURITY: Pre-filter ALL entries for path containment (not just top_k_paths).
+    # Step 2: SECURITY: Pre-filter ALL entries for path containment (not just top_k_paths).
     # Without this, entries beyond top_k_paths bypass containment checks entirely,
-    # which is a regression from the legacy path (lines 612-618 check all entries).
+    # which is a regression from the legacy path.
     initial = [
         r for r in initial
         if _check_path_containment(project_root / r["path"], memory_root_resolved)
     ]
 
-    # Step 2: Read JSON for top candidates, extract body
-    for result in initial[:top_k_paths]:
+    # Step 3 (M2 fix): Check retired status on ALL path-contained entries,
+    # not just top_k_paths. This prevents retired entries from slipping through
+    # when they rank beyond top_k_paths in initial FTS5 results.
+    for result in initial:
         json_path = project_root / result["path"]
         try:
             data = json.loads(json_path.read_text(encoding="utf-8"))
-            # Defensive: skip retired entries even if they remain in index
-            if data.get("record_status") == "retired":
+            if data.get("record_status") in ("retired", "archived"):
                 result["_retired"] = True
                 result["body_bonus"] = 0
                 continue
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            # Can't read file -- assume not retired, no body bonus
+            result["body_bonus"] = 0
+            continue
+
+        # Step 4: Extract body only for top-K candidates (expensive operation)
+        # Check if this result is within top_k_paths of the non-retired entries seen so far
+        result["_data"] = data  # Cache for body extraction below
+
+    # Filter retired entries
+    initial = [r for r in initial if not r.get("_retired")]
+
+    # Body extraction for top-K candidates only (performance optimization)
+    query_tokens = tokenize(user_prompt)
+    for result in initial[:top_k_paths]:
+        data = result.pop("_data", None)
+        if data is not None:
             body_text = extract_body_text(data)
             body_tokens = tokenize(body_text)
-            query_tokens = tokenize(user_prompt)
             body_matches = query_tokens & body_tokens
             result["body_bonus"] = min(3, len(body_matches))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            result["body_bonus"] = 0
+        # body_bonus already set to 0 for file-read failures above
 
-    # Step 3: Filter retired, then re-rank with body bonus
-    initial = [r for r in initial if not r.get("_retired")]
+    # Clean up cached data for remaining entries
+    for result in initial[top_k_paths:]:
+        result.pop("_data", None)
+
+    # Step 5: Re-rank with body bonus
     for r in initial:
+        r["raw_bm25"] = r["score"]  # Preserve raw BM25 for debugging/benchmarking
         r["score"] = r["score"] - r.get("body_bonus", 0)  # More negative = better
 
-    return apply_threshold(initial, mode)
+    return apply_threshold(initial, mode, max_inject=max_inject)
 
 
 def _output_results(top: list[dict], category_descriptions: dict[str, str]) -> None:
-    """Output matched memories in the standard XML format.
+    """Output matched memories in XML element format.
 
-    Shared between FTS5 and legacy paths for consistent output format.
+    Each result is a <result> element with category and confidence as XML attributes
+    (system-controlled, structurally separated from user content).
+    Element body contains user content (title, path, tags) -- all XML-escaped.
     Applies all security checks: _sanitize_title, XML escaping, safe key sanitization.
     """
     desc_attr = ""
@@ -441,14 +279,25 @@ def _output_results(top: list[dict], category_descriptions: dict[str, str]) -> N
         if desc_parts:
             desc_attr = " descriptions=\"" + "; ".join(desc_parts) + "\""
 
+    # Compute best score for confidence labeling
+    best_score = max((abs(entry.get("score", 0)) for entry in top), default=0)
+
     print(f"<memory-context source=\".claude/memory/\"{desc_attr}>")
     for entry in top:
         safe_title = _sanitize_title(entry["title"])
         tags = entry.get("tags", set())
-        tags_str = f" #tags:{','.join(sorted(html.escape(t) for t in tags))}" if tags else ""
+        safe_tags = []
+        for t in tags:
+            # Strip Cf+Mn Unicode categories (zero-width, bidi, combining marks, variation selectors)
+            val = ''.join(c for c in t if unicodedata.category(c) not in ('Cf', 'Mn'))
+            val = html.escape(val).strip()
+            if val:
+                safe_tags.append(val)
+        tags_str = f" #tags:{','.join(sorted(safe_tags))}" if safe_tags else ""
         safe_path = html.escape(entry["path"])
-        cat = entry["category"]
-        print(f"- [{cat}] {safe_title} -> {safe_path}{tags_str}")
+        cat = html.escape(entry["category"])
+        conf = confidence_label(entry.get("score", 0), best_score)
+        print(f'<result category="{cat}" confidence="{conf}">{safe_title} -> {safe_path}{tags_str}</result>')
     print("</memory-context>")
 
 
@@ -526,7 +375,7 @@ def main():
     if max_inject == 0:
         sys.exit(0)
 
-    # Parse index entries
+    # Parse index entries once (L1 fix: eliminates double-read of index.md)
     entries = []
     try:
         with open(index_path, "r", encoding="utf-8") as f:
@@ -547,22 +396,29 @@ def main():
         prompt_tokens = list(tokenize(user_prompt))  # compound tokenizer (legacy=False)
         fts_query = build_fts_query(prompt_tokens)
         if fts_query:
-            conn = build_fts_index_from_index(index_path)
+            # L1/L2 fix: build FTS5 index from already-parsed entries (no re-read)
+            conn = build_fts_index(entries)
             try:
                 results = score_with_body(conn, fts_query, user_prompt,
-                                          10, memory_root, "auto")
+                                          max(10, max_inject), memory_root, "auto",
+                                          max_inject=max_inject)
             finally:
                 conn.close()
             if results:
-                top = results[:max_inject]
+                top = results
                 _output_results(top, category_descriptions)
                 return
-        # No valid query tokens or no results -- exit silently
+            # Valid query but no results -- hint at manual search
+            print("<!-- No matching memories found. If project context is needed, use /memory:search <topic> -->")
+        # No valid query tokens (all stop-words) -- exit silently without hint
         sys.exit(0)
 
     # -----------------------------------------------------------------------
     # Legacy keyword path (fallback when FTS5 unavailable or strategy=title_tags)
     # -----------------------------------------------------------------------
+    if not HAS_FTS5 and match_strategy == "fts5_bm25":
+        print("[WARN] FTS5 unavailable; using keyword fallback", file=sys.stderr)
+
     # Tokenize prompt (legacy=True for backward-compatible keyword scoring path)
     prompt_words = tokenize(user_prompt, legacy=True)
 
@@ -589,6 +445,8 @@ def main():
             scored.append((text_score, priority, entry))
 
     if not scored:
+        # Valid query but no entries scored -- hint at manual search
+        print("<!-- No matching memories found. If project context is needed, use /memory:search <topic> -->")
         sys.exit(0)
 
     # Sort: highest score first, then by category priority
@@ -603,10 +461,8 @@ def main():
         file_path = project_root / entry["path"]
         # A2: Containment check - prevent path traversal via crafted index entries.
         # Note: absolute entry["path"] values are also caught (Path('/x') / '/abs' == Path('/abs')).
-        try:
-            file_path.resolve().relative_to(memory_root_resolved)
-        except ValueError:
-            continue  # Skip entries outside memory root
+        if not _check_path_containment(file_path, memory_root_resolved):
+            continue
         is_retired, is_recent = check_recency(file_path)
 
         # Defensive: skip retired entries even if they somehow remain in index
@@ -623,13 +479,13 @@ def main():
     # A2 extended: apply cheap containment check here too so malicious paths never reach output.
     for text_score, priority, entry in scored[_DEEP_CHECK_LIMIT:]:
         file_path = project_root / entry["path"]
-        try:
-            file_path.resolve().relative_to(memory_root_resolved)
-        except ValueError:
-            continue  # Skip entries outside memory root
+        if not _check_path_containment(file_path, memory_root_resolved):
+            continue
         final.append((text_score, priority, entry))
 
     if not final:
+        # Valid query but no results survived deep check -- hint at manual search
+        print("<!-- No matching memories found. If project context is needed, use /memory:search <topic> -->")
         sys.exit(0)
 
     # Re-sort with adjusted scores
@@ -637,7 +493,12 @@ def main():
     top_entries = final[:max_inject]
 
     # Convert legacy (score, priority, entry) tuples to dict format for _output_results
-    _output_results([e for _, _, e in top_entries], category_descriptions)
+    # Attach score to each entry for confidence labeling
+    top_list = []
+    for score, _, entry in top_entries:
+        entry["score"] = score
+        top_list.append(entry)
+    _output_results(top_list, category_descriptions)
 
 
 if __name__ == "__main__":
