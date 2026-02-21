@@ -1,0 +1,1108 @@
+{
+  "Q01": {
+    "query": "JWT authentication token signing",
+    "category": "direct_match",
+    "description": "Direct match on JWT auth -- should find JWT decision, key rotation runbook, auth session",
+    "bm25_results": [
+      {
+        "id": "d01",
+        "title": "Use JWT for API authentication",
+        "category": "DECISION",
+        "score": -11.993458791552737,
+        "snippet": "Needed stateless authentication for REST API endpoints Use JWT tokens with RS256 signing and 15-minu"
+      },
+      {
+        "id": "s02",
+        "title": "Implement user authentication system",
+        "category": "SESSION_SUMMARY",
+        "score": -8.141598304682885,
+        "snippet": "Build complete authentication flow with JWT and OAuth2 Login, register, password reset working; OAut"
+      },
+      {
+        "id": "r03",
+        "title": "Rotate JWT signing keys without downtime",
+        "category": "RUNBOOK",
+        "score": -7.285743007424076,
+        "snippet": "Scheduled quarterly key rotation or suspected key compromise Generate new RS256 keypair Add new publ"
+      }
+    ],
+    "relevant_found": [
+      "d01",
+      "s02",
+      "r03"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [],
+    "precision_assessment": ""
+  },
+  "Q02": {
+    "query": "PostgreSQL database migration",
+    "category": "direct_match",
+    "description": "Database migration -- should find PostgreSQL decision and migration session",
+    "bm25_results": [
+      {
+        "id": "d02",
+        "title": "PostgreSQL over MongoDB for primary datastore",
+        "category": "DECISION",
+        "score": -7.51163678600436,
+        "snippet": "Choosing between relational and document database for user data PostgreSQL 15 with JSONB columns for"
+      },
+      {
+        "id": "s03",
+        "title": "Database migration and schema refactoring",
+        "category": "SESSION_SUMMARY",
+        "score": -4.334599100048922,
+        "snippet": "Refactor user table schema and add audit logging Schema migrated, audit log table created, existing "
+      },
+      {
+        "id": "c01",
+        "title": "HIPAA compliance requires encrypted data at rest",
+        "category": "CONSTRAINT",
+        "score": -3.9415147843023037,
+        "snippet": "All PII and PHI must be encrypted at rest using AES-256 Cannot use unencrypted storage, affects data"
+      },
+      {
+        "id": "t03",
+        "title": "Remove deprecated v1 API endpoints",
+        "category": "TECH_DEBT",
+        "score": -2.3446840244610696,
+        "snippet": "v1 API endpoints still active but deprecated since 2025-06, creating maintenance burden Some enterpr"
+      }
+    ],
+    "relevant_found": [
+      "d02",
+      "s03"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "c01",
+      "t03"
+    ],
+    "precision_assessment": ""
+  },
+  "Q03": {
+    "query": "Redis caching strategy",
+    "category": "direct_match",
+    "description": "Redis caching -- decision, performance session, failover runbook all relevant",
+    "bm25_results": [
+      {
+        "id": "d04",
+        "title": "Redis for session caching and rate limiting",
+        "category": "DECISION",
+        "score": -5.6982704418158745,
+        "snippet": "Need fast key-value store for session data and API rate limits Redis 7 with Sentinel for HA, separat"
+      },
+      {
+        "id": "s04",
+        "title": "Performance optimization for API response times",
+        "category": "SESSION_SUMMARY",
+        "score": -5.056460198362905,
+        "snippet": "Reduce p95 API response time from 800ms to under 200ms Achieved 150ms p95 through caching and query "
+      },
+      {
+        "id": "r05",
+        "title": "Recover from Redis cluster failover",
+        "category": "RUNBOOK",
+        "score": -3.147486878211286,
+        "snippet": "Redis Sentinel triggers failover, application reports connection errors Increased error rate, cache "
+      },
+      {
+        "id": "c01",
+        "title": "HIPAA compliance requires encrypted data at rest",
+        "category": "CONSTRAINT",
+        "score": -2.1727604092725534,
+        "snippet": "All PII and PHI must be encrypted at rest using AES-256 Cannot use unencrypted storage, affects data"
+      },
+      {
+        "id": "d01",
+        "title": "Use JWT for API authentication",
+        "category": "DECISION",
+        "score": -2.1192500704964496,
+        "snippet": "Needed stateless authentication for REST API endpoints Use JWT tokens with RS256 signing and 15-minu"
+      },
+      {
+        "id": "d05",
+        "title": "Monorepo with Turborepo for build orchestration",
+        "category": "DECISION",
+        "score": -2.0683120660677687,
+        "snippet": "Frontend and backend code share types and utilities Single monorepo with Turborepo for task caching "
+      },
+      {
+        "id": "s01",
+        "title": "Set up CI/CD pipeline with GitHub Actions",
+        "category": "SESSION_SUMMARY",
+        "score": -1.8732073890417091,
+        "snippet": "Implement automated CI/CD pipeline for the project Working pipeline with lint, test, build, deploy s"
+      }
+    ],
+    "relevant_found": [
+      "d04",
+      "s04",
+      "r05"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "c01",
+      "d01",
+      "d05",
+      "s01"
+    ],
+    "precision_assessment": ""
+  },
+  "Q04": {
+    "query": "React TypeScript frontend components",
+    "category": "direct_match",
+    "description": "React+TS frontend -- should find framework decision and component library session",
+    "bm25_results": [
+      {
+        "id": "d03",
+        "title": "React with TypeScript for frontend framework",
+        "category": "DECISION",
+        "score": -10.241639509494131,
+        "snippet": "Selecting frontend framework for dashboard application React 18 with TypeScript strict mode Team exp"
+      },
+      {
+        "id": "s05",
+        "title": "React component library setup with Storybook",
+        "category": "SESSION_SUMMARY",
+        "score": -10.012654957009504,
+        "snippet": "Create shared component library with documentation 10 core components built, Storybook deployed to i"
+      },
+      {
+        "id": "d05",
+        "title": "Monorepo with Turborepo for build orchestration",
+        "category": "DECISION",
+        "score": -3.8332173730695827,
+        "snippet": "Frontend and backend code share types and utilities Single monorepo with Turborepo for task caching "
+      },
+      {
+        "id": "p01",
+        "title": "Use snake_case for Python, camelCase for TypeScript",
+        "category": "PREFERENCE",
+        "score": -3.3098254598844834,
+        "snippet": "Variable and function naming conventions Python: snake_case everywhere. TypeScript: camelCase for va"
+      },
+      {
+        "id": "t01",
+        "title": "Migrate from Jest to Vitest for frontend tests",
+        "category": "TECH_DEBT",
+        "score": -2.7105588017982662,
+        "snippet": "Jest configuration is complex and slow; Vitest offers native ESM and faster execution Mid-sprint, to"
+      }
+    ],
+    "relevant_found": [
+      "d03",
+      "s05"
+    ],
+    "relevant_missed": [],
+    "noise_found": [
+      "p01"
+    ],
+    "unexpected": [
+      "d05",
+      "t01"
+    ],
+    "precision_assessment": ""
+  },
+  "Q05": {
+    "query": "Kubernetes deployment hotfix",
+    "category": "direct_match",
+    "description": "K8s hotfix deployment -- should find hotfix runbook",
+    "bm25_results": [
+      {
+        "id": "r02",
+        "title": "Deploy hotfix to production Kubernetes cluster",
+        "category": "RUNBOOK",
+        "score": -10.372312148343532,
+        "snippet": "Critical bug in production requires immediate fix Create hotfix branch from production tag Apply fix"
+      }
+    ],
+    "relevant_found": [
+      "r02"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [],
+    "precision_assessment": ""
+  },
+  "Q06": {
+    "query": "how to handle API errors gracefully",
+    "category": "cross_domain",
+    "description": "Error handling -- tech debt about error middleware is relevant, API rate limit is noise",
+    "bm25_results": [
+      {
+        "id": "d01",
+        "title": "Use JWT for API authentication",
+        "category": "DECISION",
+        "score": -3.5498166182669832,
+        "snippet": "Needed stateless authentication for REST API endpoints Use JWT tokens with RS256 signing and 15-minu"
+      },
+      {
+        "id": "t03",
+        "title": "Remove deprecated v1 API endpoints",
+        "category": "TECH_DEBT",
+        "score": -3.3941077217943008,
+        "snippet": "v1 API endpoints still active but deprecated since 2025-06, creating maintenance burden Some enterpr"
+      },
+      {
+        "id": "r05",
+        "title": "Recover from Redis cluster failover",
+        "category": "RUNBOOK",
+        "score": -2.9241650578929637,
+        "snippet": "Redis Sentinel triggers failover, application reports connection errors Increased error rate, cache "
+      },
+      {
+        "id": "t04",
+        "title": "Consolidate duplicate error handling middleware",
+        "category": "TECH_DEBT",
+        "score": -2.0040854999547,
+        "snippet": "Three separate error handling middlewares with overlapping logic in Express app Each was added for d"
+      },
+      {
+        "id": "r01",
+        "title": "Fix database connection pool exhaustion",
+        "category": "RUNBOOK",
+        "score": -1.8620580109460947,
+        "snippet": "Application logs show 'connection pool exhausted' or response times spike above 5s HTTP 503 errors, "
+      },
+      {
+        "id": "r02",
+        "title": "Deploy hotfix to production Kubernetes cluster",
+        "category": "RUNBOOK",
+        "score": -1.408161283048191,
+        "snippet": "Critical bug in production requires immediate fix Create hotfix branch from production tag Apply fix"
+      },
+      {
+        "id": "s04",
+        "title": "Performance optimization for API response times",
+        "category": "SESSION_SUMMARY",
+        "score": -1.373341160841287,
+        "snippet": "Reduce p95 API response time from 800ms to under 200ms Achieved 150ms p95 through caching and query "
+      },
+      {
+        "id": "c02",
+        "title": "API rate limit of 1000 requests per minute per user",
+        "category": "CONSTRAINT",
+        "score": -1.2652199546583978,
+        "snippet": "Hard limit of 1000 req/min per authenticated user, 100 for anonymous Batch operations must use pagin"
+      },
+      {
+        "id": "d06",
+        "title": "ThreadPoolExecutor for parallel API calls",
+        "category": "DECISION",
+        "score": -1.2445802402307227,
+        "snippet": "Need to parallelize external API calls that are IO-bound Use concurrent.futures.ThreadPoolExecutor w"
+      }
+    ],
+    "relevant_found": [
+      "t04"
+    ],
+    "relevant_missed": [],
+    "noise_found": [
+      "t03",
+      "c02"
+    ],
+    "unexpected": [
+      "d01",
+      "r05",
+      "r01",
+      "r02",
+      "s04",
+      "d06"
+    ],
+    "precision_assessment": ""
+  },
+  "Q07": {
+    "query": "security best practices for production",
+    "category": "cross_domain",
+    "description": "Security broadly -- HIPAA, JWT, key rotation all relevant in security context",
+    "bm25_results": [
+      {
+        "id": "r02",
+        "title": "Deploy hotfix to production Kubernetes cluster",
+        "category": "RUNBOOK",
+        "score": -3.359946875498637,
+        "snippet": "Critical bug in production requires immediate fix Create hotfix branch from production tag Apply fix"
+      },
+      {
+        "id": "c01",
+        "title": "HIPAA compliance requires encrypted data at rest",
+        "category": "CONSTRAINT",
+        "score": -2.1727604092725534,
+        "snippet": "All PII and PHI must be encrypted at rest using AES-256 Cannot use unencrypted storage, affects data"
+      },
+      {
+        "id": "c04",
+        "title": "Docker image size must stay under 500MB",
+        "category": "CONSTRAINT",
+        "score": -2.1367915721474633,
+        "snippet": "Production Docker images must be under 500MB compressed Affects base image choice, must use multi-st"
+      },
+      {
+        "id": "d01",
+        "title": "Use JWT for API authentication",
+        "category": "DECISION",
+        "score": -2.1192500704964496,
+        "snippet": "Needed stateless authentication for REST API endpoints Use JWT tokens with RS256 signing and 15-minu"
+      },
+      {
+        "id": "s01",
+        "title": "Set up CI/CD pipeline with GitHub Actions",
+        "category": "SESSION_SUMMARY",
+        "score": -1.8732073890417091,
+        "snippet": "Implement automated CI/CD pipeline for the project Working pipeline with lint, test, build, deploy s"
+      },
+      {
+        "id": "r03",
+        "title": "Rotate JWT signing keys without downtime",
+        "category": "RUNBOOK",
+        "score": -1.770434601007743,
+        "snippet": "Scheduled quarterly key rotation or suspected key compromise Generate new RS256 keypair Add new publ"
+      }
+    ],
+    "relevant_found": [
+      "c01",
+      "d01",
+      "r03"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "r02",
+      "c04",
+      "s01"
+    ],
+    "precision_assessment": ""
+  },
+  "Q08": {
+    "query": "improve build speed",
+    "category": "cross_domain",
+    "description": "Build speed -- Turborepo decision and Jest-to-Vitest migration both relevant",
+    "bm25_results": [
+      {
+        "id": "d05",
+        "title": "Monorepo with Turborepo for build orchestration",
+        "category": "DECISION",
+        "score": -2.4997901706705767,
+        "snippet": "Frontend and backend code share types and utilities Single monorepo with Turborepo for task caching "
+      },
+      {
+        "id": "c04",
+        "title": "Docker image size must stay under 500MB",
+        "category": "CONSTRAINT",
+        "score": -2.369757498903566,
+        "snippet": "Production Docker images must be under 500MB compressed Affects base image choice, must use multi-st"
+      },
+      {
+        "id": "s01",
+        "title": "Set up CI/CD pipeline with GitHub Actions",
+        "category": "SESSION_SUMMARY",
+        "score": -1.917526826033942,
+        "snippet": "Implement automated CI/CD pipeline for the project Working pipeline with lint, test, build, deploy s"
+      },
+      {
+        "id": "s02",
+        "title": "Implement user authentication system",
+        "category": "SESSION_SUMMARY",
+        "score": -1.4003144199949689,
+        "snippet": "Build complete authentication flow with JWT and OAuth2 Login, register, password reset working; OAut"
+      },
+      {
+        "id": "r02",
+        "title": "Deploy hotfix to production Kubernetes cluster",
+        "category": "RUNBOOK",
+        "score": -1.2771586295065394,
+        "snippet": "Critical bug in production requires immediate fix Create hotfix branch from production tag Apply fix"
+      }
+    ],
+    "relevant_found": [
+      "d05"
+    ],
+    "relevant_missed": [
+      "t01"
+    ],
+    "noise_found": [],
+    "unexpected": [
+      "c04",
+      "s01",
+      "s02",
+      "r02"
+    ],
+    "precision_assessment": ""
+  },
+  "Q09": {
+    "query": "fix the bug",
+    "category": "ambiguous",
+    "description": "Very vague -- after stop words, only 'fix' and 'bug' remain. Should return little/nothing",
+    "bm25_results": [
+      {
+        "id": "r02",
+        "title": "Deploy hotfix to production Kubernetes cluster",
+        "category": "RUNBOOK",
+        "score": -4.987846075838629,
+        "snippet": "Critical bug in production requires immediate fix Create hotfix branch from production tag Apply fix"
+      },
+      {
+        "id": "d03",
+        "title": "React with TypeScript for frontend framework",
+        "category": "DECISION",
+        "score": -2.6271989458376925,
+        "snippet": "Selecting frontend framework for dashboard application React 18 with TypeScript strict mode Team exp"
+      },
+      {
+        "id": "t02",
+        "title": "Replace hand-rolled CSV parser with pandas",
+        "category": "TECH_DEBT",
+        "score": -1.9148918086135907,
+        "snippet": "Custom CSV parser in utils/csv_parser.py has edge cases with quoted fields and unicode Works for cur"
+      },
+      {
+        "id": "r01",
+        "title": "Fix database connection pool exhaustion",
+        "category": "RUNBOOK",
+        "score": -1.5663356707685339,
+        "snippet": "Application logs show 'connection pool exhausted' or response times spike above 5s HTTP 503 errors, "
+      }
+    ],
+    "relevant_found": [],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "r02",
+      "d03",
+      "t02",
+      "r01"
+    ],
+    "precision_assessment": ""
+  },
+  "Q10": {
+    "query": "update the configuration",
+    "category": "ambiguous",
+    "description": "Very vague -- 'update' and 'configuration' are generic. Many entries could loosely match",
+    "bm25_results": [
+      {
+        "id": "t01",
+        "title": "Migrate from Jest to Vitest for frontend tests",
+        "category": "TECH_DEBT",
+        "score": -4.048308565351644,
+        "snippet": "Jest configuration is complex and slow; Vitest offers native ESM and faster execution Mid-sprint, to"
+      },
+      {
+        "id": "c02",
+        "title": "API rate limit of 1000 requests per minute per user",
+        "category": "CONSTRAINT",
+        "score": -1.8083710662647177,
+        "snippet": "Hard limit of 1000 req/min per authenticated user, 100 for anonymous Batch operations must use pagin"
+      },
+      {
+        "id": "r03",
+        "title": "Rotate JWT signing keys without downtime",
+        "category": "RUNBOOK",
+        "score": -1.5107243603518314,
+        "snippet": "Scheduled quarterly key rotation or suspected key compromise Generate new RS256 keypair Add new publ"
+      },
+      {
+        "id": "r05",
+        "title": "Recover from Redis cluster failover",
+        "category": "RUNBOOK",
+        "score": -1.4606385112782014,
+        "snippet": "Redis Sentinel triggers failover, application reports connection errors Increased error rate, cache "
+      }
+    ],
+    "relevant_found": [],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "t01",
+      "c02",
+      "r03",
+      "r05"
+    ],
+    "precision_assessment": ""
+  },
+  "Q11": {
+    "query": "what should I work on next",
+    "category": "ambiguous",
+    "description": "Planning query -- not about any specific memory topic",
+    "bm25_results": [
+      {
+        "id": "r04",
+        "title": "Debug memory leak in Node.js worker process",
+        "category": "RUNBOOK",
+        "score": -1.271607700361841,
+        "snippet": "Worker process RSS exceeds 512MB or OOMKilled in Kubernetes Gradual memory increase over hours, GC p"
+      },
+      {
+        "id": "d06",
+        "title": "ThreadPoolExecutor for parallel API calls",
+        "category": "DECISION",
+        "score": -1.2445802402307227,
+        "snippet": "Need to parallelize external API calls that are IO-bound Use concurrent.futures.ThreadPoolExecutor w"
+      },
+      {
+        "id": "s01",
+        "title": "Set up CI/CD pipeline with GitHub Actions",
+        "category": "SESSION_SUMMARY",
+        "score": -1.1624091995609016,
+        "snippet": "Implement automated CI/CD pipeline for the project Working pipeline with lint, test, build, deploy s"
+      },
+      {
+        "id": "d01",
+        "title": "Use JWT for API authentication",
+        "category": "DECISION",
+        "score": -0.9394661053688044,
+        "snippet": "Needed stateless authentication for REST API endpoints Use JWT tokens with RS256 signing and 15-minu"
+      },
+      {
+        "id": "t04",
+        "title": "Consolidate duplicate error handling middleware",
+        "category": "TECH_DEBT",
+        "score": -0.8884135127231507,
+        "snippet": "Three separate error handling middlewares with overlapping logic in Express app Each was added for d"
+      },
+      {
+        "id": "t02",
+        "title": "Replace hand-rolled CSV parser with pandas",
+        "category": "TECH_DEBT",
+        "score": -0.8488738420659403,
+        "snippet": "Custom CSV parser in utils/csv_parser.py has edge cases with quoted fields and unicode Works for cur"
+      },
+      {
+        "id": "s02",
+        "title": "Implement user authentication system",
+        "category": "SESSION_SUMMARY",
+        "score": -0.8488738420659403,
+        "snippet": "Build complete authentication flow with JWT and OAuth2 Login, register, password reset working; OAut"
+      },
+      {
+        "id": "r05",
+        "title": "Recover from Redis cluster failover",
+        "category": "RUNBOOK",
+        "score": -0.7588157094199761,
+        "snippet": "Redis Sentinel triggers failover, application reports connection errors Increased error rate, cache "
+      }
+    ],
+    "relevant_found": [],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "r04",
+      "d06",
+      "s01",
+      "d01",
+      "t04",
+      "t02",
+      "s02",
+      "r05"
+    ],
+    "precision_assessment": ""
+  },
+  "Q12": {
+    "query": "ThreadPoolExecutor max_workers concurrency",
+    "category": "tech_identifier",
+    "description": "Exact class name match -- should find ThreadPoolExecutor decision",
+    "bm25_results": [
+      {
+        "id": "d06",
+        "title": "ThreadPoolExecutor for parallel API calls",
+        "category": "DECISION",
+        "score": -10.170925509534385,
+        "snippet": "Need to parallelize external API calls that are IO-bound Use concurrent.futures.ThreadPoolExecutor w"
+      }
+    ],
+    "relevant_found": [
+      "d06"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [],
+    "precision_assessment": ""
+  },
+  "Q13": {
+    "query": "pgbouncer connection pooling",
+    "category": "tech_identifier",
+    "description": "pgbouncer -- connection pool runbook mentions it, PostgreSQL decision mentions it",
+    "bm25_results": [
+      {
+        "id": "d02",
+        "title": "PostgreSQL over MongoDB for primary datastore",
+        "category": "DECISION",
+        "score": -7.871869437032062,
+        "snippet": "Choosing between relational and document database for user data PostgreSQL 15 with JSONB columns for"
+      },
+      {
+        "id": "r01",
+        "title": "Fix database connection pool exhaustion",
+        "category": "RUNBOOK",
+        "score": -6.447231684815092,
+        "snippet": "Application logs show 'connection pool exhausted' or response times spike above 5s HTTP 503 errors, "
+      },
+      {
+        "id": "r05",
+        "title": "Recover from Redis cluster failover",
+        "category": "RUNBOOK",
+        "score": -2.8791599652148494,
+        "snippet": "Redis Sentinel triggers failover, application reports connection errors Increased error rate, cache "
+      }
+    ],
+    "relevant_found": [
+      "d02",
+      "r01"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "r05"
+    ],
+    "precision_assessment": ""
+  },
+  "Q14": {
+    "query": "Alembic migration scripts",
+    "category": "tech_identifier",
+    "description": "Alembic -- migration session and PostgreSQL decision both mention it",
+    "bm25_results": [
+      {
+        "id": "s03",
+        "title": "Database migration and schema refactoring",
+        "category": "SESSION_SUMMARY",
+        "score": -8.72726310500692,
+        "snippet": "Refactor user table schema and add audit logging Schema migrated, audit log table created, existing "
+      },
+      {
+        "id": "d02",
+        "title": "PostgreSQL over MongoDB for primary datastore",
+        "category": "DECISION",
+        "score": -4.3999742320985735,
+        "snippet": "Choosing between relational and document database for user data PostgreSQL 15 with JSONB columns for"
+      },
+      {
+        "id": "t03",
+        "title": "Remove deprecated v1 API endpoints",
+        "category": "TECH_DEBT",
+        "score": -2.3446840244610696,
+        "snippet": "v1 API endpoints still active but deprecated since 2025-06, creating maintenance burden Some enterpr"
+      }
+    ],
+    "relevant_found": [
+      "s03",
+      "d02"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "t03"
+    ],
+    "precision_assessment": ""
+  },
+  "Q15": {
+    "query": "ruff linter formatting",
+    "category": "tech_identifier",
+    "description": "ruff tool -- should find the ruff preference precisely",
+    "bm25_results": [
+      {
+        "id": "p04",
+        "title": "Use ruff for Python linting and formatting",
+        "category": "PREFERENCE",
+        "score": -9.737251967672101,
+        "snippet": "Python code quality tooling Use ruff for both linting and formatting (replaces black, isort, flake8)"
+      },
+      {
+        "id": "p01",
+        "title": "Use snake_case for Python, camelCase for TypeScript",
+        "category": "PREFERENCE",
+        "score": -3.2648236809887052,
+        "snippet": "Variable and function naming conventions Python: snake_case everywhere. TypeScript: camelCase for va"
+      }
+    ],
+    "relevant_found": [
+      "p04"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "p01"
+    ],
+    "precision_assessment": ""
+  },
+  "Q16": {
+    "query": "thread safety in concurrent database access",
+    "category": "multi_word",
+    "description": "Thread safety + database -- ThreadPoolExecutor decision and connection pool runbook",
+    "bm25_results": [
+      {
+        "id": "d06",
+        "title": "ThreadPoolExecutor for parallel API calls",
+        "category": "DECISION",
+        "score": -8.264035286359018,
+        "snippet": "Need to parallelize external API calls that are IO-bound Use concurrent.futures.ThreadPoolExecutor w"
+      },
+      {
+        "id": "d03",
+        "title": "React with TypeScript for frontend framework",
+        "category": "DECISION",
+        "score": -3.236874651956903,
+        "snippet": "Selecting frontend framework for dashboard application React 18 with TypeScript strict mode Team exp"
+      }
+    ],
+    "relevant_found": [
+      "d06"
+    ],
+    "relevant_missed": [
+      "r01"
+    ],
+    "noise_found": [],
+    "unexpected": [
+      "d03"
+    ],
+    "precision_assessment": ""
+  },
+  "Q17": {
+    "query": "automated testing continuous integration pipeline",
+    "category": "multi_word",
+    "description": "CI testing -- CI/CD session and Jest migration tech debt",
+    "bm25_results": [
+      {
+        "id": "s01",
+        "title": "Set up CI/CD pipeline with GitHub Actions",
+        "category": "SESSION_SUMMARY",
+        "score": -9.770762789373542,
+        "snippet": "Implement automated CI/CD pipeline for the project Working pipeline with lint, test, build, deploy s"
+      },
+      {
+        "id": "t01",
+        "title": "Migrate from Jest to Vitest for frontend tests",
+        "category": "TECH_DEBT",
+        "score": -2.558025158518493,
+        "snippet": "Jest configuration is complex and slow; Vitest offers native ESM and faster execution Mid-sprint, to"
+      }
+    ],
+    "relevant_found": [
+      "s01",
+      "t01"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [],
+    "precision_assessment": ""
+  },
+  "Q18": {
+    "query": "encryption compliance data protection",
+    "category": "multi_word",
+    "description": "Data protection -- HIPAA compliance constraint is the target",
+    "bm25_results": [
+      {
+        "id": "c01",
+        "title": "HIPAA compliance requires encrypted data at rest",
+        "category": "CONSTRAINT",
+        "score": -9.329336451418273,
+        "snippet": "All PII and PHI must be encrypted at rest using AES-256 Cannot use unencrypted storage, affects data"
+      }
+    ],
+    "relevant_found": [
+      "c01"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [],
+    "precision_assessment": ""
+  },
+  "Q19": {
+    "query": "API versioning deprecation strategy",
+    "category": "multi_word",
+    "description": "API deprecation -- v1 API removal tech debt entry",
+    "bm25_results": [
+      {
+        "id": "t03",
+        "title": "Remove deprecated v1 API endpoints",
+        "category": "TECH_DEBT",
+        "score": -5.414599490731719,
+        "snippet": "v1 API endpoints still active but deprecated since 2025-06, creating maintenance burden Some enterpr"
+      },
+      {
+        "id": "d01",
+        "title": "Use JWT for API authentication",
+        "category": "DECISION",
+        "score": -3.5498166182669832,
+        "snippet": "Needed stateless authentication for REST API endpoints Use JWT tokens with RS256 signing and 15-minu"
+      },
+      {
+        "id": "c01",
+        "title": "HIPAA compliance requires encrypted data at rest",
+        "category": "CONSTRAINT",
+        "score": -2.1727604092725534,
+        "snippet": "All PII and PHI must be encrypted at rest using AES-256 Cannot use unencrypted storage, affects data"
+      },
+      {
+        "id": "s01",
+        "title": "Set up CI/CD pipeline with GitHub Actions",
+        "category": "SESSION_SUMMARY",
+        "score": -1.8732073890417091,
+        "snippet": "Implement automated CI/CD pipeline for the project Working pipeline with lint, test, build, deploy s"
+      },
+      {
+        "id": "r02",
+        "title": "Deploy hotfix to production Kubernetes cluster",
+        "category": "RUNBOOK",
+        "score": -1.408161283048191,
+        "snippet": "Critical bug in production requires immediate fix Create hotfix branch from production tag Apply fix"
+      },
+      {
+        "id": "s04",
+        "title": "Performance optimization for API response times",
+        "category": "SESSION_SUMMARY",
+        "score": -1.373341160841287,
+        "snippet": "Reduce p95 API response time from 800ms to under 200ms Achieved 150ms p95 through caching and query "
+      }
+    ],
+    "relevant_found": [
+      "t03"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "d01",
+      "c01",
+      "s01",
+      "r02",
+      "s04"
+    ],
+    "precision_assessment": ""
+  },
+  "Q20": {
+    "query": "machine learning model training",
+    "category": "negative",
+    "description": "ML topic -- no memories about ML/AI. Should return nothing",
+    "bm25_results": [
+      {
+        "id": "d03",
+        "title": "React with TypeScript for frontend framework",
+        "category": "DECISION",
+        "score": -3.236874651956903,
+        "snippet": "Selecting frontend framework for dashboard application React 18 with TypeScript strict mode Team exp"
+      }
+    ],
+    "relevant_found": [],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "d03"
+    ],
+    "precision_assessment": ""
+  },
+  "Q21": {
+    "query": "mobile app iOS Swift development",
+    "category": "negative",
+    "description": "iOS development -- no memories about mobile. Should return nothing",
+    "bm25_results": [
+      {
+        "id": "t01",
+        "title": "Migrate from Jest to Vitest for frontend tests",
+        "category": "TECH_DEBT",
+        "score": -2.558025158518493,
+        "snippet": "Jest configuration is complex and slow; Vitest offers native ESM and faster execution Mid-sprint, to"
+      },
+      {
+        "id": "r05",
+        "title": "Recover from Redis cluster failover",
+        "category": "RUNBOOK",
+        "score": -0.890708774908052,
+        "snippet": "Redis Sentinel triggers failover, application reports connection errors Increased error rate, cache "
+      },
+      {
+        "id": "p03",
+        "title": "Prefer composition over inheritance",
+        "category": "PREFERENCE",
+        "score": -0.8670551115013695,
+        "snippet": "OOP design approach Use composition and protocols/interfaces instead of deep inheritance hierarchies"
+      },
+      {
+        "id": "d03",
+        "title": "React with TypeScript for frontend framework",
+        "category": "DECISION",
+        "score": -0.8002520747488095,
+        "snippet": "Selecting frontend framework for dashboard application React 18 with TypeScript strict mode Team exp"
+      },
+      {
+        "id": "c01",
+        "title": "HIPAA compliance requires encrypted data at rest",
+        "category": "CONSTRAINT",
+        "score": -0.7867813474627001,
+        "snippet": "All PII and PHI must be encrypted at rest using AES-256 Cannot use unencrypted storage, affects data"
+      },
+      {
+        "id": "t04",
+        "title": "Consolidate duplicate error handling middleware",
+        "category": "TECH_DEBT",
+        "score": -0.7257022372810668,
+        "snippet": "Three separate error handling middlewares with overlapping logic in Express app Each was added for d"
+      },
+      {
+        "id": "s02",
+        "title": "Implement user authentication system",
+        "category": "SESSION_SUMMARY",
+        "score": -0.6934041834509965,
+        "snippet": "Build complete authentication flow with JWT and OAuth2 Login, register, password reset working; OAut"
+      },
+      {
+        "id": "s01",
+        "title": "Set up CI/CD pipeline with GitHub Actions",
+        "category": "SESSION_SUMMARY",
+        "score": -0.6783097792732502,
+        "snippet": "Implement automated CI/CD pipeline for the project Working pipeline with lint, test, build, deploy s"
+      }
+    ],
+    "relevant_found": [],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "t01",
+      "r05",
+      "p03",
+      "d03",
+      "c01",
+      "t04",
+      "s02",
+      "s01"
+    ],
+    "precision_assessment": ""
+  },
+  "Q22": {
+    "query": "GraphQL schema federation",
+    "category": "negative",
+    "description": "GraphQL -- not in corpus. Should return nothing",
+    "bm25_results": [
+      {
+        "id": "s03",
+        "title": "Database migration and schema refactoring",
+        "category": "SESSION_SUMMARY",
+        "score": -4.893441993126213,
+        "snippet": "Refactor user table schema and add audit logging Schema migrated, audit log table created, existing "
+      }
+    ],
+    "relevant_found": [],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "s03"
+    ],
+    "precision_assessment": ""
+  },
+  "Q23": {
+    "query": "Python import style conventions",
+    "category": "partial_overlap",
+    "description": "Python conventions -- absolute import pref and naming convention, but Python version constraint is noise",
+    "bm25_results": [
+      {
+        "id": "p02",
+        "title": "Always use absolute imports in Python",
+        "category": "PREFERENCE",
+        "score": -11.221567168259043,
+        "snippet": "Import style in Python codebase Use absolute imports (from package.module import X), never relative "
+      },
+      {
+        "id": "p01",
+        "title": "Use snake_case for Python, camelCase for TypeScript",
+        "category": "PREFERENCE",
+        "score": -5.685219600118142,
+        "snippet": "Variable and function naming conventions Python: snake_case everywhere. TypeScript: camelCase for va"
+      },
+      {
+        "id": "t02",
+        "title": "Replace hand-rolled CSV parser with pandas",
+        "category": "TECH_DEBT",
+        "score": -3.165456700105362,
+        "snippet": "Custom CSV parser in utils/csv_parser.py has edge cases with quoted fields and unicode Works for cur"
+      }
+    ],
+    "relevant_found": [
+      "p02",
+      "p01"
+    ],
+    "relevant_missed": [],
+    "noise_found": [],
+    "unexpected": [
+      "t02"
+    ],
+    "precision_assessment": ""
+  },
+  "Q24": {
+    "query": "Docker container deployment production",
+    "category": "partial_overlap",
+    "description": "Docker deployment -- hotfix runbook and image size constraint, CI session is peripheral",
+    "bm25_results": [
+      {
+        "id": "r02",
+        "title": "Deploy hotfix to production Kubernetes cluster",
+        "category": "RUNBOOK",
+        "score": -7.590943644060128,
+        "snippet": "Critical bug in production requires immediate fix Create hotfix branch from production tag Apply fix"
+      },
+      {
+        "id": "c04",
+        "title": "Docker image size must stay under 500MB",
+        "category": "CONSTRAINT",
+        "score": -7.424398750523244,
+        "snippet": "Production Docker images must be under 500MB compressed Affects base image choice, must use multi-st"
+      },
+      {
+        "id": "s01",
+        "title": "Set up CI/CD pipeline with GitHub Actions",
+        "category": "SESSION_SUMMARY",
+        "score": -5.983927288256055,
+        "snippet": "Implement automated CI/CD pipeline for the project Working pipeline with lint, test, build, deploy s"
+      }
+    ],
+    "relevant_found": [
+      "r02",
+      "c04"
+    ],
+    "relevant_missed": [],
+    "noise_found": [
+      "s01"
+    ],
+    "unexpected": [],
+    "precision_assessment": ""
+  },
+  "Q25": {
+    "query": "memory leak debugging performance",
+    "category": "partial_overlap",
+    "description": "Memory leak -- Node.js debugging runbook is target, performance session is noise",
+    "bm25_results": [
+      {
+        "id": "r04",
+        "title": "Debug memory leak in Node.js worker process",
+        "category": "RUNBOOK",
+        "score": -10.102105106005169,
+        "snippet": "Worker process RSS exceeds 512MB or OOMKilled in Kubernetes Gradual memory increase over hours, GC p"
+      },
+      {
+        "id": "d04",
+        "title": "Redis for session caching and rate limiting",
+        "category": "DECISION",
+        "score": -4.519319524828292,
+        "snippet": "Need fast key-value store for session data and API rate limits Redis 7 with Sentinel for HA, separat"
+      },
+      {
+        "id": "s04",
+        "title": "Performance optimization for API response times",
+        "category": "SESSION_SUMMARY",
+        "score": -3.6828827738760963,
+        "snippet": "Reduce p95 API response time from 800ms to under 200ms Achieved 150ms p95 through caching and query "
+      }
+    ],
+    "relevant_found": [
+      "r04"
+    ],
+    "relevant_missed": [],
+    "noise_found": [
+      "s04"
+    ],
+    "unexpected": [
+      "d04"
+    ],
+    "precision_assessment": ""
+  }
+}

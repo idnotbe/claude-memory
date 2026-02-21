@@ -1167,10 +1167,15 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 - [x] Fixed CLAUDE.md documentation error (write-side -> read-side sanitization)
 - **Status:** COMPLETE ✓ (2 independent verification rounds, 6 reviewers total, 743 tests pass)
 
-#### Session 9 (~~Phase 4 -- Dual Verification~~ → Revised: Parallel Judge Optimization + Precision Eval, 2-3 hours) -- REVISED (2026-02-21)
+#### Session 9 (~~Phase 4 -- Dual Verification~~ → Revised: Parallel Judge Optimization + Precision Eval, 2-3 hours) -- **COMPLETE** (2026-02-22)
 - ~~[ ] Dual judge prompts + intersection/union logic~~ **CANCELLED** (recall collapse risk, marginal gain, see Phase 4 rationale above)
-- [ ] `ThreadPoolExecutor(max_workers=2)` for future parallel optimization (retained as standalone utility; not for dual judge)
-- [ ] Qualitative precision evaluation: 20-30 representative queries, manual BM25 vs BM25+judge comparison
+- [x] `ThreadPoolExecutor(max_workers=2)` for future parallel optimization (retained as standalone utility; not for dual judge)
+- [x] Qualitative precision evaluation: 20-30 representative queries, manual BM25 vs BM25+judge comparison
+- [x] **Dual verification (2 independent rounds, 6 reviewers total):**
+  - Round 1: code quality CONDITIONAL PASS (broad except, LOC 2.65x justified), security CONDITIONAL PASS (shutdown(wait=True) degrading fail-fast), integration PASS (10/10)
+  - Round 2: adversarial CONDITIONAL PASS (2 HIGH fixed: user_prompt escape, defensive type checking), compliance CONDITIONAL PASS (4 doc updates applied), testing PASS (769/769)
+- [x] **Post-V2 fixes:** F1 user_prompt/context html.escape in format_judge_input, F2 defensive type checking for malformed candidate data, F3-F6 CLAUDE.md + plan doc updates
+- [x] **Files changed:** `memory_judge.py` (+113 LOC: parallel batching + V2 fixes), `test_memory_judge.py` (+26 tests), `CLAUDE.md` (key files, security, testing LOC), `rd-08-final-plan.md` (status). **Files created:** `temp/s9-eval-report.md` (25-query evaluation), `temp/s9-*.md` (review reports).
 - **Revision rationale:** Multi-model analysis (Opus, Codex 5.3, Gemini 3 Pro) unanimously concluded dual judge's ~3%p precision gain does not justify recall collapse (~49% at 70% accuracy), 2x API cost, and added complexity. Current single-judge JUDGE_SYSTEM prompt already evaluates both relevance and usefulness. ThreadPoolExecutor retained as LOW-risk optimization (empirically verified: no memory leaks, thread-safe urllib, 3-tier timeout defense). Formal 40-50 query benchmark replaced with practical 20-30 query qualitative evaluation per Gemini's recommendation and statistical limitations at this corpus size (~500 memories).
 
 ### D. Corrected Estimates Table
@@ -1187,7 +1192,7 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 | S6 | 2 hrs / 20 queries | 3-4 hrs / 40-50 queries | Track D statistical analysis [R3] | **SKIPPED** (user: unconditional judge) |
 | S7 | Conditional | ~328 LOC (1.9x estimate), dual verification, 3 MEDIUM fixed | A- grade, 5 reviewers | **COMPLETE** |
 | S8 | ~280 LOC, 4-6 hrs | ~800 LOC (724 test + 73 SKILL.md + source fixes), 2 verification rounds | 3.8x test coverage vs plan; 3 source bugs found and fixed | **COMPLETE** ✓ |
-| S9 | ~70 LOC, 2-4 hrs (dual judge) | **~40 LOC, 2-3 hrs** (ThreadPoolExecutor utility + qualitative eval only; dual judge CANCELLED) | Multi-model consensus: recall collapse risk, marginal gain (2026-02-21) | **REVISED** |
+| S9 | ~70 LOC, 2-4 hrs (dual judge) | **~113 LOC, 2-3 hrs** (ThreadPoolExecutor +26 tests + 25-query eval + V2 fixes; dual judge CANCELLED) | 2.8x LOC vs revised estimate; 2 HIGH V2 findings fixed (user_prompt escape, defensive type checking) | **COMPLETE** ✓ |
 
 ---
 
@@ -1206,7 +1211,7 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 | **S7** | **Judge module + memory_retrieve integration** | **~328** | **4-6 hrs** | **Medium** | **COMPLETE ✓** |
 | **S8** | **Judge tests + search skill judge** | **~800** | **4-6 hrs** | **Low** | **COMPLETE ✓** |
 | ~~S9~~ | ~~Dual verification upgrade + tuning~~ | ~~~70~~ | ~~2-4 hrs~~ | -- | **REVISED** (dual judge cancelled) |
-| **S9** | **ThreadPoolExecutor utility + qualitative precision eval** | **~40** | **2-3 hrs** | **Low** | **Pending** |
+| **S9** | **ThreadPoolExecutor utility + qualitative precision eval** | **~113** | **2-3 hrs** | **Low** | **COMPLETE ✓** |
 
 **Mandatory sessions (S1-S6): ~470-510 LOC, ~3-4 focused days.**
 **With conditional sessions (S7-S9, revised): ~920-960 LOC, ~5 focused days.**

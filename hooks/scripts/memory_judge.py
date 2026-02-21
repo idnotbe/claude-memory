@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """LLM-as-judge for memory retrieval verification.
 
-Single-batch relevance classifier using the Anthropic Messages API.
+Relevance classifier using the Anthropic Messages API.
 Evaluates whether keyword-matched memories are actually relevant to
 the current user prompt and conversation context.
+
+Supports parallel batch splitting via ThreadPoolExecutor when candidate
+count exceeds threshold (default 6). Falls back to single-batch on failure.
 
 All errors return None so the caller can fall back to unfiltered results.
 
@@ -12,6 +15,7 @@ No external dependencies (stdlib only).
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import html
 import json
@@ -26,6 +30,8 @@ from collections import deque
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+_PARALLEL_THRESHOLD = 6  # Split into 2 batches when candidates exceed this
+_EXECUTOR_TIMEOUT_PAD = 2.0  # Extra seconds added to per-call timeout for executor
 
 JUDGE_SYSTEM = """\
 You are a memory relevance classifier for a coding assistant.
@@ -147,33 +153,47 @@ def format_judge_input(
     user_prompt: str,
     candidates: list[dict],
     conversation_context: str = "",
+    shuffle_seed: str | None = None,
 ) -> tuple[str, list[int]]:
     """Format candidates for judge evaluation with anti-position-bias shuffle.
 
     Uses hashlib.sha256 (deterministic across processes) instead of hash()
     (which uses random seed per Python 3.3+).
 
+    Args:
+        shuffle_seed: Optional override for shuffle seed derivation.
+            If provided, used instead of user_prompt for the sha256 seed.
+            The user_prompt is still shown in the formatted output.
+
     Returns (formatted_text, order_map) where order_map[display_idx] = real_idx.
     """
     n = len(candidates)
     order = list(range(n))
     # Deterministic, cross-process-stable shuffle
-    seed = int(hashlib.sha256(user_prompt.encode("utf-8", errors="replace")).hexdigest()[:8], 16)
+    seed_text = shuffle_seed if shuffle_seed is not None else user_prompt
+    seed = int(hashlib.sha256(seed_text.encode("utf-8", errors="replace")).hexdigest()[:8], 16)
     rng = random.Random(seed)
     rng.shuffle(order)
 
     lines = []
     for display_idx, real_idx in enumerate(order):
         c = candidates[real_idx]
-        tags = ", ".join(sorted(c.get("tags", set())))
-        title = html.escape(c.get("title", "untitled"))
-        cat = html.escape(c.get("category", "unknown"))
+        # Defensive type checking for malformed candidate data (V2-adversarial fix)
+        raw_tags = c.get("tags", set())
+        if not isinstance(raw_tags, (set, list, tuple)):
+            raw_tags = set()
+        tags = ", ".join(sorted(str(t) for t in raw_tags))
+        title = html.escape(str(c.get("title", "untitled")))
+        cat = html.escape(str(c.get("category", "unknown")))
         safe_tags = html.escape(tags)
         lines.append(f"[{display_idx}] [{cat}] {title} (tags: {safe_tags})")
 
-    parts = [f"User prompt: {user_prompt[:500]}"]
+    # Escape user_prompt and context to prevent <memory_data> tag breakout (V2-adversarial fix)
+    safe_prompt = html.escape(user_prompt[:500])
+    parts = [f"User prompt: {safe_prompt}"]
     if conversation_context:
-        parts.append(f"\nRecent conversation:\n{conversation_context}")
+        safe_context = html.escape(conversation_context)
+        parts.append(f"\nRecent conversation:\n{safe_context}")
     parts.append(f"\n<memory_data>\n" + "\n".join(lines) + "\n</memory_data>")
 
     return "\n".join(parts), order
@@ -220,6 +240,79 @@ def _extract_indices(display_indices, order_map: list[int], n_candidates: int) -
     return real
 
 
+def _judge_batch(
+    user_prompt: str,
+    batch: list[dict],
+    global_offset: int,
+    context: str,
+    model: str,
+    timeout: float,
+) -> list[int] | None:
+    """Judge a single batch and return global candidate indices, or None on failure.
+
+    Includes batch offset in shuffle seed for independent anti-position-bias
+    per batch (avoids identical permutations when batches have equal size).
+    """
+    # Include offset in shuffle seed for independent permutation per batch,
+    # while keeping the original user_prompt in the formatted output for the LLM.
+    shuffle_seed = f"{user_prompt}_batch{global_offset}"
+    formatted, order_map = format_judge_input(user_prompt, batch, context,
+                                              shuffle_seed=shuffle_seed)
+
+    response = call_api(JUDGE_SYSTEM, formatted, model, timeout)
+    if response is None:
+        return None
+
+    kept_local = parse_response(response, order_map, len(batch))
+    if kept_local is None:
+        return None
+
+    # Map batch-local real indices to global indices
+    return [idx + global_offset for idx in kept_local]
+
+
+def _judge_parallel(
+    user_prompt: str,
+    candidates: list[dict],
+    context: str,
+    model: str,
+    timeout: float,
+) -> list[int] | None:
+    """Split candidates into 2 batches and judge in parallel.
+
+    Returns global kept indices or None if parallel processing fails.
+    Uses a total deadline to prevent timeout stacking.
+    """
+    mid = len(candidates) // 2
+    batches = [
+        (candidates[:mid], 0),
+        (candidates[mid:], mid),
+    ]
+
+    deadline = time.monotonic() + timeout + _EXECUTOR_TIMEOUT_PAD
+    all_kept: list[int] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(_judge_batch, user_prompt, batch, offset, context,
+                            model, timeout): offset
+            for batch, offset in batches
+        }
+
+        try:
+            for future in concurrent.futures.as_completed(
+                futures, timeout=max(0.1, deadline - time.monotonic())
+            ):
+                result = future.result(timeout=0)  # Already completed
+                if result is None:
+                    return None  # Any batch failure -> fall back
+                all_kept.extend(result)
+        except (concurrent.futures.TimeoutError, Exception):
+            return None  # Deadline exceeded or unexpected error -> fall back
+
+    return all_kept
+
+
 def judge_candidates(
     user_prompt: str,
     candidates: list[dict],
@@ -229,18 +322,39 @@ def judge_candidates(
     include_context: bool = True,
     context_turns: int = 5,
 ) -> list[dict] | None:
-    """Run single-batch LLM judge. Returns filtered candidates or None on failure."""
+    """Run LLM judge on candidates. Returns filtered candidates or None on failure.
+
+    When candidate count exceeds _PARALLEL_THRESHOLD, splits into 2 batches
+    and processes in parallel via ThreadPoolExecutor. Falls back to sequential
+    single-batch on any parallel failure.
+    """
     if not candidates:
         return []
 
-    # Extract conversation context if available
+    # Extract conversation context if available (once, before any batching)
     context = ""
     if include_context and transcript_path:
         context = extract_recent_context(transcript_path, context_turns)
 
+    t0 = time.monotonic()
+
+    # Parallel path: split into 2 batches when above threshold
+    if len(candidates) > _PARALLEL_THRESHOLD:
+        kept_indices = _judge_parallel(user_prompt, candidates, context,
+                                       model, timeout)
+        if kept_indices is not None:
+            elapsed = time.monotonic() - t0
+            print(f"[DEBUG] judge parallel: {elapsed:.3f}s, model={model}, "
+                  f"n={len(candidates)}", file=sys.stderr)
+            return [candidates[i] for i in sorted(set(kept_indices))
+                    if i < len(candidates)]
+        # Parallel failed -- fall through to sequential
+        print("[DEBUG] judge parallel failed, falling back to sequential",
+              file=sys.stderr)
+
+    # Sequential single-batch path (default or fallback)
     formatted, order_map = format_judge_input(user_prompt, candidates, context)
 
-    t0 = time.monotonic()
     response = call_api(JUDGE_SYSTEM, formatted, model, timeout)
     elapsed = time.monotonic() - t0
     print(f"[DEBUG] judge call: {elapsed:.3f}s, model={model}", file=sys.stderr)

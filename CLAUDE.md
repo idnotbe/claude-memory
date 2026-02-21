@@ -44,7 +44,7 @@ The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku
 | hooks/scripts/memory_draft.py | Draft assembler: partial input → complete schema-valid JSON | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_write.py | Schema-enforced CRUD + lifecycle (retire/archive/unarchive/restore) | pydantic v2 |
 | hooks/scripts/memory_enforce.py | Rolling window enforcement: scans category, retires oldest beyond limit | pydantic v2 (via memory_write imports) |
-| hooks/scripts/memory_judge.py | LLM-as-judge for retrieval verification (anti-position-bias, anti-injection) | stdlib only (urllib.request) |
+| hooks/scripts/memory_judge.py | LLM-as-judge for retrieval verification (anti-position-bias, anti-injection, parallel batch splitting via ThreadPoolExecutor) | stdlib only (urllib.request, concurrent.futures) |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
 
@@ -68,7 +68,7 @@ Config keys fall into two categories:
 
 **All automated tests for this plugin live in this repo.**
 
-**Current state:** Tests exist in tests/ (2,169 LOC across 6 test files + conftest.py). No CI/CD yet.
+**Current state:** Tests exist in tests/ (11,142 LOC across 15 test files + conftest.py). No CI/CD yet.
 
 **Conventions:**
 - Test framework: **pytest**
@@ -121,7 +121,9 @@ These are the known security-relevant areas that tests must cover:
 
 5. **FTS5 query injection** -- Prevented: alphanumeric + `_.-` only, all tokens quoted. In-memory database (`:memory:`) -- no persistence attack surface. Parameterized queries (`MATCH ?`) prevent SQL injection.
 
-6. **LLM judge prompt injection** -- `memory_judge.py` wraps untrusted memory data in `<memory_data>` XML tags with explicit system prompt instructions to treat content as data, not instructions. Read-side sanitization (`html.escape()` in `memory_judge.py` and `_sanitize_cli_title()` in `memory_search_engine.py`) escapes `<`/`>` in titles before injection into prompts. Anti-position-bias: candidates are shuffled via deterministic sha256 seed to prevent order-dependent manipulation. All judge errors return None, falling back to conservative top-K retrieval.
+6. **LLM judge prompt injection** -- `memory_judge.py` wraps untrusted memory data in `<memory_data>` XML tags with explicit system prompt instructions to treat content as data, not instructions. Read-side sanitization (`html.escape()` in `memory_judge.py` and `_sanitize_cli_title()` in `memory_search_engine.py`) escapes `<`/`>` in titles, user prompts, and conversation context before injection into prompts. Anti-position-bias: candidates are shuffled via deterministic sha256 seed to prevent order-dependent manipulation. All judge errors return None, falling back to conservative top-K retrieval.
+
+7. **Thread safety in parallel judge** -- `memory_judge.py` uses `ThreadPoolExecutor(max_workers=2)` for parallel batch splitting when candidates exceed 6. All threaded components are verified thread-safe: `urllib.request` (per-call objects), `hashlib.sha256` (per-call instance), `random.Random(seed)` (per-call instance), `html.escape` (pure function). No shared mutable state between threads. 3-tier timeout defense: per-call urllib timeout, executor deadline with 2s pad, 15s hook SIGKILL.
 
 ## Quick Smoke Check
 

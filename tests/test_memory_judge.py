@@ -17,6 +17,10 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from memory_judge import (
     _extract_indices,
+    _judge_batch,
+    _judge_parallel,
+    _EXECUTOR_TIMEOUT_PAD,
+    _PARALLEL_THRESHOLD,
     call_api,
     extract_recent_context,
     format_judge_input,
@@ -463,6 +467,19 @@ class TestFormatJudgeInput:
         assert "<memory_data>" in result
         assert sorted(order) == [0]
 
+    def test_format_judge_input_shuffle_seed_override(self):
+        """shuffle_seed changes order but user_prompt is still shown in output."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(5)]
+        prompt = "my real prompt"
+        _, order_default = format_judge_input(prompt, candidates)
+        result, order_custom = format_judge_input(prompt, candidates,
+                                                  shuffle_seed="custom_seed")
+        # Different seed -> different order
+        assert order_default != order_custom
+        # User prompt is still in formatted output (not the seed)
+        assert "User prompt: my real prompt" in result
+        assert "custom_seed" not in result
+
     def test_format_judge_input_memory_data_breakout(self):
         """Title containing </memory_data> is escaped to prevent tag breakout."""
         candidates = [
@@ -758,3 +775,387 @@ class TestJudgeSystemPrompt:
     def test_system_prompt_output_format(self):
         """System prompt specifies JSON output format."""
         assert '{"keep":' in JUDGE_SYSTEM
+
+
+# ---------------------------------------------------------------------------
+# Constants tests
+# ---------------------------------------------------------------------------
+
+class TestConstants:
+    def test_parallel_threshold_value(self):
+        """Threshold is 6 as specified in plan."""
+        assert _PARALLEL_THRESHOLD == 6
+
+    def test_executor_timeout_pad_value(self):
+        """Executor timeout pad is 2.0 seconds."""
+        assert _EXECUTOR_TIMEOUT_PAD == 2.0
+
+
+# ---------------------------------------------------------------------------
+# _judge_batch tests
+# ---------------------------------------------------------------------------
+
+class TestJudgeBatch:
+    def test_judge_batch_returns_global_indices(self):
+        """Batch-local indices are offset to global indices."""
+        batch = [
+            _make_candidate("Mem A"),
+            _make_candidate("Mem B"),
+            _make_candidate("Mem C"),
+        ]
+        prompt = "test batch offset"
+        # Mock call_api to return keep=[0,1,2] for all display indices
+        mock_resp = _mock_urlopen('{"keep": [0, 1, 2]}')
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.urllib.request.urlopen", return_value=mock_resp):
+            result = _judge_batch(prompt, batch, global_offset=5, context="",
+                                  model="claude-haiku-4-5-20251001", timeout=3.0)
+        assert result is not None
+        # All 3 batch-local indices (0,1,2) should be offset by 5 -> (5,6,7)
+        assert sorted(result) == [5, 6, 7]
+
+    def test_judge_batch_offset_zero(self):
+        """First batch (offset=0) returns unmodified local indices."""
+        batch = [_make_candidate("Mem A"), _make_candidate("Mem B")]
+        mock_resp = _mock_urlopen('{"keep": [0, 1]}')
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.urllib.request.urlopen", return_value=mock_resp):
+            result = _judge_batch("test", batch, global_offset=0, context="",
+                                  model="claude-haiku-4-5-20251001", timeout=3.0)
+        assert result is not None
+        assert sorted(result) == [0, 1]
+
+    def test_judge_batch_api_failure_returns_none(self):
+        """API failure in batch returns None."""
+        batch = [_make_candidate("Mem A")]
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.urllib.request.urlopen",
+                   side_effect=TimeoutError("timeout")):
+            result = _judge_batch("test", batch, global_offset=0, context="",
+                                  model="claude-haiku-4-5-20251001", timeout=1.0)
+        assert result is None
+
+    def test_judge_batch_parse_failure_returns_none(self):
+        """Unparseable API response returns None."""
+        batch = [_make_candidate("Mem A")]
+        mock_resp = _mock_urlopen("totally not json")
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.urllib.request.urlopen", return_value=mock_resp):
+            result = _judge_batch("test", batch, global_offset=0, context="",
+                                  model="claude-haiku-4-5-20251001", timeout=3.0)
+        assert result is None
+
+    def test_judge_batch_independent_shuffle(self):
+        """Different offsets produce different shuffle seeds."""
+        batch = [_make_candidate(f"Mem {i}") for i in range(5)]
+        prompt = "same prompt"
+        # _judge_batch passes shuffle_seed with offset for independent permutations
+        from memory_judge import format_judge_input as fji
+        _, order_a = fji(prompt, batch, shuffle_seed=f"{prompt}_batch0")
+        _, order_b = fji(prompt, batch, shuffle_seed=f"{prompt}_batch3")
+        # Different offsets should produce different shuffles
+        assert order_a != order_b
+
+    def test_judge_batch_empty_keep(self):
+        """Empty keep list returns empty global indices."""
+        batch = [_make_candidate("Mem A")]
+        mock_resp = _mock_urlopen('{"keep": []}')
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.urllib.request.urlopen", return_value=mock_resp):
+            result = _judge_batch("test", batch, global_offset=5, context="",
+                                  model="claude-haiku-4-5-20251001", timeout=3.0)
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# _judge_parallel tests
+# ---------------------------------------------------------------------------
+
+class TestJudgeParallel:
+    def _mock_judge_batch(self, results_by_offset):
+        """Create a side_effect for _judge_batch that returns per-offset results.
+
+        results_by_offset: dict mapping global_offset -> list[int] of global indices
+        (or None for failure).
+        """
+        def side_effect(user_prompt, batch, global_offset, context, model, timeout):
+            return results_by_offset.get(global_offset)
+        return side_effect
+
+    def test_parallel_splits_and_merges(self):
+        """8 candidates split into 2 batches of 4, results merged correctly."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(8)]
+        mid = 4
+        mock = self._mock_judge_batch({
+            0: [0, 1, 2, 3],       # Batch 1 keeps all -> global 0-3
+            mid: [4, 5, 6, 7],     # Batch 2 keeps all -> global 4-7
+        })
+
+        with patch("memory_judge._judge_batch", side_effect=mock):
+            result = _judge_parallel("test query", candidates, context="",
+                                     model="test-model", timeout=3.0)
+
+        assert result is not None
+        assert sorted(result) == [0, 1, 2, 3, 4, 5, 6, 7]
+
+    def test_parallel_partial_keep(self):
+        """Batches keep subsets, merged result reflects both."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(8)]
+        mid = 4
+        mock = self._mock_judge_batch({
+            0: [0, 2],      # Batch 1 keeps globals 0, 2
+            mid: [5, 7],    # Batch 2 keeps globals 5, 7
+        })
+
+        with patch("memory_judge._judge_batch", side_effect=mock):
+            result = _judge_parallel("test", candidates, context="",
+                                     model="test-model", timeout=3.0)
+
+        assert result is not None
+        assert sorted(result) == [0, 2, 5, 7]
+
+    def test_parallel_one_batch_fails_returns_none(self):
+        """If one batch returns None, entire parallel returns None."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(8)]
+        mid = 4
+        mock = self._mock_judge_batch({
+            0: [0, 1],    # Batch 1 succeeds
+            mid: None,     # Batch 2 fails
+        })
+
+        with patch("memory_judge._judge_batch", side_effect=mock):
+            result = _judge_parallel("test", candidates, context="",
+                                     model="test-model", timeout=3.0)
+
+        assert result is None
+
+    def test_parallel_timeout_returns_none(self):
+        """Executor timeout triggers fallback (returns None)."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(8)]
+
+        def slow_batch(*args, **kwargs):
+            import time as t
+            t.sleep(10)
+            return [0]
+
+        with patch("memory_judge._judge_batch", side_effect=slow_batch):
+            result = _judge_parallel("test", candidates, context="",
+                                     model="test-model", timeout=0.1)
+
+        assert result is None
+
+    def test_parallel_empty_keep_both_batches(self):
+        """Both batches return empty keep -> empty result (not None)."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(8)]
+        mid = 4
+        mock = self._mock_judge_batch({0: [], mid: []})
+
+        with patch("memory_judge._judge_batch", side_effect=mock):
+            result = _judge_parallel("test", candidates, context="",
+                                     model="test-model", timeout=3.0)
+
+        assert result == []
+
+    def test_parallel_odd_candidate_count(self):
+        """Odd number of candidates: first batch gets fewer items."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(7)]
+        # 7 // 2 = 3 -> batch1 = [0,1,2], batch2 = [3,4,5,6]
+        mid = 3
+        mock = self._mock_judge_batch({
+            0: [0, 1, 2],
+            mid: [3, 4, 5, 6],
+        })
+
+        with patch("memory_judge._judge_batch", side_effect=mock):
+            result = _judge_parallel("test", candidates, context="",
+                                     model="test-model", timeout=3.0)
+
+        assert result is not None
+        assert sorted(result) == [0, 1, 2, 3, 4, 5, 6]
+
+    def test_parallel_exception_in_batch_returns_none(self):
+        """Unexpected exception in batch thread triggers fallback."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(8)]
+
+        def raising_batch(*args, **kwargs):
+            raise RuntimeError("unexpected error")
+
+        with patch("memory_judge._judge_batch", side_effect=raising_batch):
+            result = _judge_parallel("test", candidates, context="",
+                                     model="test-model", timeout=3.0)
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# judge_candidates parallel integration tests
+# ---------------------------------------------------------------------------
+
+class TestJudgeCandidatesParallel:
+    def test_parallel_triggered_above_threshold(self):
+        """judge_candidates uses parallel path for > _PARALLEL_THRESHOLD candidates."""
+        n = _PARALLEL_THRESHOLD + 2  # 8 candidates
+        candidates = [_make_candidate(f"Mem {i}") for i in range(n)]
+        # Mock call_api: keep all display indices for both batches
+        mid = n // 2
+        batch1_keep = list(range(mid))
+        batch2_keep = list(range(n - mid))
+        call_count = [0]
+        def mock_api(*args, **kwargs):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx == 0:
+                return json.dumps({"keep": batch1_keep})
+            elif idx == 1:
+                return json.dumps({"keep": batch2_keep})
+            return json.dumps({"keep": list(range(n))})  # Sequential fallback
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.call_api", side_effect=mock_api):
+            result = judge_candidates("test parallel", candidates)
+        assert result is not None
+        # Should return all n candidates
+        assert len(result) == n
+        # Verify call_api was called exactly twice (parallel), not 3 times (fallback)
+        assert call_count[0] == 2
+
+    def test_sequential_for_at_threshold(self):
+        """judge_candidates uses sequential path for <= _PARALLEL_THRESHOLD candidates."""
+        n = _PARALLEL_THRESHOLD  # Exactly at threshold (6)
+        candidates = [_make_candidate(f"Mem {i}") for i in range(n)]
+        mock_resp = _mock_urlopen(json.dumps({"keep": list(range(n))}))
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.urllib.request.urlopen", return_value=mock_resp):
+            result = judge_candidates("test sequential", candidates)
+        assert result is not None
+        assert len(result) == n
+
+    def test_parallel_fallback_to_sequential(self):
+        """When parallel fails, falls back to sequential single-batch."""
+        n = _PARALLEL_THRESHOLD + 4  # 10 candidates
+        candidates = [_make_candidate(f"Mem {i}") for i in range(n)]
+        call_count = [0]
+        def mock_api(*args, **kwargs):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx < 2:
+                return None  # Both parallel batches fail
+            # Sequential fallback: keep all
+            return json.dumps({"keep": list(range(n))})
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.call_api", side_effect=mock_api):
+            result = judge_candidates("test fallback", candidates)
+        assert result is not None
+        assert len(result) == n
+        # 2 parallel calls + 1 sequential fallback = 3 total
+        assert call_count[0] == 3
+
+    def test_parallel_both_fail_sequential_also_fails(self):
+        """When parallel AND sequential fail, returns None."""
+        n = _PARALLEL_THRESHOLD + 2
+        candidates = [_make_candidate(f"Mem {i}") for i in range(n)]
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.call_api", return_value=None):
+            result = judge_candidates("test total failure", candidates)
+        assert result is None
+
+    def test_parallel_preserves_candidate_order(self):
+        """Parallel results maintain original candidate order."""
+        candidates = [
+            _make_candidate(f"Mem {i}", tags={f"tag{i}"})
+            for i in range(10)
+        ]
+        # Keep indices 1, 4, 7 (scattered across both batches)
+        mid = 5
+        def mock_api(*args, **kwargs):
+            # Examine the formatted text to determine which batch
+            formatted_msg = args[1] if len(args) > 1 else kwargs.get("user_msg", "")
+            if "_batch0" in formatted_msg:
+                # Batch 1 has candidates 0-4; keep display index for candidate 1
+                batch = candidates[:mid]
+                _, order_map = format_judge_input(f"test order_batch0", batch)
+                display_for_1 = order_map.index(1)
+                return json.dumps({"keep": [display_for_1]})
+            else:
+                # Batch 2 has candidates 5-9; keep display indices for local 0(=global5-1=4) and 2(=global 7)
+                batch = candidates[mid:]
+                _, order_map = format_judge_input(f"test order_batch{mid}", batch)
+                # local indices: 4-5=local -1? No. batch2 = candidates[5:10]
+                # We want global 4 -> not in batch2. Want global 7 -> local 2
+                display_for_2 = order_map.index(2)  # global 7 = local 2
+                return json.dumps({"keep": [display_for_2]})
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.call_api", side_effect=mock_api):
+            result = judge_candidates("test order", candidates)
+
+        assert result is not None
+        # Results should be in original candidate order
+        titles = [r["title"] for r in result]
+        indices = [int(t.split()[-1]) for t in titles]
+        assert indices == sorted(indices)
+
+    def test_zero_candidates(self):
+        """Empty candidate list returns empty list (no parallel or sequential)."""
+        result = judge_candidates("test", [])
+        assert result == []
+
+    def test_one_candidate(self):
+        """Single candidate uses sequential path."""
+        candidates = [_make_candidate("Single")]
+        prompt = "test single"
+        _, order_map = format_judge_input(prompt, candidates)
+        display_idx = order_map.index(0)
+        mock_resp = _mock_urlopen(json.dumps({"keep": [display_idx]}))
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.urllib.request.urlopen", return_value=mock_resp):
+            result = judge_candidates(prompt, candidates)
+        assert result is not None
+        assert len(result) == 1
+
+    def test_two_candidates(self):
+        """Two candidates uses sequential path (below threshold)."""
+        candidates = [_make_candidate(f"Mem {i}") for i in range(2)]
+        mock_resp = _mock_urlopen('{"keep": [0, 1]}')
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.urllib.request.urlopen", return_value=mock_resp):
+            result = judge_candidates("test two", candidates)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_exact_threshold_plus_one(self):
+        """Exactly threshold+1 candidates triggers parallel."""
+        n = _PARALLEL_THRESHOLD + 1  # 7 candidates
+        candidates = [_make_candidate(f"Mem {i}") for i in range(n)]
+        mid = n // 2  # 3
+        call_count = [0]
+        def mock_api(*args, **kwargs):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx == 0:
+                return json.dumps({"keep": list(range(mid))})
+            return json.dumps({"keep": list(range(n - mid))})
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.call_api", side_effect=mock_api):
+            result = judge_candidates("test threshold+1", candidates)
+        assert result is not None
+        assert len(result) == n
+        assert call_count[0] == 2  # Parallel, not sequential
+
+    def test_large_candidate_list(self):
+        """30 candidates split into 15+15, parallel works correctly."""
+        n = 30
+        candidates = [_make_candidate(f"Mem {i}") for i in range(n)]
+        mid = n // 2
+        def mock_api(*args, **kwargs):
+            formatted_msg = args[1] if len(args) > 1 else ""
+            if "_batch0" in formatted_msg:
+                return json.dumps({"keep": [0, 5, 10]})  # 3 from first batch
+            return json.dumps({"keep": [1, 8, 14]})  # 3 from second batch
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             patch("memory_judge.call_api", side_effect=mock_api):
+            result = judge_candidates("test large", candidates)
+
+        assert result is not None
+        # Should have 6 results total (3 per batch)
+        assert len(result) == 6
