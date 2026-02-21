@@ -49,7 +49,17 @@
   "max_memories_per_category": 100,
   "retrieval": {
     "max_inject": 3,
-    "match_strategy": "fts5_bm25"
+    "match_strategy": "fts5_bm25",
+    "judge": {
+      "enabled": false,
+      "model": "claude-haiku-4-5-20251001",
+      "timeout_per_call": 3.0,
+      "fallback_top_k": 2,
+      "candidate_pool_size": 15,
+      "dual_verification": false,
+      "include_conversation_context": true,
+      "context_turns": 5
+    }
   },
   "triage": {
     "enabled": true,

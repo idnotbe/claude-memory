@@ -1004,14 +1004,14 @@ S1 -> S2 -> S3 -> S5 -> S5F -> P3 -> S4 -> S6 -> (conditional) S7 -> S8 -> S9
 **Progress (2026-02-21):**
 ```
 S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─> S9
- ✓     ✓     ✓     ✓     ✓      ✓    NEXT
+ ✓     ✓     ✓     ✓     ✓      ✓     ✓    SKIP   ✓   NEXT
 ```
 
 **Dependency graph (linear chain, no parallelism):**
 ```
 S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─> S9
  │     │     │     │      │      │     │     │
- │     │     │     │      │      │     │     └── Conditional on precision < 80%
+ │     │     │     │      │      │     │     └── SKIPPED (user: unconditional judge)
  │     │     │     │      │      │     └── Tests against FINAL output format (P3 XML attributes)
  │     │     │     │      │      └── Structural fix: [confidence:*] -> XML attributes (eliminates spoofing surface)
  │     │     │     │      └── Hardened S5: regex, Unicode Cf+Mn, nested bypass loops
@@ -1126,20 +1126,23 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 - [x] **NOTE:** M2 (backtick sanitization inconsistency between `_sanitize_snippet` and `_sanitize_title`) documented as pre-existing source code issue for future session. `_sanitize_title` does not strip backticks; `TestSanitizationConsistency` does not assert backtick removal. See `temp/s4-v2-adversarial.md` for full analysis.
 - [x] **Files changed:** `test_adversarial_descriptions.py` (import fix), `conftest.py` (factories + fixture). **Files created:** `test_fts5_search_engine.py` (18 tests), `test_fts5_benchmark.py` (5 tests). Reports in `temp/s4-*.md`.
 
-#### Session 6 (Phase 2f -- Measurement Gate, 3-4 hours) -- **NEXT**
-- [ ] [R4-fix] Prerequisite: Ensure at least 50 active memories across 4+ categories. If smaller, use bulk fixture from Session 4 (`bulk_memories` in conftest.py).
-- [ ] Prepare 40-50 prompts (context-dependent, specific, multi-topic, ambiguous)
-- [ ] Record injected memories and relevance judgment for each
-- [ ] Calculate precision = relevant / total injected
-- [ ] Decision: precision >= 80% -> skip Phase 3; < 80% -> proceed
-- [ ] Note: This is a directional sanity check, not a statistically precise gate
+#### Session 6 (Phase 2f -- Measurement Gate, 3-4 hours) -- **SKIPPED** (2026-02-21)
+- **Decision:** User decided to unconditionally implement LLM judge (S7), making the measurement gate moot. S6 skipped entirely.
+- **Rationale:** The gate's sole purpose was deciding whether to proceed to Phase 3. With Phase 3 confirmed, the gate adds no value.
+- ~~[ ] Prepare 40-50 prompts~~ ~~[ ] Record injected memories~~ ~~[ ] Calculate precision~~ ~~[ ] Decision rule~~
 
-#### Session 7 (Phase 3 -- LLM Judge, conditional, 4-6 hours)
-- [ ] Create `hooks/scripts/memory_judge.py` (~140 LOC)
-- [ ] Integrate into `memory_retrieve.py` (~30 LOC)
-- [ ] Add judge config to `assets/memory-config.default.json`
-- [ ] Update `hooks/hooks.json` timeout 10->15s
-- [ ] Update CLAUDE.md
+#### Session 7 (Phase 3 -- LLM Judge, ~~conditional~~, 4-6 hours) -- **COMPLETE** (2026-02-21)
+- [x] Create `hooks/scripts/memory_judge.py` (~253 LOC, expanded from ~140 for security hardening)
+- [x] Integrate into `memory_retrieve.py` (~75 LOC, both FTS5 and legacy paths)
+- [x] Add judge config to `assets/memory-config.default.json`
+- [x] Update `hooks/hooks.json` timeout 10->15s
+- [x] Update CLAUDE.md
+- [x] **Dual verification (2 independent rounds, 5 reviewers total):**
+  - Round 1: correctness PASS, security CONDITIONAL PASS (3 MEDIUM fixed), integration PASS (10/10)
+  - Round 2: adversarial PASS (V1 fixes verified, 2 LOW non-blocking), independent PASS (A- grade)
+- [x] **Post-V1 fixes:** M1 FTS5 pool size cap, M2 title html.escape in judge input, M3 transcript path validation
+- [x] **NOTE:** N1/N2 (raw user prompt/context in judge input) documented as LOW for future hardening. See `temp/s7-v2-adversarial.md`.
+- [x] **Files changed:** `memory_retrieve.py` (judge integration), `memory-config.default.json` (judge config), `hooks.json` (timeout), `CLAUDE.md` (docs). **Files created:** `memory_judge.py` (253 LOC). Reports in `temp/s7-*.md`.
 
 #### Session 8 (Phase 3b-3c -- Judge Tests + Search Judge, conditional, 4-6 hours)
 - [ ] Create `tests/test_memory_judge.py` (~200 LOC, 15 tests)
@@ -1161,8 +1164,9 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 | S5F | N/A (unplanned) | ~30 LOC, 2-3 hrs (hardening from S5 V2 findings) | S5 V2 verification findings | COMPLETE ✓ |
 | P3 | N/A (unplanned) | ~40 LOC changed, 3-4 hrs (XML attribute migration) | Structural fix for confidence spoofing surface | COMPLETE ✓ |
 | S4 | 4-6 hrs | 10-12 hrs (import fix, more test updates, validation gate, conftest factory updates) | Tracks C+D [R3], [R4-reviewed] | COMPLETE ✓ |
-| S6 | 2 hrs / 20 queries | 3-4 hrs / 40-50 queries | Track D statistical analysis [R3] | **NEXT** |
-| S7-S9 | Conditional | Conditional (unchanged) | No change | Pending |
+| S6 | 2 hrs / 20 queries | 3-4 hrs / 40-50 queries | Track D statistical analysis [R3] | **SKIPPED** (user: unconditional judge) |
+| S7 | Conditional | ~328 LOC (1.9x estimate), dual verification, 3 MEDIUM fixed | A- grade, 5 reviewers | **COMPLETE** |
+| S8-S9 | Conditional | Conditional (unchanged) | No change | Pending |
 
 ---
 
@@ -1177,10 +1181,10 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 | S5F | S5 hardening: regex, Cf+Mn, nested bypass | ~30 | 2-3 hrs | Low | COMPLETE ✓ |
 | P3 | XML attribute migration for confidence | ~40 | 3-4 hrs | Low | COMPLETE ✓ |
 | S4 | Test rewrite + Phase 2d validation | ~70 (actual: ~527 in-scope) | 10-12 hrs | Medium | COMPLETE ✓ |
-| **S6** | **Measurement gate: 40-50 queries** | **~0 (manual)** | **3-4 hrs** | **Low** | **NEXT** |
-| S7 (conditional) | Judge module + memory_retrieve integration | ~170 | 4-6 hrs | Medium | Pending |
-| S8 (conditional) | Judge tests + search skill judge | ~280 | 4-6 hrs | Low | Pending |
-| S9 (conditional) | Dual verification upgrade + tuning | ~70 | 2-4 hrs | Low | Pending |
+| ~~S6~~ | ~~Measurement gate: 40-50 queries~~ | ~~0~~ | ~~3-4 hrs~~ | -- | **SKIPPED** (user: unconditional judge) |
+| **S7** | **Judge module + memory_retrieve integration** | **~328** | **4-6 hrs** | **Medium** | **COMPLETE ✓** |
+| S8 | Judge tests + search skill judge | ~280 | 4-6 hrs | Low | Pending |
+| S9 | Dual verification upgrade + tuning | ~70 | 2-4 hrs | Low | Pending |
 
 **Mandatory sessions (S1-S6): ~470-510 LOC, ~3-4 focused days.**
 **With conditional sessions (S7-S9): ~990-1030 LOC, ~5-6 focused days.**

@@ -343,6 +343,8 @@ def main():
     max_inject = 3  # Reduced from 5: FTS5 BM25 is more precise, fewer results needed
     match_strategy = "fts5_bm25"
     category_descriptions: dict[str, str] = {}
+    judge_cfg: dict = {}
+    judge_enabled = False
     config_path = memory_root / "memory-config.json"
     if config_path.exists():
         try:
@@ -361,6 +363,15 @@ def main():
                     file=sys.stderr,
                 )
             match_strategy = retrieval.get("match_strategy", "fts5_bm25")
+            # LLM judge config
+            try:
+                judge_cfg = retrieval.get("judge", {})
+                judge_enabled = (
+                    judge_cfg.get("enabled", False)
+                    and bool(os.environ.get("ANTHROPIC_API_KEY"))
+                )
+            except (KeyError, AttributeError):
+                pass
             # Load category descriptions
             categories_raw = config.get("categories", {})
             if isinstance(categories_raw, dict):
@@ -371,6 +382,10 @@ def main():
                             category_descriptions[cat_key.lower()] = desc[:500]
         except (json.JSONDecodeError, KeyError, OSError):
             pass
+
+    if judge_cfg.get("enabled", False) and not os.environ.get("ANTHROPIC_API_KEY"):
+        print("[INFO] LLM judge enabled but ANTHROPIC_API_KEY not set. "
+              "Using BM25-only retrieval.", file=sys.stderr)
 
     if max_inject == 0:
         sys.exit(0)
@@ -398,14 +413,45 @@ def main():
         if fts_query:
             # L1/L2 fix: build FTS5 index from already-parsed entries (no re-read)
             conn = build_fts_index(entries)
+            # When judge is enabled, fetch more candidates (pool_size) so the judge
+            # can evaluate a wider set before filtering down to max_inject.
+            judge_pool_size = judge_cfg.get("candidate_pool_size", 15) if judge_enabled else 0
+            effective_inject = max(max_inject, judge_pool_size) if judge_enabled else max_inject
             try:
                 results = score_with_body(conn, fts_query, user_prompt,
-                                          max(10, max_inject), memory_root, "auto",
-                                          max_inject=max_inject)
+                                          max(10, effective_inject), memory_root, "auto",
+                                          max_inject=effective_inject)
             finally:
                 conn.close()
             if results:
-                top = results
+                # --- LLM Judge (FTS5 path) ---
+                if judge_enabled and results:
+                    from memory_judge import judge_candidates
+
+                    candidates_for_judge = results[:judge_pool_size]
+                    transcript_path = hook_input.get("transcript_path", "")
+
+                    filtered = judge_candidates(
+                        user_prompt=user_prompt,
+                        candidates=candidates_for_judge,
+                        transcript_path=transcript_path,
+                        model=judge_cfg.get("model", "claude-haiku-4-5-20251001"),
+                        timeout=judge_cfg.get("timeout_per_call", 3.0),
+                        include_context=judge_cfg.get("include_conversation_context", True),
+                        context_turns=judge_cfg.get("context_turns", 5),
+                    )
+
+                    if filtered is not None:
+                        filtered_paths = {e["path"] for e in filtered}
+                        results = [e for e in results if e["path"] in filtered_paths]
+                    else:
+                        # Judge failed: conservative fallback
+                        fallback_k = judge_cfg.get("fallback_top_k", 2)
+                        results = results[:fallback_k]
+
+                # Re-cap to max_inject (judge may have returned more than max_inject
+                # since we fetched candidate_pool_size candidates for it to evaluate)
+                top = results[:max_inject]
                 _output_results(top, category_descriptions)
                 return
             # Valid query but no results -- hint at manual search
@@ -451,6 +497,32 @@ def main():
 
     # Sort: highest score first, then by category priority
     scored.sort(key=lambda x: (-x[0], x[1]))
+
+    # --- LLM Judge (legacy path) ---
+    if judge_enabled and scored:
+        from memory_judge import judge_candidates
+
+        pool_size = judge_cfg.get("candidate_pool_size", 15)
+        candidates_for_judge = [entry for _, _, entry in scored[:pool_size]]
+        transcript_path = hook_input.get("transcript_path", "")
+
+        filtered = judge_candidates(
+            user_prompt=user_prompt,
+            candidates=candidates_for_judge,
+            transcript_path=transcript_path,
+            model=judge_cfg.get("model", "claude-haiku-4-5-20251001"),
+            timeout=judge_cfg.get("timeout_per_call", 3.0),
+            include_context=judge_cfg.get("include_conversation_context", True),
+            context_turns=judge_cfg.get("context_turns", 5),
+        )
+
+        if filtered is not None:
+            filtered_paths = {e["path"] for e in filtered}
+            scored = [(s, p, e) for s, p, e in scored if e["path"] in filtered_paths]
+        else:
+            # Judge failed: conservative fallback
+            fallback_k = judge_cfg.get("fallback_top_k", 2)
+            scored = scored[:fallback_k]
 
     # Pass 2: Deep check top candidates for recency bonus + retired exclusion
     # Resolve paths relative to project root (memory_root is .claude/memory)

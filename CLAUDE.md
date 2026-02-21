@@ -15,7 +15,7 @@ Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the
 | Hook Type | What It Does |
 |-----------|-------------|
 | Stop (x1) | Deterministic triage hook (command type) -- keyword heuristic, evaluates all 6 categories, outputs structured `<triage_data>` JSON + per-category context files for parallel subagent consumption |
-| UserPromptSubmit | Retrieval hook -- FTS5 BM25 keyword matcher injects relevant memories (fallback: legacy keyword) |
+| UserPromptSubmit | Retrieval hook -- FTS5 BM25 keyword matcher injects relevant memories (fallback: legacy keyword), optional LLM judge layer filters false positives |
 | PreToolUse:Write | Write guard -- blocks direct writes to memory directory |
 | PostToolUse:Write | Validation hook -- schema-validates any memory JSON, quarantines invalid (detection-only: PostToolUse deny cannot prevent writes, only inform) |
 
@@ -44,6 +44,7 @@ The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku
 | hooks/scripts/memory_draft.py | Draft assembler: partial input → complete schema-valid JSON | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_write.py | Schema-enforced CRUD + lifecycle (retire/archive/unarchive/restore) | pydantic v2 |
 | hooks/scripts/memory_enforce.py | Rolling window enforcement: scans category, retires oldest beyond limit | pydantic v2 (via memory_write imports) |
+| hooks/scripts/memory_judge.py | LLM-as-judge for retrieval verification (anti-position-bias, anti-injection) | stdlib only (urllib.request) |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
 
@@ -60,7 +61,7 @@ Config: memory-config.json | Defaults: assets/memory-config.default.json | Schem
 ### Config Architecture
 
 Config keys fall into two categories:
-- **Script-read** (parsed by Python scripts): `triage.enabled`, `triage.max_messages`, `triage.thresholds.*`, `triage.parallel.*`, `retrieval.enabled`, `retrieval.max_inject`, `delete.grace_period_days`, `categories.*.description` (used by triage and retrieval scripts)
+- **Script-read** (parsed by Python scripts): `triage.enabled`, `triage.max_messages`, `triage.thresholds.*`, `triage.parallel.*`, `retrieval.enabled`, `retrieval.max_inject`, `retrieval.judge.*` (enabled, model, timeout_per_call, candidate_pool_size, fallback_top_k, include_conversation_context, context_turns), `delete.grace_period_days`, `categories.*.description` (used by triage and retrieval scripts)
 - **Agent-interpreted** (read by LLM via SKILL.md instructions, not by Python): `memory_root`, `categories.*.enabled`, `categories.*.folder` (informational mapping), `categories.*.description` (category purpose text for triage context files and retrieval output), `categories.*.auto_capture`, `categories.*.retention_days`, `auto_commit`, `max_memories_per_category`, `retrieval.match_strategy`, `delete.archive_retired`
 
 ## Testing
@@ -120,6 +121,8 @@ These are the known security-relevant areas that tests must cover:
 
 5. **FTS5 query injection** -- Prevented: alphanumeric + `_.-` only, all tokens quoted. In-memory database (`:memory:`) -- no persistence attack surface. Parameterized queries (`MATCH ?`) prevent SQL injection.
 
+6. **LLM judge prompt injection** -- `memory_judge.py` wraps untrusted memory data in `<memory_data>` XML tags with explicit system prompt instructions to treat content as data, not instructions. Write-side sanitization (`memory_write.py`) strips `<`/`>` from titles. Anti-position-bias: candidates are shuffled via deterministic sha256 seed to prevent order-dependent manipulation. All judge errors return None, falling back to conservative top-K retrieval.
+
 ## Quick Smoke Check
 
 ```bash
@@ -131,6 +134,7 @@ python3 -m py_compile hooks/scripts/memory_candidate.py
 python3 -m py_compile hooks/scripts/memory_search_engine.py
 python3 -m py_compile hooks/scripts/memory_write.py
 python3 -m py_compile hooks/scripts/memory_enforce.py
+python3 -m py_compile hooks/scripts/memory_judge.py
 
 # Index operations (requires memory data)
 python3 hooks/scripts/memory_index.py --validate --root PATH_TO_MEMORY_ROOT
