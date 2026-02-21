@@ -47,10 +47,13 @@ class TestTokenize:
         assert "how" not in tokens  # stop word
         assert "to" not in tokens   # stop word
 
-    def test_excludes_short_words(self):
-        tokens = tokenize("go to db mx")
-        assert "db" not in tokens  # 2 chars
-        assert "mx" not in tokens  # 2 chars
+    def test_excludes_single_char_words(self):
+        tokens = tokenize("go to db mx a b")
+        assert "db" in tokens     # 2 chars now allowed (C1 fix)
+        assert "mx" in tokens     # 2 chars now allowed (C1 fix)
+        assert "a" not in tokens  # 1 char still excluded
+        assert "b" not in tokens  # 1 char still excluded
+        assert "go" not in tokens  # 2 chars but stop word
 
     def test_empty_input(self):
         assert tokenize("") == set()

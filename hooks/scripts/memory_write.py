@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Schema-enforced memory write tool for claude-memory plugin.
 
-Handles CREATE, UPDATE, DELETE, ARCHIVE, UNARCHIVE, and RESTORE operations
+Handles CREATE, UPDATE, RETIRE, ARCHIVE, UNARCHIVE, and RESTORE operations
 with Pydantic validation, mechanical merge protections, OCC, atomic writes,
 and index management.
 
@@ -14,7 +14,7 @@ Usage:
     --target .claude/memory/decisions/use-jwt.json \
     --input /tmp/.memory-write-pending.json --hash <md5>
 
-  python3 memory_write.py --action delete \
+  python3 memory_write.py --action retire \
     --target .claude/memory/decisions/use-jwt.json \
     --reason "Decision reversed"
 """
@@ -299,6 +299,8 @@ def auto_fix(data: dict, action: str) -> dict:
         original_title = data["title"]
         # Strip all control characters (null bytes, newlines, tabs, etc.)
         sanitized = re.sub(r'[\x00-\x1f\x7f]', '', original_title).strip()
+        # Strip Unicode format characters (zero-width space, RTL override, etc.)
+        sanitized = ''.join(c for c in sanitized if unicodedata.category(c) != 'Cf')
         # Strip index-injection markers
         sanitized = sanitized.replace(" -> ", " - ").replace("#tags:", "")
         if sanitized != original_title:
@@ -494,11 +496,11 @@ def check_merge_protections(old: dict, new: dict) -> tuple[bool, Optional[str], 
                 f"fix: Do not change '{field}' during UPDATE"
             ), []
 
-    # record_status immutable via UPDATE (only via delete/archive)
+    # record_status immutable via UPDATE (only via retire/archive)
     if old.get("record_status", "active") != new.get("record_status", "active"):
         return False, (
             "MERGE_ERROR\nfield: record_status\nrule: immutable via UPDATE\n"
-            "fix: Use --action delete to retire, or --action archive to archive"
+            "fix: Use --action retire to retire, or --action archive to archive"
         ), []
 
     # Tags: grow-only with eviction at cap
@@ -870,17 +872,17 @@ def do_update(args, memory_root: Path, index_path: Path) -> int:
     return 0
 
 
-def do_delete(args, memory_root: Path, index_path: Path) -> int:
-    """Handle --action delete (retire)."""
+def do_retire(args, memory_root: Path, index_path: Path) -> int:
+    """Handle --action retire (soft retire)."""
     target = Path(args.target)
     target_abs = Path.cwd() / target if not target.is_absolute() else target
 
     # Path traversal check
-    if _check_path_containment(target_abs, memory_root, "DELETE"):
+    if _check_path_containment(target_abs, memory_root, "RETIRE"):
         return 1
 
     if not target_abs.exists():
-        print(f"DELETE_ERROR\ntarget: {args.target}\nfix: File does not exist.")
+        print(f"RETIRE_ERROR\ntarget: {args.target}\nfix: File does not exist.")
         return 1
 
     # Read existing
@@ -900,7 +902,7 @@ def do_delete(args, memory_root: Path, index_path: Path) -> int:
     # Block archived -> retired (must unarchive first)
     if data.get("record_status") == "archived":
         print(
-            f"DELETE_ERROR\ntarget: {args.target}\n"
+            f"RETIRE_ERROR\ntarget: {args.target}\n"
             f"fix: Archived memories must be unarchived before retiring. "
             f"Use --action unarchive first."
         )
@@ -1163,18 +1165,28 @@ def do_restore(args, memory_root: Path, index_path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 def _read_input(input_path: str) -> Optional[dict]:
-    """Read JSON from input temp file.
+    """Read JSON from input file in .claude/memory/.staging/.
 
-    Validates that the input path is within /tmp/ and contains no path
-    traversal components (defense-in-depth against subagent manipulation).
+    Validates that the input path is within the project's
+    .claude/memory/.staging/ directory and contains no path traversal
+    components (defense-in-depth against subagent manipulation).
     """
-    # Defense-in-depth: input files must be in /tmp/ with no traversal
     resolved = os.path.realpath(input_path)
-    if not resolved.startswith("/tmp/") or ".." in input_path:
+    if ".." in input_path:
         print(
             f"SECURITY_ERROR\npath: {input_path}\n"
             f"resolved: {resolved}\n"
-            f"fix: Input file must be a /tmp/ path with no '..' components."
+            f"fix: Input path must not contain '..' components."
+        )
+        return None
+    # Only accept input from project-local .staging/ directory
+    in_staging = "/.claude/memory/.staging/" in resolved
+    if not in_staging:
+        print(
+            f"SECURITY_ERROR\npath: {input_path}\n"
+            f"resolved: {resolved}\n"
+            f"fix: Input file must be in .claude/memory/.staging/ "
+            f"with no '..' components."
         )
         return None
     try:
@@ -1183,7 +1195,7 @@ def _read_input(input_path: str) -> Optional[dict]:
     except FileNotFoundError:
         print(
             f"INPUT_ERROR\npath: {input_path}\n"
-            f"fix: Input file does not exist. Write JSON to the temp file first."
+            f"fix: Input file does not exist. Write JSON to the staging path first."
         )
         return None
     except json.JSONDecodeError as e:
@@ -1321,7 +1333,7 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["create", "update", "delete", "archive", "unarchive", "restore"],
+        choices=["create", "update", "retire", "archive", "unarchive", "restore"],
     )
     parser.add_argument("--category", choices=list(CATEGORY_FOLDERS.keys()))
     parser.add_argument(
@@ -1332,7 +1344,7 @@ def main():
         "--hash",
         help="MD5 hash of existing file for OCC (update only)",
     )
-    parser.add_argument("--reason", help="Reason for deletion or archival (delete/archive)")
+    parser.add_argument("--reason", help="Reason for retirement or archival (retire/archive)")
 
     args = parser.parse_args()
 
@@ -1355,8 +1367,8 @@ def main():
         return do_create(args, memory_root, index_path)
     elif args.action == "update":
         return do_update(args, memory_root, index_path)
-    elif args.action == "delete":
-        return do_delete(args, memory_root, index_path)
+    elif args.action == "retire":
+        return do_retire(args, memory_root, index_path)
     elif args.action == "archive":
         return do_archive(args, memory_root, index_path)
     elif args.action == "unarchive":

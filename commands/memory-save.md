@@ -36,8 +36,8 @@ Save a memory manually:
    - related_files: [] (populate if relevant files are mentioned)
    - confidence: 0.7-0.9 (0.9+ only for explicitly confirmed facts)
    - content: structured per the category schema
-5. Write the JSON to `/tmp/.memory-write-pending.json`
-6. Call: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_write.py --action create --category <cat> --target <memory_root>/<folder>/<slug>.json --input /tmp/.memory-write-pending.json`
+5. Write the JSON to `.claude/memory/.staging/.memory-write-pending.json`
+6. Call: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_write.py --action create --category <cat> --target <memory_root>/<folder>/<slug>.json --input .claude/memory/.staging/.memory-write-pending.json`
    - memory_write.py handles schema validation, atomic writes, and index.md updates
 7. Confirm: show the filename created and a brief summary
 

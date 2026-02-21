@@ -331,7 +331,9 @@ class TestIssue2ResolveMemoryRoot:
         # Try to write to /tmp (outside .claude/memory)
         target = str(tmp_path / "evil.json")
         mem_data = make_decision_memory()
-        input_file = str(tmp_path / "input.json")
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        input_file = str(staging / "input.json")
         Path(input_file).write_text(json.dumps(mem_data))
 
         rc, stdout, stderr = _run_write(
@@ -654,7 +656,9 @@ class TestIssue4MkdirLock:
             (mem / folder).mkdir()
 
         mem_data = make_decision_memory()
-        input_file = str(tmp_path / "input.json")
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        input_file = str(staging / "input.json")
         Path(input_file).write_text(json.dumps(mem_data))
         target = ".claude/memory/decisions/use-jwt.json"
 
@@ -820,7 +824,9 @@ class TestIssue5TitleSanitization:
         mem_data = make_decision_memory(
             title="Legit\x00hidden -> /evil #tags:hacked"
         )
-        input_file = str(tmp_path / "input.json")
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        input_file = str(staging / "input.json")
         Path(input_file).write_text(json.dumps(mem_data))
         target = ".claude/memory/decisions/use-jwt.json"
 
@@ -934,7 +940,9 @@ class TestCrossIssueInteractions:
 
         # Normal write should work without conflicting with rebuild
         new_mem = make_tech_debt_memory()
-        input_file = str(tmp_path / "input.json")
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        input_file = str(staging / "input.json")
         Path(input_file).write_text(json.dumps(new_mem))
         target = ".claude/memory/tech-debt/legacy-api-v1.json"
 
@@ -956,7 +964,9 @@ class TestCrossIssueInteractions:
             (mem / folder).mkdir()
 
         mem_data = make_decision_memory()
-        input_file = str(tmp_path / "input.json")
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        input_file = str(staging / "input.json")
         Path(input_file).write_text(json.dumps(mem_data))
         target = ".claude/memory/decisions/use-jwt.json"
 

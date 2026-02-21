@@ -12,7 +12,7 @@ Parse the argument to determine which subcommand to run. If no argument is given
 **Examples:**
 ```
 /memory                          # Show status and statistics
-/memory --retire old-api-design  # Soft-delete a memory
+/memory --retire old-api-design  # Soft-retire a memory
 /memory --archive legacy-notes   # Preserve indefinitely
 /memory --restore old-api-design # Undo retirement within grace period
 /memory --gc                     # Clean up expired retirements
@@ -49,7 +49,7 @@ User-initiated soft delete. This is the ONLY way to delete decisions and prefere
 1. Find the memory file matching `<slug>` by scanning all category folders for `<slug>.json`
 2. If not found, report error and list similar slugs
 3. Show the memory title and category, ask for confirmation
-4. Call: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_write.py --action delete --target <path> --reason "User-initiated retirement via /memory --retire"`
+4. Call: `python3 $CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_write.py --action retire --target <path> --reason "User-initiated retirement via /memory --retire"`
 5. Report result
 
 ## --archive <slug>

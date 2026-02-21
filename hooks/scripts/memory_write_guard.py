@@ -50,10 +50,16 @@ def main():
         if (basename.startswith(".memory-triage-context-") and basename.endswith(".txt")):
             sys.exit(0)
 
+    # Allow writes to the .staging/ subdirectory (draft files, context files).
+    # These are temporary working files used by subagents during memory consolidation.
+    normalized = resolved.replace(os.sep, "/")
+    staging_segment = "/.claude/memory/.staging/"
+    if staging_segment in normalized:
+        sys.exit(0)
+
     # Allow writes to the plugin config file (not a memory record).
     # Only exempt when the file is directly in the memory root, not in a subfolder
     # (prevents bypass via decisions/memory-config.json etc.)
-    normalized = resolved.replace(os.sep, "/")
     if basename == _CONFIG_BASENAME:
         idx = normalized.find(MEMORY_DIR_SEGMENT)
         if idx >= 0:
@@ -69,7 +75,7 @@ def main():
             "Direct writes to the memory directory are blocked. "
             "Use memory_write.py via Bash instead: "
             "python3 {}/hooks/scripts/memory_write.py "
-            "--action <create|update|delete> ...".format(plugin_root)
+            "--action <create|update|retire|archive|unarchive|restore> ...".format(plugin_root)
         )
         json.dump({
             "hookSpecificOutput": {

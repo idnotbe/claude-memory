@@ -6,9 +6,9 @@ type:"command" hook. Reads the conversation transcript, applies keyword
 heuristic scoring for 6 memory categories, and decides whether to block
 the stop so the agent can save memories.
 
-Exit codes:
-  0 -- Allow stop (nothing to save, or error/fallback)
-  2 -- Block stop (stderr contains items to save)
+Output protocol (advanced JSON hook API):
+  Block stop: exit 0, stdout = {"decision": "block", "reason": "..."}
+  Allow stop: exit 0, no stdout output
 
 No external dependencies (stdlib only).
 """
@@ -16,6 +16,7 @@ No external dependencies (stdlib only).
 from __future__ import annotations
 
 import collections
+import datetime
 import json
 import math
 import os
@@ -228,7 +229,9 @@ def parse_transcript(transcript_path: str, max_messages: int) -> list[dict]:
                 try:
                     msg = json.loads(line)
                     if isinstance(msg, dict):
-                        messages.append(msg)
+                        msg_type = msg.get("type", "")
+                        if msg_type in ("user", "human", "assistant"):
+                            messages.append(msg)
                 except json.JSONDecodeError:
                     continue
     except (OSError, IOError):
@@ -245,9 +248,10 @@ def extract_text_content(messages: list[dict]) -> str:
     parts: list[str] = []
     for msg in messages:
         msg_type = msg.get("type", "")
-        if msg_type not in ("human", "assistant"):
+        if msg_type not in ("user", "human", "assistant"):
             continue
-        content = msg.get("content", "")
+        # Try nested path first (real transcripts), fall back to flat (test fixtures)
+        content = msg.get("message", {}).get("content", "") or msg.get("content", "")
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
@@ -276,12 +280,23 @@ def extract_activity_metrics(messages: list[dict]) -> dict[str, int]:
     for msg in messages:
         msg_type = msg.get("type", "")
         if msg_type == "tool_use":
+            # Fallback: top-level tool_use (backwards compat with flat format)
             tool_uses += 1
             name = msg.get("name", "")
             if name:
                 tool_names.add(name)
-        elif msg_type in ("human", "assistant"):
+        elif msg_type in ("user", "human", "assistant"):
             exchanges += 1
+            # For assistant messages, inspect nested content for tool_use blocks
+            if msg_type == "assistant":
+                content = msg.get("message", {}).get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            tool_uses += 1
+                            name = block.get("name", "")
+                            if name:
+                                tool_names.add(name)
 
     return {
         "tool_uses": tool_uses,
@@ -669,23 +684,39 @@ def write_context_files(
     metrics: dict[str, int],
     results: list[dict],
     *,
+    cwd: str = "",
     category_descriptions: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Write per-category context files to /tmp/.
+    """Write per-category context files to the project staging directory.
 
     Returns a dict mapping category name -> context file path.
     For text-based categories, includes generous transcript excerpts
     around keyword matches. For SESSION_SUMMARY, includes activity metrics.
+
+    Files are written to {cwd}/.claude/memory/.staging/context-{cat}.txt.
+    Falls back to /tmp/ if cwd is empty or directory creation fails.
     """
     lines = text.split("\n")
     context_paths: dict[str, str] = {}
+
+    # Determine staging directory
+    staging_dir = ""
+    if cwd:
+        staging_dir = os.path.join(cwd, ".claude", "memory", ".staging")
+        try:
+            os.makedirs(staging_dir, exist_ok=True)
+        except OSError:
+            staging_dir = ""  # Fall back to /tmp/
 
     for r in results:
         category = r["category"]
         cat_lower = category.lower()
         score = r["score"]
         snippets = r.get("snippets", [])
-        path = f"/tmp/.memory-triage-context-{cat_lower}.txt"
+        if staging_dir:
+            path = os.path.join(staging_dir, f"context-{cat_lower}.txt")
+        else:
+            path = f"/tmp/.memory-triage-context-{cat_lower}.txt"
 
         try:
             parts: list[str] = [
@@ -771,7 +802,7 @@ _ZERO_WIDTH_RE = re.compile(
 
 
 def _sanitize_snippet(text: str) -> str:
-    """Sanitize a snippet for safe injection into stderr output.
+    """Sanitize a snippet for safe injection into output.
 
     Strips control characters, zero-width Unicode (including tag characters),
     backticks, and escapes XML-sensitive characters to prevent prompt injection
@@ -790,7 +821,7 @@ def format_block_message(
     *,
     category_descriptions: dict[str, str] | None = None,
 ) -> str:
-    """Format the stderr message for exit 2 (block stop).
+    """Format the block message for stdout JSON response (block stop).
 
     Produces a human-readable message that Claude can understand and act on,
     followed by a structured <triage_data> JSON block for programmatic parsing.
@@ -878,7 +909,8 @@ def format_block_message(
 def main() -> int:
     """Main entry point for the memory triage hook.
 
-    Returns exit code: 0 (allow stop) or 2 (block stop).
+    Returns exit code 0. Block/allow decision is communicated via
+    stdout JSON (advanced hook API), not exit codes.
     """
     try:
         return _run_triage()
@@ -916,6 +948,15 @@ def _run_triage() -> int:
     if check_stop_flag(cwd):
         return 0
 
+    # 4b. Sentinel-based idempotency: skip if recently handled
+    sentinel_path = os.path.join(cwd, ".claude", "memory", ".staging", ".triage-handled")
+    try:
+        sentinel_mtime = os.stat(sentinel_path).st_mtime
+        if time.time() - sentinel_mtime < FLAG_TTL_SECONDS:
+            return 0
+    except OSError:
+        pass  # Sentinel doesn't exist, continue normally
+
     # 5. Read and parse transcript
     if not transcript_path or not os.path.isfile(transcript_path):
         return 0
@@ -937,15 +978,69 @@ def _run_triage() -> int:
     # 7. Run heuristic triage
     results = run_triage(text, metrics, config["thresholds"])
 
+    # Score logging (non-critical observability)
+    try:
+        log_entry = {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "cwd": cwd,
+            "text_len": len(text),
+            "exchanges": metrics.get("exchanges", 0),
+            "tool_uses": metrics.get("tool_uses", 0),
+            "triggered": [
+                {"category": r["category"], "score": round(r["score"], 4)}
+                for r in results
+            ],
+        }
+        staging_log_dir = os.path.join(cwd, ".claude", "memory", ".staging")
+        try:
+            os.makedirs(staging_log_dir, exist_ok=True)
+            log_path = os.path.join(staging_log_dir, ".triage-scores.log")
+        except OSError:
+            log_path = "/tmp/.memory-triage-scores.log"
+        fd = os.open(
+            log_path,
+            os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass  # Non-critical: fail silently
+
     # 8. Output decision
     if results:
         # Block stop: create flag and output message
         set_stop_flag(cwd)
 
+        # Touch sentinel file for idempotency
+        try:
+            sentinel_dir = os.path.join(cwd, ".claude", "memory", ".staging")
+            os.makedirs(sentinel_dir, exist_ok=True)
+            sentinel_file = os.path.join(sentinel_dir, ".triage-handled")
+            fd = os.open(
+                sentinel_file,
+                os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+                0o600,
+            )
+            try:
+                os.write(fd, str(time.time()).encode("utf-8"))
+            finally:
+                os.close(fd)
+        except OSError:
+            pass  # Non-critical: worst case is duplicate triage
+
         # Write per-category context files for subagent consumption
         cat_descs = config.get("category_descriptions", {})
         context_paths = write_context_files(
             text, metrics, results,
+            cwd=cwd,
             category_descriptions=cat_descs,
         )
 
@@ -955,8 +1050,8 @@ def _run_triage() -> int:
             results, context_paths, parallel_config,
             category_descriptions=cat_descs,
         )
-        print(message, file=sys.stderr)
-        return 2
+        print(json.dumps({"decision": "block", "reason": message}))
+        return 0
     else:
         # Allow stop: nothing to save
         return 0

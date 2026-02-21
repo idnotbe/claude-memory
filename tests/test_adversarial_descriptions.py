@@ -350,13 +350,13 @@ class TestScoringExploitation:
         score = score_description(prompt_words, description_tokens)
         assert score <= 2, f"score_description exceeded cap: {score}"
 
-    def test_score_description_single_prefix_floors_to_zero(self):
-        """A single prefix match (0.5 pts) should floor to 0 via int()."""
+    def test_score_description_single_prefix_rounds_to_one(self):
+        """A single prefix match (0.5 pts) rounds to 1 via round-half-up (B2 fix)."""
         prompt_words = {"arch"}  # 4+ chars, prefix of "architectural"
         description_tokens = {"architectural"}
         score = score_description(prompt_words, description_tokens)
-        # 0.5 prefix -> int(0.5) = 0, then min(2, 0) = 0
-        assert score == 0, f"Single prefix match should floor to 0, got {score}"
+        # 0.5 prefix -> int(0.5 + 0.5) = 1, then min(2, 1) = 1
+        assert score == 1, f"Single prefix match should round to 1, got {score}"
 
     def test_score_description_empty_prompt(self):
         """Empty prompt words should return 0."""
@@ -390,11 +390,11 @@ class TestScoringExploitation:
         assert score == 2, f"Two exact matches should give 2, got {score}"
 
     def test_score_description_one_exact_one_prefix(self):
-        """One exact (1.0) + one prefix (0.5) = int(1.5) = 1, min(2,1) = 1."""
+        """One exact (1.0) + one prefix (0.5) = int(1.5 + 0.5) = 2, min(2,2) = 2 (B2 fix)."""
         prompt_words = {"architectural", "rati"}  # "rati" is prefix of "rationale"
         description_tokens = {"architectural", "rationale"}
         score = score_description(prompt_words, description_tokens)
-        assert score == 1, f"1 exact + 1 prefix should give 1, got {score}"
+        assert score == 2, f"1 exact + 1 prefix should give 2, got {score}"
 
     def test_score_entry_with_unicode_tokens(self):
         """Unicode tokens should be handled without crashes."""

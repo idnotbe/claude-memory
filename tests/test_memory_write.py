@@ -44,9 +44,11 @@ def run_write(action, category=None, target=None, input_file=None, hash_val=None
     return result.returncode, result.stdout, result.stderr
 
 
-def write_input_file(tmp_path, data):
-    """Write a JSON input file and return its path."""
-    fp = tmp_path / "input.json"
+def write_input_file(memory_project, data):
+    """Write a JSON input file to .claude/memory/.staging/ and return its path."""
+    staging = memory_project / ".claude" / "memory" / ".staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    fp = staging / "input.json"
     fp.write_text(json.dumps(data, indent=2))
     return str(fp)
 
@@ -311,7 +313,7 @@ class TestMergeProtections:
 class TestCreateFlow:
     def test_create_valid(self, memory_project, tmp_path):
         mem = make_decision_memory()
-        input_file = write_input_file(tmp_path, mem)
+        input_file = write_input_file(memory_project,mem)
         target = ".claude/memory/decisions/use-jwt.json"
         rc, stdout, stderr = run_write(
             "create", "decision", target, input_file,
@@ -340,7 +342,7 @@ class TestCreateFlow:
         target_abs.write_text(json.dumps(retired))
         # Try to create over it
         mem = make_decision_memory()
-        input_file = write_input_file(tmp_path, mem)
+        input_file = write_input_file(memory_project,mem)
         rc, stdout, stderr = run_write(
             "create", "decision", target, input_file,
             cwd=str(memory_project),
@@ -362,7 +364,7 @@ class TestCreateFlow:
                 "rationale": ["Good"],
             },
         }
-        input_file = write_input_file(tmp_path, mem)
+        input_file = write_input_file(memory_project,mem)
         target = ".claude/memory/decisions/my-decision-about-auth.json"
         rc, stdout, stderr = run_write(
             "create", "decision", target, input_file,
@@ -399,7 +401,7 @@ class TestUpdateFlow:
             content_overrides={"status": "deprecated"},
             tags=["auth", "jwt", "security", "deprecated"],
         )
-        input_file = write_input_file(tmp_path, new_mem)
+        input_file = write_input_file(memory_project,new_mem)
         md5 = file_md5(str(target_abs))
         rc, stdout, stderr = run_write(
             "update", "decision", target, input_file, hash_val=md5,
@@ -415,7 +417,7 @@ class TestUpdateFlow:
         new_mem = make_decision_memory(
             changes=[{"date": "2026-02-14T00:00:00Z", "summary": "test change"}],
         )
-        input_file = write_input_file(tmp_path, new_mem)
+        input_file = write_input_file(memory_project,new_mem)
         rc, stdout, stderr = run_write(
             "update", "decision", target, input_file, hash_val="wrong_hash",
             cwd=str(memory_project),
@@ -433,7 +435,7 @@ class TestUpdateFlow:
             tags=["auth", "jwt", "security", "oauth2"],
             changes=[{"date": "2026-02-14T00:00:00Z", "summary": "Renamed to OAuth2"}],
         )
-        input_file = write_input_file(tmp_path, new_mem)
+        input_file = write_input_file(memory_project,new_mem)
         md5 = file_md5(str(target_abs))
         rc, stdout, stderr = run_write(
             "update", "decision", target, input_file, hash_val=md5,
@@ -462,7 +464,7 @@ class TestUpdateFlow:
                 {"date": "2026-02-14T00:00:00Z", "summary": "FIFO test change"},
             ],
         )
-        input_file = write_input_file(tmp_path, new_mem)
+        input_file = write_input_file(memory_project,new_mem)
         md5 = file_md5(str(target_abs))
         rc, stdout, stderr = run_write(
             "update", "decision", target, input_file, hash_val=md5,
@@ -473,7 +475,7 @@ class TestUpdateFlow:
         assert len(updated["changes"]) <= CHANGES_CAP
 
 
-class TestDeleteFlow:
+class TestRetireFlow:
     def _setup_existing(self, memory_project):
         mem = make_tech_debt_memory()
         target = ".claude/memory/tech-debt/legacy-api-v1.json"
@@ -487,10 +489,10 @@ class TestDeleteFlow:
         )
         return target, target_abs
 
-    def test_delete_retires(self, memory_project):
+    def test_retire_retires(self, memory_project):
         target, target_abs = self._setup_existing(memory_project)
         rc, stdout, stderr = run_write(
-            "delete", target=target, reason="No longer relevant",
+            "retire", target=target, reason="No longer relevant",
             cwd=str(memory_project),
         )
         assert rc == 0, f"Failed: {stdout}\n{stderr}"
@@ -505,27 +507,27 @@ class TestDeleteFlow:
         index = (memory_project / ".claude" / "memory" / "index.md").read_text()
         assert "legacy-api-v1" not in index
 
-    def test_delete_idempotent(self, memory_project):
-        """Deleting an already-retired file succeeds idempotently."""
+    def test_retire_idempotent(self, memory_project):
+        """Retiring an already-retired file succeeds idempotently."""
         target, target_abs = self._setup_existing(memory_project)
-        # First delete
-        run_write("delete", target=target, reason="First", cwd=str(memory_project))
-        # Second delete
+        # First retire
+        run_write("retire", target=target, reason="First", cwd=str(memory_project))
+        # Second retire
         rc, stdout, stderr = run_write(
-            "delete", target=target, reason="Second",
+            "retire", target=target, reason="Second",
             cwd=str(memory_project),
         )
         assert rc == 0
         result = json.loads(stdout)
         assert result["status"] == "already_retired"
 
-    def test_delete_nonexistent(self, memory_project):
+    def test_retire_nonexistent(self, memory_project):
         rc, stdout, stderr = run_write(
-            "delete", target=".claude/memory/decisions/nonexistent.json",
+            "retire", target=".claude/memory/decisions/nonexistent.json",
             reason="test", cwd=str(memory_project),
         )
         assert rc == 1
-        assert "DELETE_ERROR" in stdout
+        assert "RETIRE_ERROR" in stdout
 
 
 class TestPydanticValidation:
@@ -642,7 +644,7 @@ class TestArchiveFlow:
         """Cannot archive a retired memory."""
         target, target_abs = self._setup_active(memory_project)
         # Retire first
-        run_write("delete", target=target, reason="Retired", cwd=str(memory_project))
+        run_write("retire", target=target, reason="Retired", cwd=str(memory_project))
         # Try to archive
         rc, stdout, stderr = run_write(
             "archive", target=target, reason="Try archive",
@@ -778,11 +780,11 @@ class TestUnarchiveFlow:
         assert last_change["new_value"] == "active"
 
 
-class TestDeleteArchiveInteraction:
-    """Test interactions between delete and archive."""
+class TestRetireArchiveInteraction:
+    """Test interactions between retire and archive."""
 
-    def test_delete_clears_archived_fields(self, memory_project):
-        """DELETE on an active memory should not leave stale archived fields."""
+    def test_retire_clears_archived_fields(self, memory_project):
+        """RETIRE on an active memory should not leave stale archived fields."""
         mem = make_decision_memory()
         target = ".claude/memory/decisions/use-jwt.json"
         target_abs = memory_project / target
@@ -794,7 +796,7 @@ class TestDeleteArchiveInteraction:
             f"- [DECISION] {mem['title']} -> {target} #tags:{','.join(mem['tags'])}\n"
         )
         rc, stdout, stderr = run_write(
-            "delete", target=target, reason="Test clear",
+            "retire", target=target, reason="Test clear",
             cwd=str(memory_project),
         )
         assert rc == 0
@@ -813,11 +815,11 @@ class TestDeleteArchiveInteraction:
         target_abs.parent.mkdir(parents=True, exist_ok=True)
         target_abs.write_text(json.dumps(mem, indent=2))
         rc, stdout, stderr = run_write(
-            "delete", target=target, reason="Try retire",
+            "retire", target=target, reason="Try retire",
             cwd=str(memory_project),
         )
         assert rc == 1
-        assert "DELETE_ERROR" in stdout
+        assert "RETIRE_ERROR" in stdout
         assert "unarchive" in stdout.lower()
 
 
@@ -831,7 +833,7 @@ class TestPathTraversal:
     def test_path_traversal_create_blocked(self, memory_project, tmp_path):
         """CREATE with path traversal should be blocked."""
         mem = make_decision_memory()
-        input_file = write_input_file(tmp_path, mem)
+        input_file = write_input_file(memory_project,mem)
         target = ".claude/memory/decisions/../../../traversal.json"
         rc, stdout, stderr = run_write(
             "create", "decision", target, input_file,
@@ -840,11 +842,11 @@ class TestPathTraversal:
         assert rc == 1
         assert "PATH_ERROR" in stdout
 
-    def test_path_traversal_delete_blocked(self, memory_project):
-        """DELETE with path traversal should be blocked."""
+    def test_path_traversal_retire_blocked(self, memory_project):
+        """RETIRE with path traversal should be blocked."""
         target = ".claude/memory/decisions/../../../etc/passwd"
         rc, stdout, stderr = run_write(
-            "delete", target=target, reason="test",
+            "retire", target=target, reason="test",
             cwd=str(memory_project),
         )
         assert rc == 1
@@ -914,7 +916,7 @@ class TestCreateRecordStatusInjection:
         mem = make_decision_memory(record_status="retired")
         mem["retired_at"] = "2026-02-10T10:00:00Z"
         mem["retired_reason"] = "Injected"
-        input_file = write_input_file(tmp_path, mem)
+        input_file = write_input_file(memory_project,mem)
         target = ".claude/memory/decisions/injected.json"
         rc, stdout, stderr = run_write(
             "create", "decision", target, input_file,
@@ -931,7 +933,7 @@ class TestCreateRecordStatusInjection:
         mem = make_decision_memory(record_status="archived")
         mem["archived_at"] = "2026-02-10T10:00:00Z"
         mem["archived_reason"] = "Injected"
-        input_file = write_input_file(tmp_path, mem)
+        input_file = write_input_file(memory_project,mem)
         target = ".claude/memory/decisions/injected2.json"
         rc, stdout, stderr = run_write(
             "create", "decision", target, input_file,
@@ -958,7 +960,7 @@ class TestTagCapEnforcement:
         """CREATE with >12 tags should succeed but truncate to TAG_CAP."""
         many_tags = [f"tag{i}" for i in range(15)]
         mem = make_decision_memory(tags=many_tags)
-        input_file = write_input_file(tmp_path, mem)
+        input_file = write_input_file(memory_project,mem)
         target = ".claude/memory/decisions/many-tags.json"
         rc, stdout, stderr = run_write(
             "create", "decision", target, input_file,
@@ -1007,7 +1009,7 @@ class TestOCCWarning:
             content_overrides={"status": "deprecated"},
             tags=["auth", "jwt", "security", "deprecated"],
         )
-        input_file = write_input_file(tmp_path, new_mem)
+        input_file = write_input_file(memory_project,new_mem)
         # Note: no hash_val provided
         rc, stdout, stderr = run_write(
             "update", "decision", target, input_file,

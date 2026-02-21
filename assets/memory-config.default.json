@@ -48,8 +48,8 @@
   "auto_commit": false,
   "max_memories_per_category": 100,
   "retrieval": {
-    "max_inject": 5,
-    "match_strategy": "title_tags"
+    "max_inject": 3,
+    "match_strategy": "fts5_bm25"
   },
   "triage": {
     "enabled": true,

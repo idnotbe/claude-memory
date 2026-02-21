@@ -122,7 +122,7 @@ Every memory has a `record_status` that controls its visibility and retention:
 | Status | Indexed? | Retrievable? | GC-eligible? | Description |
 |--------|----------|-------------|-------------|-------------|
 | `active` | Yes | Yes | No | Default for all new memories |
-| `retired` | No | No | Yes (after grace period) | Soft-deleted; preserved for 30-day grace period |
+| `retired` | No | No | Yes (after grace period) | Soft-retired; preserved for 30-day grace period |
 | `archived` | No | No | No | Preserved indefinitely for historical reference |
 
 **State transitions:**
@@ -138,7 +138,7 @@ Retired memories are permanently deleted by garbage collection (`/memory --gc`) 
 | Command | Description |
 |---------|-------------|
 | `/memory` | Show memory status and statistics |
-| `/memory --retire <slug>` | Soft-delete a memory (30-day grace period) |
+| `/memory --retire <slug>` | Soft-retire a memory (30-day grace period) |
 | `/memory --archive <slug>` | Shelve a memory permanently (preserved, not GC'd) |
 | `/memory --unarchive <slug>` | Restore an archived memory to active |
 | `/memory --restore <slug>` | Restore a retired memory to active status |
@@ -156,7 +156,7 @@ Retired memories are permanently deleted by garbage collection (`/memory --gc`) 
 /memory:search --include-retired database  # Include retired/archived in search
 /memory:save decision "We chose Vitest over Jest for speed and ESM support"
 /memory:config disable runbook auto-capture
-/memory --retire old-api-design            # Soft-delete, 30-day grace period
+/memory --retire old-api-design            # Soft-retire, 30-day grace period
 /memory --archive legacy-payment-provider  # Preserve indefinitely
 /memory --restore old-api-design           # Undo retirement (if file not yet GC'd)
 /memory --gc                               # Clean up expired retirements
@@ -250,7 +250,7 @@ memory_triage.py (Phase 0 · deterministic · stdlib Python)
   │           │
   │           ▼
   └─ Phase 3: main agent applies CUD resolution table
-        ├─ memory_write.py --action create/update/delete/archive/unarchive
+        ├─ memory_write.py --action create/update/retire/archive/unarchive
         │     ├─ Pydantic schema validation
         │     ├─ atomic write (tmp + rename)
         │     └─ lock index.md + atomic index update

@@ -199,8 +199,12 @@ def main():
         help="Memory category to search within",
     )
     parser.add_argument(
-        "--new-info", required=True,
+        "--new-info",
         help="New information to match against existing entries",
+    )
+    parser.add_argument(
+        "--new-info-file",
+        help="Path to file containing new information (alternative to --new-info)",
     )
     parser.add_argument(
         "--lifecycle-event",
@@ -213,6 +217,20 @@ def main():
         help="Root directory of memory storage",
     )
     args = parser.parse_args()
+
+    # Resolve new-info: --new-info-file takes precedence over --new-info
+    if args.new_info_file is not None:
+        try:
+            nif = Path(args.new_info_file)
+            args.new_info = nif.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            parser.error(f"--new-info-file not found: {args.new_info_file}")
+        except PermissionError:
+            parser.error(f"--new-info-file permission denied: {args.new_info_file}")
+        except OSError as e:
+            parser.error(f"--new-info-file read error: {e}")
+    elif args.new_info is None:
+        parser.error("one of --new-info or --new-info-file is required")
 
     root = Path(args.root)
     index_path = root / "index.md"

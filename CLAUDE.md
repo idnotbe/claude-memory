@@ -21,14 +21,14 @@ Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the
 
 ### Write Actions
 
-`memory_write.py` supports 6 actions: `create`, `update`, `delete` (soft retire), `archive`, `unarchive`, and `restore`. The `delete` action sets `record_status="retired"` (soft delete with grace period). `archive`/`unarchive` handle long-term preservation (`active` <-> `archived`). `restore` transitions `retired` -> `active` (clears retirement fields, re-adds to index).
+`memory_write.py` supports 6 actions: `create`, `update`, `retire` (soft retire), `archive`, `unarchive`, and `restore`. The `retire` action sets `record_status="retired"` (soft retire with grace period). `archive`/`unarchive` handle long-term preservation (`active` <-> `archived`). `restore` transitions `retired` -> `active` (clears retirement fields, re-adds to index).
 
 ### Parallel Per-Category Processing
 
 When the Stop hook triggers categories, it produces:
 1. **Human-readable message** (backwards-compatible) listing triggered categories
 2. **`<triage_data>` JSON block** with per-category scores, context file paths, and model assignments
-3. **Context files** at `/tmp/.memory-triage-context-<CATEGORY>.txt` with generous transcript excerpts
+3. **Context files** at `.claude/memory/.staging/context-<CATEGORY>.txt` with generous transcript excerpts
 
 The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku/sonnet/opus per `triage.parallel.category_models` config) for parallel drafting, then runs verification subagents, then saves via memory_write.py. See `skills/memory-management/SKILL.md` for the full 4-phase flow.
 
@@ -39,8 +39,9 @@ The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku
 | hooks/scripts/memory_triage.py | Stop hook: keyword triage for 6 categories + structured output + context files | stdlib only |
 | hooks/scripts/memory_retrieve.py | Keyword-based retrieval, injects context | stdlib only |
 | hooks/scripts/memory_index.py | Index rebuild, validate, query CLI | stdlib only |
-| hooks/scripts/memory_candidate.py | ACE candidate selection for update/delete | stdlib only |
-| hooks/scripts/memory_write.py | Schema-enforced CRUD + lifecycle (archive/unarchive/restore) | pydantic v2 |
+| hooks/scripts/memory_candidate.py | ACE candidate selection for update/retire | stdlib only |
+| hooks/scripts/memory_draft.py | Draft assembler: partial input → complete schema-valid JSON | pydantic v2 (via memory_write imports) |
+| hooks/scripts/memory_write.py | Schema-enforced CRUD + lifecycle (retire/archive/unarchive/restore) | pydantic v2 |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
 
@@ -73,7 +74,7 @@ Config keys fall into two categories:
 
 **What needs tests (prioritized):**
 1. memory_retrieve.py -- keyword matching, stop-word filtering, scoring, config parsing, max_inject behavior
-2. memory_write.py -- create/update/delete operations, Pydantic validation, atomic writes, index updates
+2. memory_write.py -- create/update/retire operations, Pydantic validation, atomic writes, index updates
 3. memory_candidate.py -- candidate scoring, index line parsing, lifecycle events, path safety
 4. memory_index.py -- rebuild, validate, query with fixture data
 5. memory_write_guard.py -- path detection, bypass for staging file, edge cases
