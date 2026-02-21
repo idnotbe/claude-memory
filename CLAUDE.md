@@ -121,7 +121,7 @@ These are the known security-relevant areas that tests must cover:
 
 5. **FTS5 query injection** -- Prevented: alphanumeric + `_.-` only, all tokens quoted. In-memory database (`:memory:`) -- no persistence attack surface. Parameterized queries (`MATCH ?`) prevent SQL injection.
 
-6. **LLM judge prompt injection** -- `memory_judge.py` wraps untrusted memory data in `<memory_data>` XML tags with explicit system prompt instructions to treat content as data, not instructions. Write-side sanitization (`memory_write.py`) strips `<`/`>` from titles. Anti-position-bias: candidates are shuffled via deterministic sha256 seed to prevent order-dependent manipulation. All judge errors return None, falling back to conservative top-K retrieval.
+6. **LLM judge prompt injection** -- `memory_judge.py` wraps untrusted memory data in `<memory_data>` XML tags with explicit system prompt instructions to treat content as data, not instructions. Read-side sanitization (`html.escape()` in `memory_judge.py` and `_sanitize_cli_title()` in `memory_search_engine.py`) escapes `<`/`>` in titles before injection into prompts. Anti-position-bias: candidates are shuffled via deterministic sha256 seed to prevent order-dependent manipulation. All judge errors return None, falling back to conservative top-K retrieval.
 
 ## Quick Smoke Check
 

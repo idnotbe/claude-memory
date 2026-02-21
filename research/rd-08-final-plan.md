@@ -508,11 +508,12 @@ Skill activates (runs within agent conversation)
 **Skeptic concern:** AND-gate of two imperfect classifiers drops recall to ~49%.
 **Pragmatist recommendation:** Single batch, measure first, upgrade to dual if needed.
 
-**Decision: Single batch judge as default.** Rationale:
+**Decision: Single batch judge as default.** ~~Dual verification available as config upgrade.~~ **UPDATE (2026-02-21): Dual verification CANCELLED entirely.** Rationale:
 - Single call: ~1s latency (acceptable). Dual: ~2-3s (borderline)
 - No measured baseline to justify dual verification overhead
 - Single call's precision is unknown -- measure before adding complexity
-- Dual verification available as config upgrade (`judge.dual_verification: true`)
+- ~~Dual verification available as config upgrade (`judge.dual_verification: true`)~~
+- **[2026-02-21] Multi-model consensus (Opus, Codex 5.3, Gemini 3 Pro): dual judge recall collapse (~49%) is unacceptable. Current single-judge prompt already evaluates both relevance and usefulness. Dual judge cancelled.**
 
 #### D2: Include Conversation Context from transcript_path
 
@@ -886,7 +887,7 @@ if judge_enabled and scored:
       "timeout_per_call": 3.0,
       "fallback_top_k": 2,
       "candidate_pool_size": 15,
-      "dual_verification": false,
+      "dual_verification": false,  // CANCELLED (2026-02-21): key retained for schema compat, always false
       "include_conversation_context": true,
       "context_turns": 5,
       "modes": {
@@ -904,19 +905,23 @@ if judge_enabled and scored:
 }
 ```
 
-### Dual Verification (Config-Gated Upgrade, Phase 4)
+### ~~Dual Verification (Config-Gated Upgrade, Phase 4)~~ -- CANCELLED (2026-02-21)
 
-When `judge.dual_verification: true`:
+> **CANCELLED.** Multi-model analysis (Opus + Codex 5.3 + Gemini 3 Pro) unanimously recommended against dual judge implementation. Key reasons: (1) AND-gate recall collapse to ~49% at 70% per-judge accuracy is catastrophic for a memory system; (2) ~3%p precision gain (88-92% vs 85-90%) does not justify 2x API cost; (3) current `JUDGE_SYSTEM` prompt already combines relevance + usefulness in single pass; (4) plan's own skeptic/adversarial reviewer called it "structurally net-negative." `ThreadPoolExecutor` is retained as a standalone utility for future parallel optimization. See Session 9 revised checklist.
 
-**Judge 1 (Relevance):** "Is this memory about the same topic?"
-**Judge 2 (Usefulness):** "Would this memory help with the task?"
+~~When `judge.dual_verification: true`:~~
 
-| Mode | Logic | Rationale |
+~~**Judge 1 (Relevance):** "Is this memory about the same topic?"~~
+~~**Judge 2 (Usefulness):** "Would this memory help with the task?"~~
+
+| ~~Mode~~ | ~~Logic~~ | ~~Rationale~~ |
 |------|-------|-----------|
-| Auto-inject (strict) | Intersection (both agree) | Precision-first |
-| On-demand (lenient) | Union (either agrees) | Recall-friendly |
+| ~~Auto-inject (strict)~~ | ~~Intersection (both agree)~~ | ~~Precision-first~~ |
+| ~~On-demand (lenient)~~ | ~~Union (either agrees)~~ | ~~Recall-friendly~~ |
 
-**Latency mitigation:** Use `concurrent.futures.ThreadPoolExecutor` to parallelize the two calls (~1.2s instead of ~2.5s sequential).
+~~**Latency mitigation:** Use `concurrent.futures.ThreadPoolExecutor` to parallelize the two calls (~1.2s instead of ~2.5s sequential).~~
+
+**Retained from Phase 4:** `ThreadPoolExecutor(max_workers=2)` pattern for parallel API calls. Empirically verified safe: no memory leaks (process is short-lived), urllib.request is thread-safe, non-daemon threads bounded by urllib timeout (3s) + future timeout (4s) + hook SIGKILL (15s).
 
 ### Cost and Latency Summary
 
@@ -963,12 +968,20 @@ Manual: Precision comparison on 20 queries (BM25 vs BM25+judge).
 2. Lenient mode: wider candidate acceptance
 3. Subagent prompt: "Which of these memories are RELATED to the user's query? Be inclusive."
 
-### Phase 4: Dual Verification (If Needed, ~0.5 day)
+### ~~Phase 4: Dual Verification~~ -- CANCELLED (2026-02-21)
 
-Only if single judge precision < 85% after measurement:
-1. Add second judge prompt + intersection/union logic
-2. Add `concurrent.futures.ThreadPoolExecutor` for parallel calls
-3. Measure precision improvement vs single judge
+**Decision:** Dual judge (intersection/union logic) is cancelled. `ThreadPoolExecutor` for parallel API calls is retained and moved to Session 9 as a standalone optimization for the existing single judge's future use (e.g., parallel candidate batch splitting).
+
+**Rationale (multi-model consensus + code analysis):**
+1. **Recall collapse:** AND-gate of two imperfect classifiers drops recall to ~49% at 70% per-judge accuracy (line 508). Even at 90% accuracy, ~19% of relevant memories are lost. For a memory system, recall loss is catastrophic -- missed context causes debugging hours and wrong decisions.
+2. **Marginal precision gain:** ~3%p improvement (88-92% vs 85-90%) does not justify 2x API cost, 2x latency, and significant code complexity.
+3. **Existing prompt already combines both dimensions:** The current `JUDGE_SYSTEM` prompt (memory_judge.py lines 30-54) already evaluates both relevance ("addresses the same topic") AND usefulness ("would improve the response quality") in a single pass. Splitting into two prompts adds cost without new information.
+4. **External validation:** Codex 5.3 ("not worth default complexity; gated experiment only"), Gemini 3 Pro ("scrap entirely; fatal flaw for contextual memory system"), plan's own skeptic/adversarial reviewer ("structurally net-negative").
+
+~~Only if single judge precision < 85% after measurement:~~
+~~1. Add second judge prompt + intersection/union logic~~
+~~2. Add `concurrent.futures.ThreadPoolExecutor` for parallel calls~~
+~~3. Measure precision improvement vs single judge~~
 
 ---
 
@@ -1001,10 +1014,13 @@ All existing security measures preserved:
 S1 -> S2 -> S3 -> S5 -> S5F -> P3 -> S4 -> S6 -> (conditional) S7 -> S8 -> S9
 ```
 
-**Progress (2026-02-21):**
+**Progress (2026-02-21, updated):**
 ```
-S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─> S9
- ✓     ✓     ✓     ✓     ✓      ✓     ✓    SKIP   ✓   NEXT
+S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ──> S9
+ ✓     ✓     ✓     ✓     ✓      ✓     ✓    SKIP   ✓   NEXT   REVISED
+                                                          │     (dual judge
+                                                          │      cancelled;
+                                                          │      TPE+eval only)
 ```
 
 **Dependency graph (linear chain, no parallelism):**
@@ -1032,7 +1048,7 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 | S4 -> S6 | S6 (measurement) needs tests passing to ensure system works correctly |
 | S6 -> S7 | S7 is conditional on S6 showing precision < 80% |
 | S7 -> S8 | S8 tests functions created in S7 |
-| S8 -> S9 | S9 extends single judge with dual verification |
+| S8 -> S9 | ~~S9 extends single judge with dual verification~~ S9 (revised) adds ThreadPoolExecutor utility + qualitative eval after S8 tests confirm judge correctness |
 
 ### C. Per-Session Checklists
 
@@ -1144,14 +1160,18 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 - [x] **NOTE:** N1/N2 (raw user prompt/context in judge input) documented as LOW for future hardening. See `temp/s7-v2-adversarial.md`.
 - [x] **Files changed:** `memory_retrieve.py` (judge integration), `memory-config.default.json` (judge config), `hooks.json` (timeout), `CLAUDE.md` (docs). **Files created:** `memory_judge.py` (253 LOC). Reports in `temp/s7-*.md`.
 
-#### Session 8 (Phase 3b-3c -- Judge Tests + Search Judge, conditional, 4-6 hours)
-- [ ] Create `tests/test_memory_judge.py` (~200 LOC, 15 tests)
-- [ ] Update `/memory:search` skill with Task subagent judge
+#### Session 8 (Phase 3b-3c -- Judge Tests + Search Judge, 4-6 hours)
+- [x] Create `tests/test_memory_judge.py` (~724 LOC, 61 tests -- 15 planned + 46 extras including security, edge cases, V1/V2 fixes)
+- [x] Update `/memory:search` skill with Task subagent judge (lenient mode) -- 73 new lines in SKILL.md
+- [x] Fixed 3 source bugs found by V2 adversarial review (non-dict JSONL crash, UnicodeDecodeError, lone surrogate crash)
+- [x] Fixed CLAUDE.md documentation error (write-side -> read-side sanitization)
+- **Status:** COMPLETE ✓ (2 independent verification rounds, 6 reviewers total, 743 tests pass)
 
-#### Session 9 (Phase 4 -- Dual Verification, conditional, 2-4 hours)
-- [ ] Dual judge prompts + intersection/union logic
-- [ ] `ThreadPoolExecutor` for parallel calls
-- [ ] Measure precision improvement
+#### Session 9 (~~Phase 4 -- Dual Verification~~ → Revised: Parallel Judge Optimization + Precision Eval, 2-3 hours) -- REVISED (2026-02-21)
+- ~~[ ] Dual judge prompts + intersection/union logic~~ **CANCELLED** (recall collapse risk, marginal gain, see Phase 4 rationale above)
+- [ ] `ThreadPoolExecutor(max_workers=2)` for future parallel optimization (retained as standalone utility; not for dual judge)
+- [ ] Qualitative precision evaluation: 20-30 representative queries, manual BM25 vs BM25+judge comparison
+- **Revision rationale:** Multi-model analysis (Opus, Codex 5.3, Gemini 3 Pro) unanimously concluded dual judge's ~3%p precision gain does not justify recall collapse (~49% at 70% accuracy), 2x API cost, and added complexity. Current single-judge JUDGE_SYSTEM prompt already evaluates both relevance and usefulness. ThreadPoolExecutor retained as LOW-risk optimization (empirically verified: no memory leaks, thread-safe urllib, 3-tier timeout defense). Formal 40-50 query benchmark replaced with practical 20-30 query qualitative evaluation per Gemini's recommendation and statistical limitations at this corpus size (~500 memories).
 
 ### D. Corrected Estimates Table
 
@@ -1166,7 +1186,8 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 | S4 | 4-6 hrs | 10-12 hrs (import fix, more test updates, validation gate, conftest factory updates) | Tracks C+D [R3], [R4-reviewed] | COMPLETE ✓ |
 | S6 | 2 hrs / 20 queries | 3-4 hrs / 40-50 queries | Track D statistical analysis [R3] | **SKIPPED** (user: unconditional judge) |
 | S7 | Conditional | ~328 LOC (1.9x estimate), dual verification, 3 MEDIUM fixed | A- grade, 5 reviewers | **COMPLETE** |
-| S8-S9 | Conditional | Conditional (unchanged) | No change | Pending |
+| S8 | ~280 LOC, 4-6 hrs | ~800 LOC (724 test + 73 SKILL.md + source fixes), 2 verification rounds | 3.8x test coverage vs plan; 3 source bugs found and fixed | **COMPLETE** ✓ |
+| S9 | ~70 LOC, 2-4 hrs (dual judge) | **~40 LOC, 2-3 hrs** (ThreadPoolExecutor utility + qualitative eval only; dual judge CANCELLED) | Multi-model consensus: recall collapse risk, marginal gain (2026-02-21) | **REVISED** |
 
 ---
 
@@ -1183,11 +1204,13 @@ S1 ─> S2 ─> S3 ─> S5 ─> S5F ─> P3 ─> S4 ─> S6 ─> S7 ─> S8 ─>
 | S4 | Test rewrite + Phase 2d validation | ~70 (actual: ~527 in-scope) | 10-12 hrs | Medium | COMPLETE ✓ |
 | ~~S6~~ | ~~Measurement gate: 40-50 queries~~ | ~~0~~ | ~~3-4 hrs~~ | -- | **SKIPPED** (user: unconditional judge) |
 | **S7** | **Judge module + memory_retrieve integration** | **~328** | **4-6 hrs** | **Medium** | **COMPLETE ✓** |
-| S8 | Judge tests + search skill judge | ~280 | 4-6 hrs | Low | Pending |
-| S9 | Dual verification upgrade + tuning | ~70 | 2-4 hrs | Low | Pending |
+| **S8** | **Judge tests + search skill judge** | **~800** | **4-6 hrs** | **Low** | **COMPLETE ✓** |
+| ~~S9~~ | ~~Dual verification upgrade + tuning~~ | ~~~70~~ | ~~2-4 hrs~~ | -- | **REVISED** (dual judge cancelled) |
+| **S9** | **ThreadPoolExecutor utility + qualitative precision eval** | **~40** | **2-3 hrs** | **Low** | **Pending** |
 
 **Mandatory sessions (S1-S6): ~470-510 LOC, ~3-4 focused days.**
-**With conditional sessions (S7-S9): ~990-1030 LOC, ~5-6 focused days.**
+**With conditional sessions (S7-S9, revised): ~920-960 LOC, ~5 focused days.**
+**Savings from S9 revision:** ~30 LOC removed (dual judge logic), ~1-2 hrs saved. Net S9: ~40 LOC (ThreadPoolExecutor utility + eval) vs original ~70 LOC (dual judge + ThreadPoolExecutor + measurement).
 
 > **[R3-verified]** Session order corrected from the original parallelized plan. S5 must precede S4 because S5 changes the output format that S4 tests must validate. No meaningful parallelism exists in the dependency graph. See Session Implementation Guide for detailed per-session checklists.
 
@@ -1311,7 +1334,7 @@ Existing users who installed the plugin already have a `memory-config.json` in t
 |------------|-----------|-----------|
 | "~100% precision auto-inject" | Target ~85-90% (single judge), ~88-92% (dual). 100% is unachievable. | Realistic ceiling explained. |
 | "Use Claude Code subagent" | Impossible from hooks. Inline API for hooks, subagent for skills. | Architectural constraint. |
-| "Check twice independently" | Single judge default. Dual available as config upgrade. | Pragmatic: measure single first. |
+| "Check twice independently" | Single judge only. ~~Dual available as config upgrade.~~ **Dual CANCELLED (2026-02-21):** recall collapse risk outweighs marginal precision gain. | Pragmatic: single judge + qualitative eval. |
 | "Configurable model (haiku/sonnet/opus)" | `judge.model` config key. Haiku default. | Fully implemented. |
 | "Strict auto-inject" | Judge filters to only definitely relevant. Fallback reduces count. | Implemented. |
 | "Lenient on-demand search" | Skill uses subagent with lenient prompt. | Implemented. |
@@ -1364,6 +1387,7 @@ Existing users who installed the plugin already have a `memory-config.json` in t
 | R2 | lj | verifier2-adversarial | REJECT. Asymmetric error costs (false negatives >> false positives). Judge barely better than BM25 on adversarial cases (~60-70%). Net-negative cost when counting developer latency time. "Dumber guard" is structurally net-negative. | Judge kept as contingency behind measurement gate. Key concerns acknowledged. |
 | R3 | session-plan | 4-track analysis (accuracy, dependencies, feasibility, risks) + meta-critique | CRITICAL: tokenizer fallback regression. HIGH: test import cascade, measurement gate statistics. Multiple LOC estimates corrected via self-critique. Config migration gap identified. Session order corrected (S5 before S4). | All integrated into plan [R3-verified] |
 | R4 | technical + practical | technical-reviewer + practical-reviewer | 2 HIGH: FTS5 schema KeyError (id/updated_at), score_with_body() NameError (fts_query_source_text). 3 MEDIUM: CATEGORY_PRIORITY case, redundant set(), camelCase blind spot. 2 LOW: test factory BODY_FIELDS coverage, line reference. Practical: 2 HIGH (main() flow, config migration), 7 MEDIUM (score_description fate, sys.path, skill vs command, CLAUDE.md scope, Session 4 estimate, 0-result hint, tokenizer sync), 2 LOW (regex edge cases, measurement corpus). | All integrated [R4-reviewed] |
+| R5 | S8/S9 pre-impl | multi-model analysis (Opus deep read + 3 Explore subagents + Codex 5.3 + Gemini 3 Pro + vibe-check + thinkdeep) | S8: APPROVED (unconditional). S9 dual judge: CANCELLED (recall collapse ~49%, marginal ~3%p gain, 2x cost). ThreadPoolExecutor: RETAINED (empirically verified LOW risk). 12 claims verified (11 VERIFIED, 1 PARTIALLY CORRECT). | S9 revised: dual judge cancelled, ThreadPoolExecutor retained, qualitative eval replaces formal benchmark |
 
 ## External Validation Log
 
@@ -1377,3 +1401,7 @@ Existing users who installed the plugin already have a `memory-config.json` in t
 | Gemini 3 Pro (R2-adv) | "This is premature optimization and an architectural mistake. Scrap the judge." Low-context model gatekeeping for high-context model is an anti-pattern. | Partially -- judge kept as contingency behind measurement gate, not default. |
 | pal challenge (FTS5) | Phrase-wildcard false positive is real precision problem | Yes |
 | vibe-check | Compress verification, write plan directly | Partially adopted |
+| Codex 5.3 (S8/S9) | Task subagent "sound with guardrails"; dual judge "not worth default complexity; gated experiment only"; ThreadPoolExecutor "no meaningful leak risk"; precision measurement "practical with 40-60 labeled benchmark" | S8: yes. Dual judge: cancelled (stronger than Codex's "gated experiment" -- full cancellation). ThreadPoolExecutor: yes. Eval: partially (20-30 qualitative, not 40-60 formal). |
+| Gemini 3 Pro (S8/S9) | Task subagent "abandon -- over-engineering, use unified script"; dual judge "scrap entirely -- fatal flaw, 49% recall loss"; ThreadPoolExecutor "safe"; formal eval "severe over-engineering, use 10-20 qualitative" | Dual judge: yes (cancelled). Task subagent: partially (kept Task subagent but noted Gemini's DRY concern). ThreadPoolExecutor: yes. Eval: partially (20-30 compromise between Codex's 40-60 and Gemini's 10-20). |
+| vibe-check (S8/S9) | Risk of authority bias (weighting external models over code analysis) and false balance. Lead with factual explanation, present own analysis as primary, external as supporting. | Yes -- adopted in synthesis approach. |
+| thinkdeep (S8/S9) | Cross-validation confidence: very_high. 0 issues. Note: 40-50 queries are for Phase 2f gate, not S9 dual comparison. | Yes -- corrected in S9 revision. |

@@ -86,7 +86,7 @@ def call_api(system: str, user_msg: str, model: str = _DEFAULT_MODEL,
                 return blocks[0]["text"]
     except (urllib.error.URLError, urllib.error.HTTPError,
             json.JSONDecodeError, TimeoutError, OSError,
-            KeyError, IndexError):
+            KeyError, IndexError, ValueError):
         pass
     return None
 
@@ -114,6 +114,8 @@ def extract_recent_context(transcript_path: str, max_turns: int = 5) -> str:
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if not isinstance(msg, dict):
                     continue
                 # Transcript uses "type" key with values "user"/"human"/"assistant"
                 if msg.get("type") in ("user", "human", "assistant"):
@@ -156,7 +158,7 @@ def format_judge_input(
     n = len(candidates)
     order = list(range(n))
     # Deterministic, cross-process-stable shuffle
-    seed = int(hashlib.sha256(user_prompt.encode()).hexdigest()[:8], 16)
+    seed = int(hashlib.sha256(user_prompt.encode("utf-8", errors="replace")).hexdigest()[:8], 16)
     rng = random.Random(seed)
     rng.shuffle(order)
 
