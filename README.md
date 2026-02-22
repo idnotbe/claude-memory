@@ -439,7 +439,7 @@ pytest tests/ -v
 | `hooks/scripts/memory_write_guard.py` | PreToolUse write guard (stdlib only) |
 | `hooks/scripts/memory_validate_hook.py` | PostToolUse validation + quarantine (pydantic v2 optional) |
 
-See `TEST-PLAN.md` for the full prioritized test plan including security considerations.
+See `plans/TEST-PLAN.md` for the full prioritized test plan including security considerations.
 See `CLAUDE.md` for development guidance and security notes.
 
 ## License

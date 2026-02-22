@@ -50,7 +50,7 @@ The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku
 
 **Tokenizer note:** `memory_candidate.py` uses a 3+ char token minimum (`len(w) > 2`), while `memory_search_engine.py` / `memory_retrieve.py` use 2+ chars (`len(w) > 1`). This is intentional -- candidate selection needs higher precision; retrieval benefits from broader recall.
 
-Config: memory-config.json | Defaults: assets/memory-config.default.json | Schemas: assets/schemas/*.schema.json | Manifest: plugin.json | Hooks: hooks/hooks.json
+Config: .claude/memory/memory-config.json (per-project, runtime) | Defaults: assets/memory-config.default.json | Schemas: assets/schemas/*.schema.json | Manifest: .claude-plugin/plugin.json | Hooks: hooks/hooks.json
 
 `$CLAUDE_PLUGIN_ROOT` is set by Claude Code to the plugin's installation directory. It is used in all command files for portable script paths.
 
@@ -68,24 +68,11 @@ Config keys fall into two categories:
 
 **All automated tests for this plugin live in this repo.**
 
-**Current state:** Tests exist in tests/ (11,142 LOC across 15 test files + conftest.py). No CI/CD yet.
-
 **Conventions:**
-- Test framework: **pytest**
-- Test location: tests/
-- Run tests: `pytest tests/ -v`
+- Test framework: **pytest** | Location: tests/ | Run: `pytest tests/ -v`
 - Dependencies: `pip install pytest` (add pydantic v2 for write/validate tests)
-- All scripts use stdlib except memory_write.py and memory_validate_hook.py (pydantic v2)
-
-**What needs tests (prioritized):**
-1. memory_retrieve.py -- keyword matching, stop-word filtering, scoring, config parsing, max_inject behavior
-2. memory_write.py -- create/update/retire operations, Pydantic validation, atomic writes, index updates
-3. memory_candidate.py -- candidate scoring, index line parsing, lifecycle events, path safety
-4. memory_index.py -- rebuild, validate, query with fixture data
-5. memory_write_guard.py -- path detection, bypass for staging file, edge cases
-6. memory_validate_hook.py -- validation logic, quarantine behavior, fallback validation
-
-See TEST-PLAN.md for the full prioritized test plan with security considerations.
+- All core scripts have test coverage. New features/scripts must include pytest tests.
+- See `plans/TEST-PLAN.md` for coverage strategy and security test requirements.
 
 ## Development Workflow
 
@@ -109,34 +96,20 @@ See TEST-PLAN.md for the full prioritized test plan with security considerations
 
 ## Security Considerations
 
-These are the known security-relevant areas that tests must cover:
+Known threat vectors (implementation details in `plans/TEST-PLAN.md`):
 
-1. **Prompt injection via memory titles** -- Memory entries are injected into context by the retrieval hook. Crafted titles can manipulate agent behavior. Mitigation is multi-layered: `memory_write.py` auto-fix sanitizes titles on write (strips control chars, replaces ` -> ` with ` - `, removes `#tags:` substring), and `memory_retrieve.py` re-sanitizes on read as defense-in-depth. Remaining gap: `memory_index.py` rebuilds index from JSON without re-sanitizing (trusts write-side sanitization). Tests should verify the sanitization chain end-to-end.
-
-2. **max_inject clamping** -- `memory_retrieve.py` clamps max_inject to [0, 20] with fallback to default 5 on parse failure. Tests should verify this clamping holds for edge cases (negative, very large, non-integer values).
-
-3. **Config manipulation** -- memory-config.json is read with no integrity check. Malicious config can disable retrieval, set extreme max_inject, or alter category behavior.
-
-4. **Index format fragility** -- Index lines use delimiter patterns (` -> ` and `#tags:`). Titles containing these strings can corrupt parsing in `memory_candidate.py` and `memory_retrieve.py`.
-
-5. **FTS5 query injection** -- Prevented: alphanumeric + `_.-` only, all tokens quoted. In-memory database (`:memory:`) -- no persistence attack surface. Parameterized queries (`MATCH ?`) prevent SQL injection.
-
-6. **LLM judge prompt injection** -- `memory_judge.py` wraps untrusted memory data in `<memory_data>` XML tags with explicit system prompt instructions to treat content as data, not instructions. Read-side sanitization (`html.escape()` in `memory_judge.py` and `_sanitize_cli_title()` in `memory_search_engine.py`) escapes `<`/`>` in titles, user prompts, and conversation context before injection into prompts. Anti-position-bias: candidates are shuffled via deterministic sha256 seed to prevent order-dependent manipulation. All judge errors return None, falling back to conservative top-K retrieval.
-
-7. **Thread safety in parallel judge** -- `memory_judge.py` uses `ThreadPoolExecutor(max_workers=2)` for parallel batch splitting when candidates exceed 6. All threaded components are verified thread-safe: `urllib.request` (per-call objects), `hashlib.sha256` (per-call instance), `random.Random(seed)` (per-call instance), `html.escape` (pure function). No shared mutable state between threads. 3-tier timeout defense: per-call urllib timeout, executor deadline with 2s pad, 15s hook SIGKILL.
+- **Prompt injection:** Sanitize titles/content (escape `<`/`>`, strip control chars, remove delimiter patterns) before prompt or index injection.
+- **Config manipulation:** Clamp `max_inject` to [0, 20]; validate unverified config reads.
+- **Index fragility:** Strip ` -> ` and `#tags:` delimiter patterns from user inputs to prevent parsing corruption.
+- **FTS5 injection:** Restrict queries to safe chars, use parameterized queries only.
+- **LLM judge integrity:** Wrap untrusted data in XML tags, use deterministic shuffling (anti-position-bias).
+- **Thread safety:** No shared mutable state in parallel judge executions.
 
 ## Quick Smoke Check
 
 ```bash
-# Compile check all scripts
-python3 -m py_compile hooks/scripts/memory_triage.py
-python3 -m py_compile hooks/scripts/memory_retrieve.py
-python3 -m py_compile hooks/scripts/memory_index.py
-python3 -m py_compile hooks/scripts/memory_candidate.py
-python3 -m py_compile hooks/scripts/memory_search_engine.py
-python3 -m py_compile hooks/scripts/memory_write.py
-python3 -m py_compile hooks/scripts/memory_enforce.py
-python3 -m py_compile hooks/scripts/memory_judge.py
+# Compile check all hook scripts
+for f in hooks/scripts/memory_*.py; do python3 -m py_compile "$f"; done
 
 # Index operations (requires memory data)
 python3 hooks/scripts/memory_index.py --validate --root PATH_TO_MEMORY_ROOT
