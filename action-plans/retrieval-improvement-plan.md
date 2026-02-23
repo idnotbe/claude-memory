@@ -1,3 +1,8 @@
+---
+status: active
+progress: "S1/S2/S3/S5/S5F/P3 완료. S4 (tests) 다음"
+---
+
 # Final Retrieval Improvement Plan (Post-Verification)
 
 **Date:** 2026-02-20 (updated 2026-02-21, R3 verification 2026-02-21, R4 review 2026-02-21)

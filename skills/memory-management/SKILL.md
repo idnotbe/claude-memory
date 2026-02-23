@@ -78,9 +78,23 @@ Files are capped at 50KB.
 
 **Subagent instructions** (kept simple for haiku):
 
-> **MANDATE**: All file writes to `.claude/memory/.staging/` MUST use the **Write tool**
-> (not Bash cat/heredoc/echo). This avoids Guardian bash-scanning false positives
-> when memory content mentions protected paths like `.env`.
+> **FORBIDDEN**: You are PROHIBITED from using the Bash tool to create or write
+> files in `.claude/memory/.staging/`. This includes `cat >`, `echo >`, heredoc
+> (`<< EOF`), `tee`, or any other shell write mechanism. ALL staging file writes
+> MUST use the **Write tool** exclusively.
+>
+> **Anti-pattern (DO NOT DO THIS):**
+> ```bash
+> # WRONG -- will be blocked by Guardian and memory guard hooks
+> cat > .claude/memory/.staging/input-decision.json << 'EOFZ'
+> {"title": "..."}
+> EOFZ
+> ```
+>
+> **Correct pattern:**
+> ```
+> Use the Write tool with path: .claude/memory/.staging/input-decision.json
+> ```
 
 1. Read the context file at the path from triage_data. If `context_file` is
    missing from the triage entry for a category (can happen on staging directory write
@@ -222,7 +236,7 @@ This replaces the previous inline Python enforcement. The script automatically r
 | VETO | * | OBEY VETO | Mechanical invariant |
 | NOOP | * | NOOP | No target |
 
-This is the implemented 2-layer system. See MEMORY-CONSOLIDATION-PROPOSAL.md for the original 3-layer design.
+This is the implemented 2-layer system. See action-plans/_ref/MEMORY-CONSOLIDATION-PROPOSAL.md for the original 3-layer design.
 
 Key principles:
 1. Mechanical trumps LLM: Python vetoes are absolute.

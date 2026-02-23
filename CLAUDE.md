@@ -17,6 +17,7 @@ Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the
 | Stop (x1) | Deterministic triage hook (command type) -- keyword heuristic, evaluates all 6 categories, outputs structured `<triage_data>` JSON + per-category context files for parallel subagent consumption |
 | UserPromptSubmit | Retrieval hook -- FTS5 BM25 keyword matcher injects relevant memories (fallback: legacy keyword), optional LLM judge layer filters false positives |
 | PreToolUse:Write | Write guard -- blocks direct writes to memory directory |
+| PreToolUse:Bash | Staging guard -- blocks Bash writes to .staging/ directory (prevents Guardian false positives) |
 | PostToolUse:Write | Validation hook -- schema-validates any memory JSON, quarantines invalid (detection-only: PostToolUse deny cannot prevent writes, only inform) |
 
 ### Write Actions
@@ -46,6 +47,7 @@ The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku
 | hooks/scripts/memory_enforce.py | Rolling window enforcement: scans category, retires oldest beyond limit | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_judge.py | LLM-as-judge for retrieval verification (anti-position-bias, anti-injection, parallel batch splitting via ThreadPoolExecutor) | stdlib only (urllib.request, concurrent.futures) |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
+| hooks/scripts/memory_staging_guard.py | PreToolUse:Bash guard blocking heredoc writes to .staging/ | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
 
 **Tokenizer note:** `memory_candidate.py` uses a 3+ char token minimum (`len(w) > 2`), while `memory_search_engine.py` / `memory_retrieve.py` use 2+ chars (`len(w) > 1`). This is intentional -- candidate selection needs higher precision; retrieval benefits from broader recall.
@@ -72,7 +74,7 @@ Config keys fall into two categories:
 - Test framework: **pytest** | Location: tests/ | Run: `pytest tests/ -v`
 - Dependencies: `pip install pytest` (add pydantic v2 for write/validate tests)
 - All core scripts have test coverage. New features/scripts must include pytest tests.
-- See `plans/TEST-PLAN.md` for coverage strategy and security test requirements.
+- See `action-plans/_ref/TEST-PLAN.md` for coverage strategy and security test requirements.
 
 ## Development Workflow
 
@@ -96,7 +98,7 @@ Config keys fall into two categories:
 
 ## Security Considerations
 
-Known threat vectors (implementation details in `plans/TEST-PLAN.md`):
+Known threat vectors (implementation details in `action-plans/_ref/TEST-PLAN.md`):
 
 - **Prompt injection:** Sanitize titles/content (escape `<`/`>`, strip control chars, remove delimiter patterns) before prompt or index injection.
 - **Config manipulation:** Clamp `max_inject` to [0, 20]; validate unverified config reads.
@@ -104,6 +106,18 @@ Known threat vectors (implementation details in `plans/TEST-PLAN.md`):
 - **FTS5 injection:** Restrict queries to safe chars, use parameterized queries only.
 - **LLM judge integrity:** Wrap untrusted data in XML tags, use deterministic shuffling (anti-position-bias).
 - **Thread safety:** No shared mutable state in parallel judge executions.
+
+## Action Plans
+
+실행 계획 파일은 `action-plans/`에 있다. 각 파일 상단에 YAML frontmatter로 상태를 관리한다.
+
+- `status`: not-started | active | blocked | done
+- `progress`: 현재 진행 상태 (자유 텍스트)
+
+**규칙:**
+- plan 파일 작업 시작/완료 시 frontmatter의 status와 progress를 업데이트할 것
+- 완료된 plan은 `action-plans/_done/`으로 이동 가능 (선택)
+- `action-plans/_ref/`는 참고/역사적 문서
 
 ## Quick Smoke Check
 

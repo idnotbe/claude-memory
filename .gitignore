@@ -7,6 +7,9 @@ __pycache__/
 
 # Test artifacts
 .pytest_cache/
+/test_*.py
+/test_*.sh
+/hook_test*.py
 
 # IDE
 .vscode/

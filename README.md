@@ -411,7 +411,7 @@ Existing memories and config are preserved across upgrades. The plugin uses back
 ## Version History
 
 - **v5.0.0** (current): Replaced 6 prompt-type Stop hooks with 1 deterministic command-type hook. Added parallel per-category subagent processing, context files, and structured `<triage_data>` output.
-- **v4.2**: ACE (Adaptive Consolidation Engine) -- Python-tool-centric CRUD, Pydantic schema validation, merge protections, OCC, 2-layer CUD verification. See `MEMORY-CONSOLIDATION-PROPOSAL.md` for the original design.
+- **v4.2**: ACE (Adaptive Consolidation Engine) -- Python-tool-centric CRUD, Pydantic schema validation, merge protections, OCC, 2-layer CUD verification. See `action-plans/_ref/MEMORY-CONSOLIDATION-PROPOSAL.md` for the original design.
 - **v3.0**: Initial structured memory with 6 categories, keyword retrieval, and manual save commands.
 
 ## Testing
@@ -439,7 +439,7 @@ pytest tests/ -v
 | `hooks/scripts/memory_write_guard.py` | PreToolUse write guard (stdlib only) |
 | `hooks/scripts/memory_validate_hook.py` | PostToolUse validation + quarantine (pydantic v2 optional) |
 
-See `plans/TEST-PLAN.md` for the full prioritized test plan including security considerations.
+See `action-plans/_ref/TEST-PLAN.md` for the full prioritized test plan including security considerations.
 See `CLAUDE.md` for development guidance and security notes.
 
 ## License
