@@ -720,6 +720,34 @@ def do_create(args, memory_root: Path, index_path: Path) -> int:
     # Cleanup temp file
     _cleanup_input(args.input)
 
+    # ── Mechanical enforcement: auto-enforce rolling window after session create ──
+    if args.category == "session_summary":
+        try:
+            import subprocess
+            enforce_script = Path(__file__).resolve().parent / "memory_enforce.py"
+            if enforce_script.exists():
+                env = os.environ.copy()
+                if "CLAUDE_PROJECT_ROOT" not in env:
+                    env["CLAUDE_PROJECT_ROOT"] = str(memory_root.parent.parent)
+                proc = subprocess.run(
+                    [sys.executable, str(enforce_script),
+                     "--category", "session_summary"],
+                    capture_output=True, text=True, timeout=30,
+                    env=env,
+                )
+                if proc.returncode != 0 and proc.stderr:
+                    print(
+                        f"[WARN] Post-create enforcement returned rc={proc.returncode}: "
+                        f"{proc.stderr.strip()[:200]}",
+                        file=sys.stderr,
+                    )
+        except Exception as e:
+            print(
+                f"[WARN] Post-create enforcement failed: {e}. "
+                f"Sessions may exceed max_retained until next enforcement.",
+                file=sys.stderr,
+            )
+
     # Success output
     result = {
         "status": "created",

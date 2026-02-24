@@ -38,7 +38,8 @@ from memory_write import (  # noqa: E402
 )
 
 # ── constants ───────────────────────────────────────────────────────────
-MAX_RETIRE_ITERATIONS = 10  # Safety valve: never retire more than this in one run
+MAX_RETIRE_ITERATIONS_FLOOR = 10   # Minimum safety valve (original value)
+MAX_RETIRE_MULTIPLIER = 10         # Dynamic cap = max_retained * this
 DEFAULT_MAX_RETAINED = 5
 
 
@@ -94,6 +95,13 @@ def _read_max_retained(memory_root: Path, category: str, cli_override: int | Non
                     file=sys.stderr,
                 )
                 return DEFAULT_MAX_RETAINED
+            if value < 1:
+                print(
+                    f"[WARN] max_retained must be >= 1, got {value}. "
+                    f"Using default {DEFAULT_MAX_RETAINED}.",
+                    file=sys.stderr,
+                )
+                return DEFAULT_MAX_RETAINED
             return value
         except (json.JSONDecodeError, OSError):
             pass
@@ -132,7 +140,10 @@ def _scan_active(category_dir: Path) -> list[dict]:
                 "created_at": data.get("created_at", ""),
             })
 
-    # Sort oldest first; filename as tiebreaker for identical timestamps
+    # Sort oldest first; filename as tiebreaker for identical timestamps.
+    # Note: missing/empty created_at ("") sorts before all ISO 8601 timestamps,
+    # so files with missing timestamps are retired first. This is intentional --
+    # files without timestamps are treated as oldest/most suspect.
     results.sort(key=lambda s: (s["created_at"], s["path"].name))
     return results
 
@@ -172,6 +183,7 @@ def enforce_rolling_window(
     category: str,
     max_retained: int,
     dry_run: bool = False,
+    max_retire_override: int | None = None,
 ) -> dict:
     """Enforce rolling window for a category.
 
@@ -180,6 +192,7 @@ def enforce_rolling_window(
         category: Category name (e.g., "session_summary")
         max_retained: Maximum active memories to keep
         dry_run: If True, print what would be retired without acting
+        max_retire_override: If set, overrides the dynamic cap for this run
 
     Returns summary dict:
         {"retired": [str, ...], "active_count": int, "max_retained": int}
@@ -198,6 +211,12 @@ def enforce_rolling_window(
 
     retired_list = []
 
+    # Compute dynamic retirement cap
+    if max_retire_override is not None:
+        retire_cap = max(1, max_retire_override)
+    else:
+        retire_cap = max(MAX_RETIRE_ITERATIONS_FLOOR, max_retained * MAX_RETIRE_MULTIPLIER)
+
     if dry_run:
         # Dry-run: compute excess once, list what WOULD be retired (no lock needed)
         active = _scan_active(category_dir)
@@ -205,7 +224,7 @@ def enforce_rolling_window(
         if excess <= 0:
             return {"retired": [], "active_count": len(active), "max_retained": max_retained}
 
-        excess = min(excess, MAX_RETIRE_ITERATIONS)
+        excess = min(excess, retire_cap)
         for victim in active[:excess]:
             _deletion_guard(victim["data"], victim["id"])
             print(
@@ -232,7 +251,7 @@ def enforce_rolling_window(
         if excess <= 0:
             return {"retired": [], "active_count": len(active), "max_retained": max_retained}
 
-        excess = min(excess, MAX_RETIRE_ITERATIONS)
+        excess = min(excess, retire_cap)
 
         for victim in active[:excess]:
             _deletion_guard(victim["data"], victim["id"])
@@ -298,6 +317,12 @@ def main():
         action="store_true",
         help="Print what would be retired without actually retiring",
     )
+    parser.add_argument(
+        "--max-retire",
+        type=int,
+        default=None,
+        help="Override maximum retirements per run (default: dynamic based on max_retained)",
+    )
     args = parser.parse_args()
 
     # Validate --max-retained
@@ -305,11 +330,19 @@ def main():
         print("ERROR: --max-retained must be >= 1", file=sys.stderr)
         sys.exit(1)
 
+    # Validate --max-retire
+    if args.max_retire is not None and args.max_retire < 1:
+        print("ERROR: --max-retire must be >= 1", file=sys.stderr)
+        sys.exit(1)
+
     memory_root = _resolve_memory_root()
     max_retained = _read_max_retained(memory_root, args.category, args.max_retained)
 
     try:
-        result = enforce_rolling_window(memory_root, args.category, max_retained, args.dry_run)
+        result = enforce_rolling_window(
+            memory_root, args.category, max_retained, args.dry_run,
+            max_retire_override=args.max_retire,
+        )
     except TimeoutError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)

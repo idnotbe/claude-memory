@@ -391,6 +391,89 @@ class TestEnforceRollingWindow:
         assert result.returncode != 0
         assert "must be >= 1" in result.stderr
 
+    # -- Tests 25+: Dynamic cap, --max-retire, config validation --
+
+    def test_25_dynamic_cap_handles_large_excess(self, tmp_path):
+        """50 active sessions, max_retained=5 -> retires 45 in one run (cap=50)."""
+        from memory_enforce import enforce_rolling_window
+
+        proj, mem_root, sessions = _setup_enforce_project(tmp_path, 50)
+        result = enforce_rolling_window(mem_root, "session_summary",
+                                        max_retained=5)
+        assert len(result["retired"]) == 45
+        assert result["active_count"] == 5
+
+    def test_26_dynamic_cap_floor(self, tmp_path):
+        """With max_retained=1, cap = max(10, 1*10) = 10. 15 sessions -> retires 10."""
+        from memory_enforce import enforce_rolling_window
+
+        proj, mem_root, sessions = _setup_enforce_project(tmp_path, 15)
+        result = enforce_rolling_window(mem_root, "session_summary",
+                                        max_retained=1)
+        assert len(result["retired"]) == 10
+        assert result["active_count"] == 5  # 15 - 10 = 5
+
+    def test_27_max_retire_override(self, tmp_path):
+        """max_retire_override=3 limits retirements to 3."""
+        from memory_enforce import enforce_rolling_window
+
+        proj, mem_root, sessions = _setup_enforce_project(tmp_path, 10)
+        result = enforce_rolling_window(
+            mem_root, "session_summary", max_retained=5,
+            max_retire_override=3,
+        )
+        assert len(result["retired"]) == 3
+        assert result["active_count"] == 7
+
+    def test_28_config_max_retained_zero_uses_default(self, tmp_path):
+        """Config max_retained=0 -> falls back to DEFAULT_MAX_RETAINED (5)."""
+        from memory_enforce import _read_max_retained
+
+        proj, mem_root, _ = _setup_enforce_project(
+            tmp_path, 3, config_max_retained=0)
+        value = _read_max_retained(mem_root, "session_summary",
+                                   cli_override=None)
+        assert value == 5  # DEFAULT_MAX_RETAINED
+
+    def test_29_config_max_retained_negative_uses_default(self, tmp_path):
+        """Config max_retained=-1 -> falls back to DEFAULT_MAX_RETAINED (5)."""
+        from memory_enforce import _read_max_retained
+
+        proj, mem_root, _ = _setup_enforce_project(
+            tmp_path, 3, config_max_retained=-1)
+        value = _read_max_retained(mem_root, "session_summary",
+                                   cli_override=None)
+        assert value == 5  # DEFAULT_MAX_RETAINED
+
+    def test_30_max_retire_cli_flag_rejected_when_zero(self, tmp_path):
+        """--max-retire 0 should be rejected by CLI validation."""
+        import subprocess
+        enforce_script = str(SCRIPTS_DIR / "memory_enforce.py")
+
+        proj, mem_root, _ = _setup_enforce_project(tmp_path, 3)
+
+        result = subprocess.run(
+            [sys.executable, enforce_script,
+             "--category", "session_summary",
+             "--max-retire", "0"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(proj),
+            env={**os.environ, "CLAUDE_PROJECT_ROOT": str(proj)},
+        )
+        assert result.returncode != 0
+        assert "must be >= 1" in result.stderr
+
+    def test_31_dry_run_respects_dynamic_cap(self, tmp_path):
+        """Dry-run with 50 sessions uses dynamic cap, not old hardcoded 10."""
+        from memory_enforce import enforce_rolling_window
+
+        proj, mem_root, sessions = _setup_enforce_project(tmp_path, 50)
+        result = enforce_rolling_window(mem_root, "session_summary",
+                                        max_retained=5, dry_run=True)
+        assert result["dry_run"] is True
+        assert len(result["retired"]) == 45  # Not capped at 10
+        assert result["active_count"] == 5
+
 
 # ===========================================================================
 # Tests 16-24: memory_write.py (FlockIndex, retire_record)

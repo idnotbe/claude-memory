@@ -209,6 +209,8 @@ python3 "$CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_enforce.py" --category session
 
 This replaces the previous inline Python enforcement. The script automatically reads `max_retained` from `memory-config.json` and retires the oldest sessions to stay within the limit.
 
+> Note: Enforcement also runs automatically after `memory_write.py --action create --category session_summary`. This explicit call is a safety belt.
+
 ### Write Pipeline Protections
 
 `memory_write.py` enforces these protections automatically:
