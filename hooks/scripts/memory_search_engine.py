@@ -17,7 +17,18 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
+
+# Lazy import: logging module may not exist during partial deployments
+try:
+    from memory_logger import emit_event, get_session_id, parse_logging_config
+except (ImportError, SyntaxError) as e:
+    if isinstance(e, ImportError) and getattr(e, 'name', None) != 'memory_logger':
+        raise  # Transitive dependency failure -- fail-fast
+    def emit_event(*args, **kwargs): pass
+    def get_session_id(*args, **kwargs): return ""
+    def parse_logging_config(*args, **kwargs): return {"enabled": False, "level": "info", "retention_days": 14}
 
 # ---------------------------------------------------------------------------
 # Shared Constants
@@ -441,9 +452,14 @@ def main():
                         help="Include retired and archived memories in results")
     parser.add_argument("--format", "-f", choices=["json", "text"], default="json",
                         help="Output format (default: json)")
+    parser.add_argument("--session-id", default=None,
+                        help="Session ID for logging correlation (fallback: CLAUDE_SESSION_ID env)")
 
     args = parser.parse_args()
     memory_root = Path(args.root).resolve()
+
+    # Resolve session_id: CLI arg > env var > empty
+    _session_id = args.session_id or os.environ.get("CLAUDE_SESSION_ID", "")
 
     # Clamp max-results to [1, 30]
     if args.max_results is not None:
@@ -459,8 +475,36 @@ def main():
         print(json.dumps({"error": "FTS5 not available", "query": args.query}))
         sys.exit(1)
 
+    _search_t0 = time.perf_counter()
     results = cli_search(args.query, memory_root, args.mode, args.max_results,
                           args.include_retired)
+    _search_ms = (time.perf_counter() - _search_t0) * 1000
+
+    # Logging Point: CLI search query
+    _raw_config = {}
+    _cfg_path = memory_root / "memory-config.json"
+    try:
+        if _cfg_path.exists():
+            with open(_cfg_path, "r", encoding="utf-8") as _f:
+                _raw_config = json.load(_f)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    _fts_query_str = ""
+    _token_count = 0
+    _prompt_tokens = list(tokenize(args.query))
+    _fts_query_str = build_fts_query(_prompt_tokens) or ""
+    _token_count = len(_prompt_tokens)
+    _top_score = abs(results[0]["score"]) if results else 0.0
+
+    emit_event("search.query", {
+        "fts_query": _fts_query_str,
+        "token_count": _token_count,
+        "result_count": len(results),
+        "top_score": round(_top_score, 4),
+    }, hook="CLI", script="memory_search_engine.py",
+       session_id=_session_id, duration_ms=round(_search_ms, 2),
+       memory_root=str(memory_root), config=_raw_config)
 
     if args.format == "json":
         output = {

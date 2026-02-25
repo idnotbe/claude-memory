@@ -12,9 +12,11 @@ No external dependencies (stdlib only + memory_search_engine.py).
 
 import html
 import json
+import math
 import os
 import re
 import sys
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +37,16 @@ from memory_search_engine import (  # noqa: E402
     query_fts,
     tokenize,
 )
+
+# Lazy import: logging module may not exist during partial deployments
+try:
+    from memory_logger import emit_event, get_session_id, parse_logging_config
+except (ImportError, SyntaxError) as e:
+    if isinstance(e, ImportError) and getattr(e, 'name', None) != 'memory_logger':
+        raise  # Transitive dependency failure -- fail-fast
+    def emit_event(*args, **kwargs): pass
+    def get_session_id(*args, **kwargs): return ""
+    def parse_logging_config(*args, **kwargs): return {"enabled": False, "level": "info", "retention_days": 14}
 
 # How many top candidates to read JSON files for (recency + retired check)
 _DEEP_CHECK_LIMIT = 20
@@ -158,16 +170,37 @@ def _sanitize_title(title: str) -> str:
     return title
 
 
-def confidence_label(score: float, best_score: float) -> str:
+def confidence_label(score: float, best_score: float,
+                     abs_floor: float = 0.0,
+                     cluster_count: int = 0) -> str:
     """Map score to confidence bracket based on ratio to best score.
 
     Works for both BM25 (negative, more negative = better) and legacy
     (positive, higher = better) scores via abs().
+
+    Args:
+        score: Entry's composite score (BM25 - body_bonus).
+        best_score: Best composite score in the result set.
+        abs_floor: Absolute score floor. When abs(best_score) < abs_floor,
+            cap maximum confidence at "medium" (weak match protection).
+            Default 0.0 disables this check (preserves legacy behavior).
+            Calibrated against composite score domain (typical range 0-15).
+        cluster_count: Number of results with ratio > 0.90 (currently unused).
+            Always pass 0 (feature disabled -- Deep Analysis: post-truncation
+            counting is dead code; future activation requires pre-truncation
+            counting implementation).
     """
     if best_score == 0:
         return "low"
     ratio = abs(score) / abs(best_score)
+
+    # Absolute floor cap: if best score is below the floor, the entire
+    # result set is considered weak -- cap at "medium" maximum.
+    floor_capped = abs_floor > 0 and abs(best_score) < abs_floor
+
     if ratio >= 0.75:
+        if floor_capped:
+            return "medium"
         return "high"
     elif ratio >= 0.40:
         return "medium"
@@ -247,9 +280,14 @@ def score_with_body(conn: "sqlite3.Connection", fts_query: str, user_prompt: str
             result["body_bonus"] = min(3, len(body_matches))
         # body_bonus already set to 0 for file-read failures above
 
-    # Clean up cached data for remaining entries
+    # Clean up cached data for remaining entries.
+    # A-03 fix: explicitly set body_bonus=0 for beyond-top_k entries to ensure
+    # the field is always present on every result (prevents ambiguity between
+    # "not analyzed" and "analyzed with 0 matches" at logging call sites).
     for result in initial[top_k_paths:]:
         result.pop("_data", None)
+        if "body_bonus" not in result:
+            result["body_bonus"] = 0
 
     # Step 5: Re-rank with body bonus
     for r in initial:
@@ -259,13 +297,37 @@ def score_with_body(conn: "sqlite3.Connection", fts_query: str, user_prompt: str
     return apply_threshold(initial, mode, max_inject=max_inject)
 
 
-def _output_results(top: list[dict], category_descriptions: dict[str, str]) -> None:
+def _emit_search_hint(reason: str = "no_match") -> None:
+    """Emit a search hint as XML note.
+
+    Args:
+        reason: "no_match" (default), "all_low", or "medium_present".
+    """
+    if reason == "all_low":
+        print("<memory-note>Memories exist but confidence was low. "
+              "Use /memory:search &lt;topic&gt; for detailed lookup.</memory-note>")
+    elif reason == "medium_present":
+        print("<memory-note>Some results had medium confidence. "
+              "Use /memory:search &lt;topic&gt; for detailed lookup.</memory-note>")
+    else:
+        print("<memory-note>No matching memories found. "
+              "If project context is needed, use /memory:search &lt;topic&gt;</memory-note>")
+
+
+def _output_results(top: list[dict], category_descriptions: dict[str, str],
+                    output_mode: str = "legacy",
+                    abs_floor: float = 0.0) -> None:
     """Output matched memories in XML element format.
 
     Each result is a <result> element with category and confidence as XML attributes
     (system-controlled, structurally separated from user content).
     Element body contains user content (title, path, tags) -- all XML-escaped.
     Applies all security checks: _sanitize_title, XML escaping, safe key sanitization.
+
+    Args:
+        output_mode: "legacy" (all results as <result>) or "tiered"
+            (HIGH=<result>, MEDIUM=<memory-compact>, LOW=silence).
+        abs_floor: Absolute confidence floor passed to confidence_label().
     """
     desc_attr = ""
     if category_descriptions:
@@ -282,8 +344,23 @@ def _output_results(top: list[dict], category_descriptions: dict[str, str]) -> N
     # Compute best score for confidence labeling
     best_score = max((abs(entry.get("score", 0)) for entry in top), default=0)
 
-    print(f"<memory-context source=\".claude/memory/\"{desc_attr}>")
+    # Pre-compute confidence labels for tiered mode decisions
+    labels = []
     for entry in top:
+        labels.append(confidence_label(entry.get("score", 0), best_score,
+                                       abs_floor=abs_floor, cluster_count=0))
+
+    any_high = any(l == "high" for l in labels)
+    any_medium = any(l == "medium" for l in labels)
+    all_low = all(l == "low" for l in labels)
+
+    # Tiered mode: if all results are LOW, skip wrapper entirely
+    if output_mode == "tiered" and all_low:
+        _emit_search_hint("all_low")
+        return
+
+    print(f"<memory-context source=\".claude/memory/\"{desc_attr}>")
+    for entry, conf in zip(top, labels):
         safe_title = _sanitize_title(entry["title"])
         tags = entry.get("tags", set())
         safe_tags = []
@@ -296,8 +373,19 @@ def _output_results(top: list[dict], category_descriptions: dict[str, str]) -> N
         tags_str = f" #tags:{','.join(sorted(safe_tags))}" if safe_tags else ""
         safe_path = html.escape(entry["path"])
         cat = html.escape(entry["category"])
-        conf = confidence_label(entry.get("score", 0), best_score)
-        print(f'<result category="{cat}" confidence="{conf}">{safe_title} -> {safe_path}{tags_str}</result>')
+
+        if output_mode == "tiered":
+            if conf == "high":
+                print(f'<result category="{cat}" confidence="{conf}">{safe_title} -> {safe_path}{tags_str}</result>')
+            elif conf == "medium":
+                print(f'<memory-compact category="{cat}" confidence="{conf}">{safe_title} -> {safe_path}{tags_str}</memory-compact>')
+            # LOW: silence (no output)
+        else:
+            # legacy mode: all results as <result>
+            print(f'<result category="{cat}" confidence="{conf}">{safe_title} -> {safe_path}{tags_str}</result>')
+
+    if output_mode == "tiered" and not any_high and any_medium:
+        _emit_search_hint("medium_present")
     print("</memory-context>")
 
 
@@ -314,12 +402,32 @@ def main():
     user_prompt = hook_input.get("user_prompt", "")
     cwd = hook_input.get("cwd", os.getcwd())
 
+    # Extract session_id for logging correlation
+    _session_id = get_session_id(hook_input.get("transcript_path", ""))
+
+    # Locate memory root and load raw config early (before any emit_event calls).
+    # A-01 fix: previous code passed config=None to early emit_event calls because
+    # config wasn't loaded yet.  parse_logging_config(None) returns enabled=False,
+    # so skip events were silently dropped even when logging was enabled.
+    memory_root = Path(cwd) / ".claude" / "memory"
+    _raw_config = {}  # Full config dict for logging
+    config_path = memory_root / "memory-config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                _raw_config = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass  # Fail-open: proceed with empty config (logging disabled by default)
+
     # Skip very short prompts (greetings, acks)
     if len(user_prompt.strip()) < 10:
+        emit_event("retrieval.skip", {"reason": "short_prompt", "prompt_length": len(user_prompt.strip())},
+                   hook="UserPromptSubmit", script="memory_retrieve.py",
+                   session_id=_session_id,
+                   memory_root=str(memory_root),
+                   config=_raw_config)
         sys.exit(0)
 
-    # Locate memory root
-    memory_root = Path(cwd) / ".claude" / "memory"
     index_path = memory_root / "index.md"
 
     # Rebuild index on demand if missing (derived artifact pattern).
@@ -337,21 +445,27 @@ def main():
                 pass
 
     if not index_path.exists():
+        emit_event("retrieval.skip", {"reason": "empty_index"},
+                   hook="UserPromptSubmit", script="memory_retrieve.py",
+                   session_id=_session_id, memory_root=str(memory_root), config=_raw_config)
         sys.exit(0)
 
     # Check retrieval config
     max_inject = 3  # Reduced from 5: FTS5 BM25 is more precise, fewer results needed
     match_strategy = "fts5_bm25"
+    abs_floor: float = 0.0  # Absolute confidence floor (0.0 = disabled)
+    output_mode: str = "legacy"  # "legacy" or "tiered"
     category_descriptions: dict[str, str] = {}
     judge_cfg: dict = {}
     judge_enabled = False
-    config_path = memory_root / "memory-config.json"
-    if config_path.exists():
+    if _raw_config:
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            retrieval = config.get("retrieval", {})
+            retrieval = _raw_config.get("retrieval", {})
             if not retrieval.get("enabled", True):
+                emit_event("retrieval.skip", {"reason": "retrieval_disabled"},
+                           hook="UserPromptSubmit", script="memory_retrieve.py",
+                           session_id=_session_id, memory_root=str(memory_root),
+                           config=_raw_config)
                 sys.exit(0)
             raw_inject = retrieval.get("max_inject", 3)
             try:
@@ -363,6 +477,22 @@ def main():
                     file=sys.stderr,
                 )
             match_strategy = retrieval.get("match_strategy", "fts5_bm25")
+            # Confidence abs_floor (composite score domain, default 0.0 = disabled)
+            raw_floor = retrieval.get("confidence_abs_floor", 0.0)
+            try:
+                abs_floor = max(0.0, float(raw_floor))
+                if not math.isfinite(abs_floor):
+                    abs_floor = 0.0
+            except (ValueError, TypeError, OverflowError):
+                abs_floor = 0.0
+            # Output mode: "legacy" (default) or "tiered"
+            raw_mode = retrieval.get("output_mode", "legacy")
+            if raw_mode in ("legacy", "tiered"):
+                output_mode = raw_mode
+            # Cluster detection: currently disabled (default false).
+            # Config key exists for future activation; parsed but unused.
+            # Future: if enabled, compute cluster_count via pre-truncation counting.
+            _cluster_detection_enabled = bool(retrieval.get("cluster_detection_enabled", False))
             # LLM judge config
             try:
                 judge_cfg = retrieval.get("judge", {})
@@ -373,14 +503,14 @@ def main():
             except (KeyError, AttributeError):
                 pass
             # Load category descriptions
-            categories_raw = config.get("categories", {})
+            categories_raw = _raw_config.get("categories", {})
             if isinstance(categories_raw, dict):
                 for cat_key, cat_val in categories_raw.items():
                     if isinstance(cat_val, dict):
                         desc = cat_val.get("description", "")
                         if isinstance(desc, str) and desc:
                             category_descriptions[cat_key.lower()] = desc[:500]
-        except (json.JSONDecodeError, KeyError, OSError):
+        except (KeyError, OSError):
             pass
 
     if judge_cfg.get("enabled", False) and not os.environ.get("ANTHROPIC_API_KEY"):
@@ -388,6 +518,10 @@ def main():
               "Using BM25-only retrieval.", file=sys.stderr)
 
     if max_inject == 0:
+        emit_event("retrieval.skip", {"reason": "max_inject_zero"},
+                   hook="UserPromptSubmit", script="memory_retrieve.py",
+                   session_id=_session_id, memory_root=str(memory_root),
+                   config=_raw_config)
         sys.exit(0)
 
     # Parse index entries once (L1 fix: eliminates double-read of index.md)
@@ -402,7 +536,14 @@ def main():
         sys.exit(0)
 
     if not entries:
+        emit_event("retrieval.skip", {"reason": "empty_index"},
+                   hook="UserPromptSubmit", script="memory_retrieve.py",
+                   session_id=_session_id, memory_root=str(memory_root),
+                   config=_raw_config)
         sys.exit(0)
+
+    # Pipeline timer start
+    _pipeline_t0 = time.perf_counter()
 
     # -----------------------------------------------------------------------
     # FTS5 BM25 path (default when FTS5 is available)
@@ -417,14 +558,41 @@ def main():
             # can evaluate a wider set before filtering down to max_inject.
             judge_pool_size = judge_cfg.get("candidate_pool_size", 15) if judge_enabled else 0
             effective_inject = max(max_inject, judge_pool_size) if judge_enabled else max_inject
+            _search_t0 = time.perf_counter()
             try:
+                # INVARIANT: top_k_paths (1st numeric arg) >= effective_inject (max_inject kwarg)
+                # ensures all entries returned by apply_threshold() have had body analysis
+                # attempted. Do not violate this or body_bonus values become unreliable.
                 results = score_with_body(conn, fts_query, user_prompt,
                                           max(10, effective_inject), memory_root, "auto",
                                           max_inject=effective_inject)
             finally:
                 conn.close()
+            _search_ms = (time.perf_counter() - _search_t0) * 1000
+
+            # Logging Point 1: FTS5 search results
+            _candidates_post_threshold = len(results)
+            _best_score = abs(results[0]["score"]) if results else 0
+            emit_event("retrieval.search", {
+                "query_tokens": prompt_tokens,
+                "engine": "fts5_bm25",
+                "candidates_found": _candidates_post_threshold,
+                "candidates_post_threshold": _candidates_post_threshold,
+                "results": [
+                    {"path": r["path"], "score": r.get("score", 0),
+                     "raw_bm25": r.get("raw_bm25", r.get("score", 0)),
+                     "body_bonus": r.get("body_bonus", 0),
+                     "confidence": confidence_label(r.get("score", 0), _best_score,
+                                                   abs_floor=abs_floor)}
+                    for r in results
+                ],
+            }, hook="UserPromptSubmit", script="memory_retrieve.py",
+               session_id=_session_id, duration_ms=round(_search_ms, 2),
+               memory_root=str(memory_root), config=_raw_config)
+
             if results:
                 # --- LLM Judge (FTS5 path) ---
+                _candidates_post_judge = len(results)
                 if judge_enabled and results:
                     from memory_judge import judge_candidates
 
@@ -439,6 +607,9 @@ def main():
                         timeout=judge_cfg.get("timeout_per_call", 3.0),
                         include_context=judge_cfg.get("include_conversation_context", True),
                         context_turns=judge_cfg.get("context_turns", 5),
+                        memory_root=str(memory_root),
+                        config=_raw_config,
+                        session_id=_session_id,
                     )
 
                     if filtered is not None:
@@ -449,13 +620,44 @@ def main():
                         fallback_k = judge_cfg.get("fallback_top_k", 2)
                         results = results[:fallback_k]
 
+                    # Logging Point 2: Judge filtering result
+                    # V2-05 fix: renamed from retrieval.search to avoid schema shape inconsistency
+                    _candidates_post_judge = len(results)
+                    emit_event("retrieval.judge_result", {
+                        "candidates_post_judge": _candidates_post_judge,
+                        "judge_active": True,
+                    }, level="debug", hook="UserPromptSubmit", script="memory_retrieve.py",
+                       session_id=_session_id, memory_root=str(memory_root),
+                       config=_raw_config)
+
                 # Re-cap to max_inject (judge may have returned more than max_inject
                 # since we fetched candidate_pool_size candidates for it to evaluate)
                 top = results[:max_inject]
-                _output_results(top, category_descriptions)
+
+                # Logging Point 3: Final injection
+                _pipeline_ms = (time.perf_counter() - _pipeline_t0) * 1000
+                _inj_best = abs(top[0]["score"]) if top else 0
+                emit_event("retrieval.inject", {
+                    "injected_count": len(top),
+                    "results": [
+                        {"path": r["path"],
+                         "confidence": confidence_label(r.get("score", 0), _inj_best,
+                                                       abs_floor=abs_floor)}
+                        for r in top
+                    ],
+                }, hook="UserPromptSubmit", script="memory_retrieve.py",
+                   session_id=_session_id, duration_ms=round(_pipeline_ms, 2),
+                   memory_root=str(memory_root), config=_raw_config)
+
+                _output_results(top, category_descriptions,
+                               output_mode=output_mode, abs_floor=abs_floor)
                 return
             # Valid query but no results -- hint at manual search
-            print("<!-- No matching memories found. If project context is needed, use /memory:search <topic> -->")
+            emit_event("retrieval.skip", {"reason": "no_fts5_results", "query_tokens": prompt_tokens},
+                       hook="UserPromptSubmit", script="memory_retrieve.py",
+                       session_id=_session_id, memory_root=str(memory_root),
+                       config=_raw_config)
+            _emit_search_hint("no_match")
         # No valid query tokens (all stop-words) -- exit silently without hint
         sys.exit(0)
 
@@ -464,6 +666,12 @@ def main():
     # -----------------------------------------------------------------------
     if not HAS_FTS5 and match_strategy == "fts5_bm25":
         print("[WARN] FTS5 unavailable; using keyword fallback", file=sys.stderr)
+        # V2-05 fix: renamed from retrieval.search to avoid schema shape inconsistency
+        emit_event("retrieval.fallback", {
+            "engine": "title_tags",
+            "reason": "fts5_unavailable",
+        }, level="warning", hook="UserPromptSubmit", script="memory_retrieve.py",
+           session_id=_session_id, memory_root=str(memory_root), config=_raw_config)
 
     # Tokenize prompt (legacy=True for backward-compatible keyword scoring path)
     prompt_words = tokenize(user_prompt, legacy=True)
@@ -492,7 +700,7 @@ def main():
 
     if not scored:
         # Valid query but no entries scored -- hint at manual search
-        print("<!-- No matching memories found. If project context is needed, use /memory:search <topic> -->")
+        _emit_search_hint("no_match")
         sys.exit(0)
 
     # Sort: highest score first, then by category priority
@@ -514,6 +722,9 @@ def main():
             timeout=judge_cfg.get("timeout_per_call", 3.0),
             include_context=judge_cfg.get("include_conversation_context", True),
             context_turns=judge_cfg.get("context_turns", 5),
+            memory_root=str(memory_root),
+            config=_raw_config,
+            session_id=_session_id,
         )
 
         if filtered is not None:
@@ -557,7 +768,7 @@ def main():
 
     if not final:
         # Valid query but no results survived deep check -- hint at manual search
-        print("<!-- No matching memories found. If project context is needed, use /memory:search <topic> -->")
+        _emit_search_hint("no_match")
         sys.exit(0)
 
     # Re-sort with adjusted scores
@@ -570,7 +781,26 @@ def main():
     for score, _, entry in top_entries:
         entry["score"] = score
         top_list.append(entry)
-    _output_results(top_list, category_descriptions)
+
+    # Logging Point 3: Final injection (legacy path)
+    _pipeline_ms = (time.perf_counter() - _pipeline_t0) * 1000
+    _inj_best = abs(top_list[0]["score"]) if top_list else 0
+    # A-02 F-06 fix: removed undocumented "engine" key from retrieval.inject
+    # (engine is already captured in the preceding retrieval.search event)
+    emit_event("retrieval.inject", {
+        "injected_count": len(top_list),
+        "results": [
+            {"path": r["path"],
+             "confidence": confidence_label(r.get("score", 0), _inj_best,
+                                          abs_floor=abs_floor)}
+            for r in top_list
+        ],
+    }, hook="UserPromptSubmit", script="memory_retrieve.py",
+       session_id=_session_id, duration_ms=round(_pipeline_ms, 2),
+       memory_root=str(memory_root), config=_raw_config)
+
+    _output_results(top_list, category_descriptions,
+                    output_mode=output_mode, abs_floor=abs_floor)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
-status: active
-progress: "S1/S2/S3/S5/S5F/P3 완료. S4 (tests) 다음"
+status: done
+progress: "S1-S9 전체 완료. FTS5 BM25 엔진 + LLM judge + parallel batching 구현 완료."
 ---
 
 # Final Retrieval Improvement Plan (Post-Verification)

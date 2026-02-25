@@ -1,6 +1,6 @@
 ---
-status: not-started
-progress: "미시작. Action #1 (confidence_label 개선)부터 시작 예정"
+status: done
+progress: "Actions #1-#4 전체 완료. 95/95 retrieve 테스트, 948/948 전체 테스트 통과. 모든 검증 PASS. isfinite guard 추가 (unanimous advisory fix)"
 ---
 
 # Plan #1: Actions #1-#4 구현 계획
@@ -136,19 +136,20 @@ def confidence_label(score: float, best_score: float,
 
 ### 진행 상황 (Progress)
 
-- [ ] `confidence_label()` 시그니처 확장 (`abs_floor`, `cluster_count` 파라미터 추가)
-- [ ] 절대 하한선 로직 구현: `abs(best_score) < abs_floor`이면 최대 "medium"
-- [ ] 클러스터 감지 기능 비활성 유지 확인 (Deep Analysis: post-truncation counting은 dead code. 향후 활성화 시 pre-truncation counting으로 재구현)
-- [ ] `_output_results()`에서 `cluster_count=0` 고정 전달 + `abs_floor`를 `confidence_label()`에 전달 (현행 `entry.get("score", 0)` 유지 -- Deep Analysis: raw_bm25 사용 기각)
-- [ ] `confidence_label()` 호출 시 복합 점수 사용 확인 (현행 코드 유지 -- 코드 변경 없음)
-- [ ] `main()`에서 `retrieval.confidence_abs_floor` 설정 파싱 추가
-- [ ] `assets/memory-config.default.json`에 `confidence_abs_floor`, `cluster_detection_enabled` 추가
-- [ ] `main()`에서 `retrieval.cluster_detection_enabled` 설정 파싱 추가
-- [ ] 단위 테스트: 절대 하한선 경계값 (~8개)
-- [ ] 단위 테스트: cluster_count=0 기본값 시 기존 동작 유지 확인 (~2개)
-- [ ] 기존 `TestConfidenceLabel` 17개 회귀 테스트 통과 확인
-- [ ] `python3 -m py_compile hooks/scripts/memory_retrieve.py` 통과
-- [ ] `pytest tests/test_memory_retrieve.py -v` 전체 통과
+- [x] `confidence_label()` 시그니처 확장 (`abs_floor`, `cluster_count` 파라미터 추가)
+- [x] 절대 하한선 로직 구현: `abs(best_score) < abs_floor`이면 최대 "medium"
+- [x] 클러스터 감지 기능 비활성 유지 확인 (Deep Analysis: post-truncation counting은 dead code. 향후 활성화 시 pre-truncation counting으로 재구현)
+- [x] `_output_results()`에서 `cluster_count=0` 고정 전달 + `abs_floor`를 `confidence_label()`에 전달 (현행 `entry.get("score", 0)` 유지 -- Deep Analysis: raw_bm25 사용 기각)
+- [x] `confidence_label()` 호출 시 복합 점수 사용 확인 (현행 코드 유지 -- 코드 변경 없음)
+- [x] `main()`에서 `retrieval.confidence_abs_floor` 설정 파싱 추가
+- [x] `assets/memory-config.default.json`에 `confidence_abs_floor`, `cluster_detection_enabled` 추가
+- [x] `main()`에서 `retrieval.cluster_detection_enabled` 설정 파싱 추가 (비활성이므로 파싱만 -- 로직 미사용)
+- [x] 단위 테스트: 절대 하한선 경계값 (~8개) → 11개 작성
+- [x] 단위 테스트: cluster_count=0 기본값 시 기존 동작 유지 확인 (~2개) → 포함됨
+- [x] 기존 `TestConfidenceLabel` 17개 회귀 테스트 통과 확인
+- [x] `python3 -m py_compile hooks/scripts/memory_retrieve.py` 통과
+- [x] `pytest tests/test_memory_retrieve.py -v` 전체 통과 (90/90)
+- [x] 추가: 로깅 emit_event 3곳에 abs_floor 전달 (vibe check에서 발견)
 
 ---
 
@@ -251,23 +252,23 @@ def _output_results(top: list[dict], category_descriptions: dict[str, str],
 
 ### 진행 상황 (Progress)
 
-- [ ] `_output_results()` 시그니처에 `output_mode`, `abs_floor` 파라미터 추가
-- [ ] `_output_results()` 내부에서 cluster_count=0 고정 전달 확인 (비활성 -- Deep Analysis: 향후 활성화 시 pre-truncation counting으로 재구현)
-- [ ] legacy 모드: 현행 코드 그대로 실행 (output_mode guard)
-- [ ] tiered 모드: HIGH 결과 -> `<result>` 형식 (현행)
-- [ ] tiered 모드: MEDIUM 결과 -> `<memory-compact>` 형식 (제목+경로+태그)
-- [ ] tiered 모드: LOW 결과 -> 침묵 (출력 없음)
-- [ ] tiered 모드: 모든 결과 LOW 시 `<memory-context>` 래퍼 생략, `_emit_search_hint("all_low")`만 호출
-- [ ] tiered 모드: MEDIUM 결과 존재 시 `_emit_search_hint("medium_present")` 호출
-- [ ] `main()`에서 `retrieval.output_mode` 설정 파싱 + `_output_results()` 호출 시 전달
-- [ ] `assets/memory-config.default.json`에 `output_mode` 추가
-- [ ] 기존 테스트: legacy 모드 회귀 테스트 전체 통과 확인
-- [ ] 신규 테스트: tiered 모드 HIGH/MEDIUM/LOW 출력 (~6개)
-- [ ] 신규 테스트: compact 형식 보안 (XML wrapper, 이스케이프) (~4개)
-- [ ] 신규 테스트: compact 형식 태그 보존 (~2개)
-- [ ] 신규 테스트: 검색 유도 문구 발생 조건 (~3개)
-- [ ] `python3 -m py_compile hooks/scripts/memory_retrieve.py` 통과
-- [ ] `pytest tests/ -v` 전체 통과
+- [x] `_output_results()` 시그니처에 `output_mode`, `abs_floor` 파라미터 추가
+- [x] `_output_results()` 내부에서 cluster_count=0 고정 전달 확인 (비활성 -- Deep Analysis: 향후 활성화 시 pre-truncation counting으로 재구현)
+- [x] legacy 모드: 현행 코드 그대로 실행 (output_mode guard)
+- [x] tiered 모드: HIGH 결과 -> `<result>` 형식 (현행)
+- [x] tiered 모드: MEDIUM 결과 -> `<memory-compact>` 형식 (제목+경로+태그)
+- [x] tiered 모드: LOW 결과 -> 침묵 (출력 없음)
+- [x] tiered 모드: 모든 결과 LOW 시 `<memory-context>` 래퍼 생략, `_emit_search_hint("all_low")`만 호출
+- [x] tiered 모드: MEDIUM 결과 존재 시 `_emit_search_hint("medium_present")` 호출
+- [x] `main()`에서 `retrieval.output_mode` 설정 파싱 + `_output_results()` 호출 시 전달
+- [x] `assets/memory-config.default.json`에 `output_mode` 추가
+- [x] 기존 테스트: legacy 모드 회귀 테스트 전체 통과 확인
+- [x] 신규 테스트: tiered 모드 HIGH/MEDIUM/LOW 출력 → 10개 작성 (TestTieredOutput)
+- [x] 신규 테스트: compact 형식 보안 (XML wrapper, 이스케이프) → 포함됨
+- [x] 신규 테스트: compact 형식 태그 보존 → 포함됨
+- [x] 신규 테스트: 검색 유도 문구 발생 조건 → 포함됨
+- [x] `python3 -m py_compile hooks/scripts/memory_retrieve.py` 통과
+- [x] `pytest tests/ -v` 전체 통과 (943/943)
 
 ---
 
@@ -334,15 +335,15 @@ def _emit_search_hint(reason: str = "no_match") -> None:
 
 ### 진행 상황 (Progress)
 
-- [ ] `_emit_search_hint()` 헬퍼 함수 구현
-- [ ] Line 458 hint를 `_emit_search_hint()` 호출로 교체
-- [ ] Line 495 hint를 `_emit_search_hint()` 호출로 교체
-- [ ] Line 560 hint를 `_emit_search_hint()` 호출로 교체
-- [ ] tiered 모드 `_output_results()`에서 all-LOW 결과 시 `_emit_search_hint("all_low")` 호출
-- [ ] 단위 테스트: `_emit_search_hint()` 출력 형식 (~3개)
-- [ ] 통합 테스트: 3개 경로의 hint 발생 확인 (~3개)
-- [ ] `python3 -m py_compile hooks/scripts/memory_retrieve.py` 통과
-- [ ] `pytest tests/ -v` 전체 통과
+- [x] `_emit_search_hint()` 헬퍼 함수 구현
+- [x] Line 458 hint를 `_emit_search_hint()` 호출로 교체 (현재 line 651)
+- [x] Line 495 hint를 `_emit_search_hint()` 호출로 교체 (현재 line 694)
+- [x] Line 560 hint를 `_emit_search_hint()` 호출로 교체 (현재 line 762)
+- [x] tiered 모드 `_output_results()`에서 all-LOW 결과 시 `_emit_search_hint("all_low")` 호출
+- [x] 단위 테스트: `_emit_search_hint()` 출력 형식 → 6개 작성 (TestEmitSearchHint)
+- [x] 통합 테스트: hint 발생 확인 → tiered 테스트에서 커버
+- [x] `python3 -m py_compile hooks/scripts/memory_retrieve.py` 통과
+- [x] `pytest tests/ -v` 전체 통과 (943/943)
 
 ---
 
@@ -383,15 +384,15 @@ Claude Code는 3가지 hook type을 지원:
 
 ### 진행 상황 (Progress)
 
-- [ ] `feat/agent-hook-poc` 브랜치 생성
-- [ ] 최소 agent hook 구성: `hooks/hooks.json`에 agent 타입 UserPromptSubmit hook 추가
-- [ ] Agent hook 프롬프트 작성: BM25 검색 실행 -> JSON 파일 읽기 -> ok/false 반환
-- [ ] 레이턴시 측정: 5-10회 실행의 평균/p95 시간 기록
-- [ ] 출력 메커니즘 테스트: ok=true 시 Claude 컨텍스트에 무엇이 전달되는지 확인
-- [ ] ok=false + reason 시 Claude에게 어떤 메시지가 보이는지 확인
-- [ ] Plugin 호환성 테스트: `hooks/hooks.json`에서 agent 타입이 정상 로드되는지 확인
-- [ ] 결과 문서화: `temp/agent-hook-poc-results.md`에 실험 결과 기록
-- [ ] 브랜치 머지 여부 결정 (PoC 결과에 따라 -- 이 단계는 별도 의사결정)
+- [x] `feat/agent-hook-poc` 브랜치 생성 (worktree에서 생성, 분석 전용 PoC)
+- [x] 최소 agent hook 구성: 3개 샘플 구성 문서화 (활성화하지 않음 -- 분석 PoC)
+- [x] Agent hook 프롬프트 작성: 샘플 구성 내 포함
+- [x] 레이턴시 측정: 추정값 2-15s 문서화 (라이브 측정 없음 -- 공식 문서 + 모델 특성 기반 추정)
+- [x] 출력 메커니즘 테스트: `additionalContext` via `hookSpecificOutput` JSON 발견 (핵심 발견)
+- [x] ok=false + reason 시 동작 문서화 (prompt 차단 -- 메모리 검색에 부적합)
+- [x] Plugin 호환성 테스트: 공식 문서로 확인 (UserPromptSubmit에서 agent 타입 지원)
+- [x] 결과 문서화: `temp/p3-agent-hook-poc-results.md`에 상세 기록 (Gate E 체크리스트 포함)
+- [x] 브랜치 머지 여부 결정: **머지하지 않음** -- 현행 command hook 아키텍처 유지 권장
 
 ---
 

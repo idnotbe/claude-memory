@@ -1,6 +1,6 @@
 ---
-status: not-started
-progress: "미시작. Plan #2 로깅 인프라 -- 독립 실행 가능"
+status: done
+progress: "전체 완료. Phase 1-6 구현 + 품질 감사 11개 전부 실행 (A-01~A-11). 916 tests. 3-tier audit: Phase A (data contract), Phase B (behavioral), Phase C (operational). 각 phase V1+V2 독립 검증. Gemini 3.1 Pro 외부 리뷰 포함."
 ---
 
 # Plan #2: 로깅 인프라스트럭처 (Logging Infrastructure)
@@ -356,52 +356,58 @@ Phase 1 (계약 정의) ──→ Phase 2 (로거 구현) ──→ Phase 3 (파
 
 ## 진행 상황 (Progress)
 
-### Phase 1: 로깅 계약 정의 (Logging Contract)
-- [ ] JSONL 스키마 확정 (최상위 필드 + 이벤트별 data 구조)
-- [ ] event_type 체계 확정
-- [ ] `assets/memory-config.default.json`에 `logging` 섹션 추가
-- [ ] 샘플 JSONL 라인으로 jq/python 파싱 검증
+### Phase 1: 로깅 계약 정의 (Logging Contract) -- COMPLETE ✓
+- [x] JSONL 스키마 확정 (최상위 필드 + 이벤트별 data 구조) → `temp/p2-logger-schema.md`
+- [x] event_type 체계 확정 (7 event types)
+- [x] `assets/memory-config.default.json`에 `logging` 섹션 추가
+- [x] 샘플 JSONL 라인으로 jq/python 파싱 검증
 
-### Phase 2: 공유 로거 모듈 구현
-- [ ] `hooks/scripts/memory_logger.py` 생성
-- [ ] `emit_event()` 구현 -- `os.open(O_APPEND|O_CREAT|O_WRONLY|O_NOFOLLOW)` + `os.write(fd, line_bytes)` + `os.close(fd)` 패턴 (단일 syscall 보장)
-- [ ] `get_session_id()` 구현 -- transcript_path에서 세션 ID 추출
-- [ ] `cleanup_old_logs()` 구현 -- `.last_cleanup` 타임스탬프 기반
-- [ ] `parse_logging_config()` 구현 -- dict.get() 안전 기본값
-- [ ] 레벨 필터링 구현 (debug < info < warning < error)
-- [ ] fail-open 보장: 모든 예외 잡아서 무시
+### Phase 2: 공유 로거 모듈 구현 -- COMPLETE ✓
+- [x] `hooks/scripts/memory_logger.py` 생성 (~324 LOC, security-hardened)
+- [x] `emit_event()` 구현 -- atomic append + symlink containment + NaN sanitization
+- [x] `get_session_id()` 구현 -- transcript_path에서 세션 ID 추출
+- [x] `cleanup_old_logs()` 구현 -- `.last_cleanup` 타임스탬프 기반 + symlink bypass 방지
+- [x] `parse_logging_config()` 구현 -- dict.get() 안전 기본값 + string boolean 처리
+- [x] 레벨 필터링 구현 (debug < info < warning < error)
+- [x] fail-open 보장: 모든 예외 잡아서 무시
 
-### Phase 3: 검색 파이프라인 계측
-- [ ] `memory_retrieve.py` -- FTS5 경로에 타이밍 계측 추가 (`time.perf_counter()`)
-- [ ] `memory_retrieve.py` -- 전체 후보 파이프라인 로깅 (pre/post threshold, pre/post judge)
-- [ ] `memory_retrieve.py` -- 최종 주입 결과 로깅 (confidence별 분류)
-- [ ] `memory_retrieve.py` -- 0-result / skip 이벤트 로깅
-- [ ] `memory_judge.py` -- Judge 호출/응답/오류 로깅
-- [ ] `memory_search_engine.py` -- CLI 검색 쿼리 로깅
+### Phase 3: 검색 파이프라인 계측 -- COMPLETE ✓
+- [x] `memory_retrieve.py` -- FTS5 경로에 타이밍 계측 추가 (`time.perf_counter()`)
+- [x] `memory_retrieve.py` -- 전체 후보 파이프라인 로깅 (pre/post threshold, pre/post judge)
+- [x] `memory_retrieve.py` -- 최종 주입 결과 로깅 (confidence별 분류)
+- [x] `memory_retrieve.py` -- 0-result / skip 이벤트 로깅
+- [x] `memory_judge.py` -- Judge 호출/응답/오류 로깅
+- [x] `memory_search_engine.py` -- CLI 검색 쿼리 로깅 + `--session-id` CLI 파라미터
 
-### Phase 4: 기존 로그 마이그레이션
-- [ ] `memory_triage.py` -- `.triage-scores.log`를 새 로거로 전환
-- [ ] 기존 stderr `[DEBUG]`/`[WARN]`/`[INFO]` 출력을 로거 호출로 대체
-- [ ] 듀얼 라이트 기간 후 `.triage-scores.log` 경로 제거
+### Phase 4: 기존 로그 마이그레이션 -- PARTIAL (1/3 deferred)
+- [x] `memory_triage.py` -- `.triage-scores.log`와 새 로거 듀얼 라이트
+- [x] 기존 stderr 출력 보존 (듀얼 라이트 기간)
+- [ ] 듀얼 라이트 기간 후 `.triage-scores.log` 경로 제거 (향후 세션)
 
-### Phase 5: 테스트 및 성능 검증
-- [ ] `tests/test_memory_logger.py` 작성
-  - [ ] 정상 append 테스트
-  - [ ] 디렉토리 없을 때 자동 생성
-  - [ ] 디렉토리 권한 오류 시 fail-open
-  - [ ] 잘못된 config 시 안전 기본값
-  - [ ] 레벨 필터링
-  - [ ] cleanup 동작 (retention_days 초과 파일 삭제)
-  - [ ] cleanup 시간 게이트 (.last_cleanup 24시간 미경과 시 건너뜀)
-  - [ ] session_id 추출 (다양한 transcript_path 형식)
-  - [ ] 동시 append 안전성
-- [ ] 성능 벤치마크: `emit_event()` 단일 호출 p95 < 5ms 확인
-- [ ] 기존 테스트 회귀 없음 확인 (`pytest tests/ -v`)
+### Phase 5: 테스트 및 성능 검증 -- COMPLETE ✓
+- [x] `tests/test_memory_logger.py` 작성 (52 tests)
+  - [x] 정상 append + JSONL 유효성 + 스키마 필드
+  - [x] 디렉토리 자동 생성 + 권한 오류 fail-open
+  - [x] 비활성/잘못된 config 안전 기본값 (5 tests)
+  - [x] 레벨 필터링 (3 tests)
+  - [x] cleanup 동작 (4 tests) + symlink bypass 방지
+  - [x] session_id 추출 (3 tests)
+  - [x] 동시 append 안전성 (8 threads x 50 writes)
+  - [x] V1+V2 보안 테스트 (NaN, symlink containment, bool string, category length, midnight consistency)
+- [x] 성능 벤치마크: p95 < 5ms 확인
+- [x] 기존 테스트 회귀 없음: 852/852 통과
 
-### Phase 6: 문서 및 설정 업데이트
-- [ ] `CLAUDE.md` Key Files 테이블에 `memory_logger.py` 추가
-- [ ] `CLAUDE.md` Config 키 목록에 `logging.*` 추가
-- [ ] `assets/memory-config.default.json` 업데이트
+### Phase 6: 문서 및 설정 업데이트 -- COMPLETE ✓
+- [x] `CLAUDE.md` Key Files 테이블에 `memory_logger.py` 추가
+- [x] `CLAUDE.md` Config 키 목록에 `logging.*` 추가
+- [x] `assets/memory-config.default.json` 업데이트 완료
+
+### V1+V2 검증 -- COMPLETE ✓
+- [x] V1 (Correctness + Security): CONDITIONAL PASS → 이슈 수정 후 PASS
+- [x] V2 (Adversarial + Fresh-eyes): CONDITIONAL PASS → 이슈 수정 후 PASS
+- [x] 10개 이슈 수정, 3개 LOW 이슈 DEFERRED
+- [x] 14개 보안 테스트 추가
+- [x] 스키마 계약 문서 실제 코드와 동기화
 
 ---
 
@@ -480,6 +486,159 @@ Plan #3 (PoC 실험)은 이 로깅 인프라에 다음을 요구한다:
 
 ---
 
+## DEFERRED 항목 (구현 세션에서 연기된 사항)
+
+### D-01: `retrieval.inject`에 `output_mode` 필드 추가 [V1 F-04, LOW]
+- [ ] `output_mode` 필드 추가 구현
+- **내용:** `retrieval.inject` 이벤트에 `output_mode` (`"full"`, `"compact"`, `"silent"`) 필드가 누락됨
+- **영향:** PoC #6 (Nudge 준수율)에서 compact injection 발생 횟수 측정 불가
+- **수정 위치:** `hooks/scripts/memory_retrieve.py` -- FTS5 경로(~line 533)와 legacy 경로(~line 678)의 `retrieval.inject` emit 호출
+- **예상 공수:** ~5 LOC, 30분
+
+### D-02: `candidates_found` vs `candidates_post_threshold` 분리 [V1 F-05, LOW]
+- [ ] raw 후보 수와 threshold 후 후보 수 분리 구현
+- **내용:** `retrieval.search` 이벤트에서 두 필드가 동일한 값(`len(results)`) -- threshold 적용 전 raw 후보 수가 누락됨
+- **영향:** 파이프라인 후보 감소(attrition) 분석 불가. `candidates_found`가 threshold 전 수치여야 의미 있음
+- **수정 위치:** `hooks/scripts/memory_retrieve.py` -- `score_with_body()` 호출 전후로 카운트 분리 필요. `score_with_body()`가 내부에서 `apply_threshold()` 호출하므로 반환값에 raw count 추가하거나 별도 query로 raw count 획득
+- **예상 공수:** ~15-20 LOC, 1-2시간 (score_with_body 반환 구조 변경 필요)
+
+### D-03: 글로벌 payload 크기 제한 [V2 Finding #8, LOW]
+- [ ] `emit_event()` 내 payload 크기 제한 추가
+- **내용:** `data.results[]`는 20개로 제한하지만, 다른 data 필드(`query_tokens` 등)에는 크기 제한 없음
+- **영향:** 소비자 스크립트 버그로 인한 대량 로그 엔트리 가능 (이론적). fail-open이 MemoryError를 잡음
+- **수정 위치:** `hooks/scripts/memory_logger.py` `emit_event()` -- `json.dumps()` 후 `len(line_bytes) > 32768` 체크 추가
+- **예상 공수:** ~3 LOC, 15분
+
+### D-04: 듀얼 라이트 종료 -- `.triage-scores.log` 제거 [Phase 4 잔여]
+- [ ] 레거시 `.triage-scores.log` 듀얼 라이트 코드 제거
+- **내용:** `memory_triage.py`에서 레거시 `.triage-scores.log` 듀얼 라이트 코드 제거
+- **전제 조건:** 새 로깅 시스템으로 충분한 데이터 축적 확인 후 (2-4주 운영)
+- **수정 위치:** `hooks/scripts/memory_triage.py` lines ~1012-1046 (`# LEGACY: remove after migration validation`)
+- **예상 공수:** ~30 LOC 삭제, 30분
+
+### D-05: `retrieval.search`에 `matched_tokens` 필드 추가 [PoC #7 의존성]
+- [ ] `matched_tokens` 근사 계산 로직 구현
+- **내용:** PoC #7 (OR-query 정밀도)은 `data.results[].matched_tokens` 필드를 요구함. FTS5 `rank`는 전체 점수만 반환하므로 로깅 시 제목+태그 토큰 교차 비교로 근사 계산 필요
+- **영향:** Plan #3 PoC #7 분석 불가
+- **수정 위치:** `hooks/scripts/memory_retrieve.py` -- `retrieval.search` emit 직전에 query_tokens과 entry title/tag tokens의 교집합 계산
+- **예상 공수:** ~10-15 LOC, 1시간
+
+---
+
+## 품질 감사 계획 (Quality Audit Plan)
+
+**날짜:** 2026-02-25
+**범위:** Plan #2 구현 전체 (memory_logger.py + 4개 소비자 스크립트 계측 + 테스트)
+**전략 근거:** V1+V2 정적 리뷰는 코드 *구조*를 검증했으나, 런타임 *데이터 흐름*과 *통합 동작*은 검증하지 못함. 이 감사는 정적 리뷰가 구조적으로 놓치는 영역에 집중.
+
+### 전략 선택 근거
+
+| 접근법 | 장점 | 단점 | 채택 여부 |
+|--------|------|------|-----------|
+| User scenario walkthrough | 사용자 관점의 실제 문제 발견 | 내부 데이터 흐름 미검증 | 부분 채택 (Tier 3) |
+| 모듈별 분리 리뷰 | 체계적, 누락 방지 | V1+V2와 중복, 비효율 | 미채택 |
+| 보안/정확성 관점 리뷰 | 깊은 분석 가능 | V1+V2에서 이미 수행 | 미채택 |
+| **통합 데이터 계약 검증** | V1+V2가 놓치는 핵심 영역 | call-site별 수작업 필요 | **주 전략** |
+| **행동 검증 (behavioral)** | 런타임 버그 발견 | 테스트 작성 비용 | **보조 전략** |
+| **운영 시나리오 검증** | 사용자 체감 문제 발견 | 범위 제한적 | **보조 전략** |
+
+**최종 전략: 3단계 우선순위 감사 (Three-Tier Prioritized Audit)**
+- **Tier 1 (통합 데이터 계약):** emit_event() call-site별 실제 data dict 키를 스키마와 대조. 런타임 데이터 흐름 추적.
+- **Tier 2 (행동 검증):** 파이프라인 end-to-end 실행 후 디스크에 기록된 실제 바이트 검증. lazy import 폴백 검증.
+- **Tier 3 (운영 검증):** 사용자 워크플로우 (활성화/비활성화/분석) 동작 확인. 설계 개선 제안.
+
+### Tier 1: 통합 데이터 계약 검증 (HIGH priority, ~1.5시간)
+
+#### A-01: Config 로딩 순서 버그 [est. 20분]
+- [x] config 로드 전 emit_event 호출 경로 추적 및 검증
+- **가설:** `memory_retrieve.py`의 초기 `retrieval.skip` 이벤트(~line 333, ~361)가 `config=None`으로 emit → `parse_logging_config(None)`이 `enabled: False` 반환 → 로깅 활성 상태에서도 이 이벤트들이 영구 미기록
+- **검증:** 실행 경로 추적: config 로드 시점(~line 370) 이전의 모든 emit_event 호출 식별
+- **영향:** 짧은 프롬프트/빈 인덱스에 대한 skip 이벤트가 로그에 누락 → 관측 가능성 갭
+- **분류:** 데이터 완전성 버그
+
+#### A-02: Call-Site 스키마 감사 [est. 45분]
+- [x] 4개 소비자 스크립트의 ~12개 emit_event() 호출 대조 완료
+- **방법:** 4개 소비자 스크립트의 ~12개 `emit_event()` 호출 지점에서 실제 `data` dict 키를 추출하여 스키마 계약(`temp/p2-logger-schema.md`)과 대조
+- **목표:** DEFERRED D-01~D-05 외의 미알려진 스키마 불일치 발견
+- **산출물:** call-site별 대조표 (expected vs actual vs gap)
+
+#### A-03: results[] 필드 정확성 검증 [est. 30분]
+- [x] score_with_body() 데이터 흐름 추적 및 정확성 확인
+- **가설:** `score_with_body()` 내에서 `top_k_paths` 범위 밖 엔트리의 `body_bonus`가 "0" (분석 미수행)과 "0" (매칭 없음)을 구분할 수 없음
+- **검증:** `score_with_body()` 데이터 흐름 추적 -- `raw_bm25`, `score`, `body_bonus` 값이 로깅 시점에 정확한지 확인
+- **영향:** PoC #5 (BM25 정밀도) 데이터 품질
+
+### Tier 2: 행동 검증 (MEDIUM priority, ~1.5시간)
+
+#### A-04: End-to-End 데이터 흐름 추적 [est. 40분]
+- [x] 최소 코퍼스로 E2E 파이프라인 실행 및 JSONL 출력 검증
+- **방법:** 최소 메모리 코퍼스(2-3개 JSON) 생성 → `logging.enabled: true` 설정 → `memory_retrieve.py`에 hook_input 파이프 → `logs/` 디렉토리의 JSONL 파일 파싱 검증
+- **검증:** 유효한 JSON, schema_version=1, timestamp/filename 일치, data 키 존재, duration_ms 양수 유한
+- **의의:** 기존 52개 테스트는 `emit_event()`를 합성 데이터로 직접 호출. 소비자 스크립트가 구성하는 실제 data dict를 검증하는 테스트 없음
+
+#### A-05: Lazy Import 폴백 검증 [est. 15분]
+- [x] 4개 소비자 스크립트에서 3가지 import 실패 시나리오 테스트
+- **방법:** `memory_logger.py` 미존재/SyntaxError/전이적 ImportError 3가지 시나리오를 4개 소비자 스크립트 각각에서 테스트
+- **의의:** 폴백 코드가 4개 파일에 복제됨. 어느 하나에 오타가 있으면 기존 테스트로 발견 불가
+
+#### A-06: Cleanup 레이턴시 (축적 상태) [est. 20분]
+- [x] 축적된 파일 상태에서 p95 < 5ms 벤치마크 확인
+- **방법:** 14개 서브디렉토리 x 14개 .jsonl 파일 생성 → `.last_cleanup` 없이 `emit_event()` 호출 → p95 < 5ms 확인
+- **의의:** 벤치마크 테스트는 빈 디렉토리에서 실행. 프로덕션은 파일이 축적된 상태
+
+#### A-07: 큰 페이로드 동시 Append [est. 15분]
+- [x] 4096바이트 근처 페이로드로 동시 append 원자성 검증
+- **방법:** 4096바이트 근처 페이로드로 동시 append 테스트 → JSONL 라인 손상 여부 확인
+- **의의:** POSIX `O_APPEND` 원자성 보장 경계(PIPE_BUF) 근처 동작 검증
+
+### Tier 3: 운영 검증 및 설계 개선 (LOW priority, ~30분)
+
+#### A-08: 운영 워크플로우 스모크 테스트 [est. 10분]
+- [x] 로깅 활성화/비활성화 전환 동작 검증
+- [x] 레벨 변경 (info→debug→warning) 적용 확인
+- [x] jq 파싱 검증 (출력 JSONL의 유효성)
+- [x] config 삭제 시 안전 기본값 폴백 확인
+
+#### A-09: 잘림(truncation) 메타데이터 누락 [est. 5분, 설계 개선]
+- [x] 잘림 발생 시 `_truncated`/`_original_count` 메타데이터 추가 구현
+- `results[]` 잘림 시 원래 개수(`_original_results_count`) 미기록 → 분석 정확도 저하
+- 수정 방안: 잘림 발생 시 `data["_truncated"] = True`, `data["_original_count"] = len(results)` 추가
+
+#### A-10: triage.score 이벤트에 비트리거 카테고리 점수 누락 [est. 5분, 설계 개선]
+- [x] 전체 6개 카테고리 점수 기록 여부 확인 및 구현
+- 현재 threshold 초과 카테고리만 기록 → threshold 튜닝 분석에 전체 6개 카테고리 점수 필요
+- PoC #4 의존성 확인 필요
+
+#### A-11: 비결정적 set 직렬화 방어 [est. 5분, 설계 개선]
+- [x] `json.dumps()` 호출 전 set→sorted list 변환 방어 코드 추가
+- `json.dumps(default=str)`로 `set` → 비결정적 문자열 변환. 현재 call-site에서 set 전달 없으나 방어적 개선 가능
+
+### 우선순위 요약
+
+| 순위 | 액션 | 시간 | 버그 유형 | 발견 확률 |
+|------|------|------|-----------|----------|
+| 1 | A-01 Config 로딩 순서 | 20분 | 데이터 완전성 | 높음 (실 버그 가설) |
+| 2 | A-02 Call-site 스키마 | 45분 | 스키마 불일치 | 중간 (미지 갭) |
+| 3 | A-03 results[] 정확성 | 30분 | PoC 데이터 품질 | 중간 |
+| 4 | A-04 E2E 데이터 흐름 | 40분 | 통합 검증 | 높음 (최고 가치) |
+| 5 | A-05 Import 폴백 | 15분 | 회귀 안전 | 낮음 |
+| 6 | A-10 비트리거 점수 | 5분 | 데이터 완전성 | 확정 (설계 갭) |
+| 7 | A-09 잘림 메타데이터 | 5분 | 분석 정확도 | 확정 (설계 갭) |
+| 8 | A-06 Cleanup 레이턴시 | 20분 | 성능 가정 | 낮음 |
+| 9 | A-08 운영 스모크 | 10분 | 사용자 체감 | 중간 |
+| 10 | A-07 큰 페이로드 | 15분 | 원자성 가정 | 낮음 |
+| 11 | A-11 set 직렬화 | 5분 | 방어적 개선 | 해당 없음 (현재 버그 아님) |
+
+**총 예상 시간:** Tier 1만 ~1.5시간, 전체 ~3.5시간
+
+### 전략 자기비판
+
+1. **강점:** V1+V2 정적 리뷰와 중복 없이 통합 데이터 흐름에 집중. 구체적 파일/라인 수준의 가설 기반.
+2. **약점:** Plan 문서 자체의 정확성은 검증하지 않음. 소비자 스크립트 에러 경로의 data dict 구성 미검증.
+3. **외부 검증:** Gemini 3.1 Pro (잘림 메타데이터, set 직렬화), Codex 5.3 (config race, call-site audit), vibe-check (우선순위 조정) 의견 반영.
+
+---
+
 ## 검토 이력
 
 | 검토 | 결과 | 핵심 발견 |
@@ -494,3 +653,7 @@ Plan #3 (PoC 실험)은 이 로깅 인프라에 다음을 요구한다:
 | Structure Audit (Session 10) | 3 gaps fixed | Finding #4 session-id 해결책, 구현 순서 섹션, 롤백 전략 섹션 추가. V1 중복 롤백 제거. |
 | V2-Holistic (Session 10) | PASS | Gemini 3.1 Pro 교차 검증 통과. 구조, 정확성, 완전성 모두 합격. |
 | V2-Adversarial (Session 10) | MEDIUM→fixed | Phase 3/4 파일 겹침 주장 수정, 전체 롤백 관측성 경고 추가, Phase 1 zombie config 명시. |
+| Implementation V1 (Phase 1-5) | CONDITIONAL PASS→PASS | 4 MEDIUM, 4 LOW 발견. makedirs mode, schema drift, output_mode 누락 등. |
+| Implementation V2 (Phase 1-5) | CONDITIONAL PASS→PASS | 1 HIGH (symlink traversal), 3 MEDIUM (NaN, .last_cleanup, bool parsing), 4 LOW. 10개 수정. |
+| Post-Fix Verification | PASS | 852/852 테스트 통과, 14개 보안 테스트 추가, 스키마 문서 동기화 |
+| Quality Audit Plan | DESIGNED | 3-tier 감사 전략 수립. Gemini 3.1 Pro + vibe-check 교차 검증. 11개 감사 액션 도출. |

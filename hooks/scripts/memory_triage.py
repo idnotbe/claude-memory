@@ -27,6 +27,16 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# Lazy import: logging module may not exist during partial deployments
+try:
+    from memory_logger import emit_event, get_session_id, parse_logging_config
+except (ImportError, SyntaxError) as e:
+    if isinstance(e, ImportError) and getattr(e, 'name', None) != 'memory_logger':
+        raise  # Transitive dependency failure -- fail-fast
+    def emit_event(*args, **kwargs): pass
+    def get_session_id(*args, **kwargs): return ""
+    def parse_logging_config(*args, **kwargs): return {"enabled": False, "level": "info", "retention_days": 14}
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -405,6 +415,42 @@ def score_session_summary(metrics: dict[str, int]) -> tuple[float, list[str]]:
     return score, snippets
 
 
+def _score_all_raw(
+    text: str,
+    metrics: dict[str, int],
+) -> list[dict]:
+    """Compute scores + snippets for ALL 6 categories (shared core).
+
+    Returns list of dicts for every category:
+      [{"category": "DECISION", "score": 0.72, "snippets": ["..."]}]
+
+    Used by both ``run_triage()`` (threshold-filtered) and
+    ``score_all_categories()`` (all scores, no snippets).
+    Single evaluation avoids duplicate regex execution.
+    """
+    all_raw: list[dict] = []
+    lines = text.split("\n")
+
+    # Text-based categories
+    for category in CATEGORY_PATTERNS:
+        score, snippets = score_text_category(lines, category)
+        all_raw.append({
+            "category": category,
+            "score": score,
+            "snippets": snippets,
+        })
+
+    # Activity-based: SESSION_SUMMARY
+    score, snippets = score_session_summary(metrics)
+    all_raw.append({
+        "category": "SESSION_SUMMARY",
+        "score": score,
+        "snippets": snippets,
+    })
+
+    return all_raw
+
+
 def run_triage(
     text: str,
     metrics: dict[str, int],
@@ -415,31 +461,35 @@ def run_triage(
     Returns list of dicts for categories that exceed their threshold:
       [{"category": "DECISION", "score": 0.72, "snippets": ["..."]}]
     """
+    all_raw = _score_all_raw(text, metrics)
     results: list[dict] = []
-    lines = text.split("\n")
-
-    # Text-based categories
-    for category in CATEGORY_PATTERNS:
-        threshold = thresholds.get(category, 0.5)
-        score, snippets = score_text_category(lines, category)
-        if score >= threshold:
-            results.append({
-                "category": category,
-                "score": score,
-                "snippets": snippets,
-            })
-
-    # Activity-based: SESSION_SUMMARY
-    threshold = thresholds.get("SESSION_SUMMARY", 0.6)
-    score, snippets = score_session_summary(metrics)
-    if score >= threshold:
-        results.append({
-            "category": "SESSION_SUMMARY",
-            "score": score,
-            "snippets": snippets,
-        })
-
+    for entry in all_raw:
+        threshold = thresholds.get(entry["category"], 0.5)
+        if entry["category"] == "SESSION_SUMMARY":
+            threshold = thresholds.get("SESSION_SUMMARY", 0.6)
+        if entry["score"] >= threshold:
+            results.append(entry)
     return results
+
+
+def score_all_categories(
+    text: str,
+    metrics: dict[str, int],
+) -> list[dict]:
+    """Score ALL 6 categories and return their scores (for logging/analytics).
+
+    Unlike ``run_triage()`` which filters by threshold, this returns every
+    category with its computed score. Snippets are intentionally excluded
+    to keep log payloads compact and avoid leaking transcript content.
+
+    Returns:
+        [{"category": "DECISION", "score": 0.32}, ...]
+    """
+    all_raw = _score_all_raw(text, metrics)
+    return [
+        {"category": entry["category"], "score": round(entry["score"], 4)}
+        for entry in all_raw
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +618,9 @@ def load_config(cwd: str) -> dict:
                 desc = desc if isinstance(desc, str) else ""
                 descs[cat_key.lower()] = desc[:500]
         config["category_descriptions"] = descs
+
+    # Store raw config for logging subsystem (emit_event needs full config with logging key)
+    config["_raw"] = raw
 
     return config
 
@@ -975,10 +1028,35 @@ def _run_triage() -> int:
     text = extract_text_content(messages)
     metrics = extract_activity_metrics(messages)
 
-    # 7. Run heuristic triage
+    # 7. Run heuristic triage (single scoring pass via shared _score_all_raw)
     results = run_triage(text, metrics, config["thresholds"])
 
     # Score logging (non-critical observability)
+    _triage_session_id = get_session_id(transcript_path or "")
+    _memory_root_str = os.path.join(cwd, ".claude", "memory")
+    _triage_raw_config = config.get("_raw", {})
+
+    # All category scores for logging. Note: this re-evaluates _score_all_raw
+    # (duplicate regex pass). Acceptable since triage runs once per session stop
+    # and total overhead is <100ms. The shared _score_all_raw ensures both
+    # functions stay in sync when categories are added/changed.
+    all_scores = score_all_categories(text, metrics)
+
+    # New structured logging via emit_event
+    emit_event("triage.score", {
+        "text_len": len(text),
+        "exchanges": metrics.get("exchanges", 0),
+        "tool_uses": metrics.get("tool_uses", 0),
+        "triggered": [
+            {"category": r["category"], "score": round(r["score"], 4)}
+            for r in results
+        ],
+        "all_scores": all_scores,
+    }, hook="Stop", script="memory_triage.py",
+       session_id=_triage_session_id,
+       memory_root=_memory_root_str, config=_triage_raw_config)
+
+    # LEGACY: remove after migration validation
     try:
         log_entry = {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1012,7 +1090,7 @@ def _run_triage() -> int:
                 pass
             raise
     except OSError:
-        pass  # Non-critical: fail silently
+        pass  # LEGACY: Non-critical: fail silently
 
     # 8. Output decision
     if results:

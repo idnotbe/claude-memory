@@ -27,6 +27,16 @@ import urllib.error
 import urllib.request
 from collections import deque
 
+# Lazy import: logging module may not exist during partial deployments
+try:
+    from memory_logger import emit_event, get_session_id, parse_logging_config
+except (ImportError, SyntaxError) as e:
+    if isinstance(e, ImportError) and getattr(e, 'name', None) != 'memory_logger':
+        raise  # Transitive dependency failure -- fail-fast
+    def emit_event(*args, **kwargs): pass
+    def get_session_id(*args, **kwargs): return ""
+    def parse_logging_config(*args, **kwargs): return {"enabled": False, "level": "info", "retention_days": 14}
+
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
@@ -321,12 +331,19 @@ def judge_candidates(
     timeout: float = 3.0,
     include_context: bool = True,
     context_turns: int = 5,
+    memory_root: str = "",
+    config: dict | None = None,
+    session_id: str = "",
 ) -> list[dict] | None:
     """Run LLM judge on candidates. Returns filtered candidates or None on failure.
 
     When candidate count exceeds _PARALLEL_THRESHOLD, splits into 2 batches
     and processes in parallel via ThreadPoolExecutor. Falls back to sequential
     single-batch on any parallel failure.
+
+    Args:
+        memory_root: Memory root path for logging (optional, passed through to emit_event).
+        config: Full plugin config dict for logging (optional, passed through to emit_event).
     """
     if not candidates:
         return []
@@ -346,11 +363,33 @@ def judge_candidates(
             elapsed = time.monotonic() - t0
             print(f"[DEBUG] judge parallel: {elapsed:.3f}s, model={model}, "
                   f"n={len(candidates)}", file=sys.stderr)
-            return [candidates[i] for i in sorted(set(kept_indices))
+            _kept_sorted = sorted(set(kept_indices))
+            _rejected = [i for i in range(len(candidates)) if i not in set(_kept_sorted)]
+            emit_event("judge.evaluate", {
+                "candidate_count": len(candidates),
+                "model": model,
+                "batch_count": 2,
+                "mode": "parallel",
+                "accepted_indices": _kept_sorted,
+                "rejected_indices": _rejected,
+            }, hook="UserPromptSubmit", script="memory_judge.py",
+               session_id=session_id, duration_ms=round(elapsed * 1000, 2),
+               memory_root=memory_root, config=config)
+            return [candidates[i] for i in _kept_sorted
                     if i < len(candidates)]
         # Parallel failed -- fall through to sequential
         print("[DEBUG] judge parallel failed, falling back to sequential",
               file=sys.stderr)
+        # A-02 F-07 fix: add duration_ms for consistency with other judge.error sites
+        emit_event("judge.error", {
+            "error_type": "parallel_failure",
+            "message": "Parallel judge failed, falling back to sequential",
+            "fallback": "sequential",
+            "candidate_count": len(candidates),
+            "model": model,
+        }, level="warning", hook="UserPromptSubmit", script="memory_judge.py",
+           session_id=session_id, duration_ms=round((time.monotonic() - t0) * 1000, 2),
+           memory_root=memory_root, config=config)
 
     # Sequential single-batch path (default or fallback)
     formatted, order_map = format_judge_input(user_prompt, candidates, context)
@@ -360,10 +399,41 @@ def judge_candidates(
     print(f"[DEBUG] judge call: {elapsed:.3f}s, model={model}", file=sys.stderr)
 
     if response is None:
+        emit_event("judge.error", {
+            "error_type": "api_failure",
+            "message": "API call returned None",
+            "fallback": "caller_fallback",
+            "candidate_count": len(candidates),
+            "model": model,
+        }, level="warning", hook="UserPromptSubmit", script="memory_judge.py",
+           session_id=session_id, duration_ms=round(elapsed * 1000, 2),
+           memory_root=memory_root, config=config)
         return None  # API failure
 
     kept_indices = parse_response(response, order_map, len(candidates))
     if kept_indices is None:
+        emit_event("judge.error", {
+            "error_type": "parse_failure",
+            "message": "Failed to parse judge response",
+            "fallback": "caller_fallback",
+            "candidate_count": len(candidates),
+            "model": model,
+        }, level="warning", hook="UserPromptSubmit", script="memory_judge.py",
+           session_id=session_id, duration_ms=round(elapsed * 1000, 2),
+           memory_root=memory_root, config=config)
         return None  # Parse failure
 
-    return [candidates[i] for i in sorted(set(kept_indices)) if i < len(candidates)]
+    _kept_sorted = sorted(set(kept_indices))
+    _rejected = [i for i in range(len(candidates)) if i not in set(_kept_sorted)]
+    emit_event("judge.evaluate", {
+        "candidate_count": len(candidates),
+        "model": model,
+        "batch_count": 1,
+        "mode": "sequential",
+        "accepted_indices": _kept_sorted,
+        "rejected_indices": _rejected,
+    }, hook="UserPromptSubmit", script="memory_judge.py",
+       session_id=session_id, duration_ms=round(elapsed * 1000, 2),
+       memory_root=memory_root, config=config)
+
+    return [candidates[i] for i in _kept_sorted if i < len(candidates)]

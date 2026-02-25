@@ -50,6 +50,9 @@
   "retrieval": {
     "max_inject": 3,
     "match_strategy": "fts5_bm25",
+    "confidence_abs_floor": 0.0,
+    "cluster_detection_enabled": false,
+    "output_mode": "legacy",
     "judge": {
       "enabled": false,
       "model": "claude-haiku-4-5-20251001",
@@ -89,5 +92,10 @@
   "delete": {
     "grace_period_days": 30,
     "archive_retired": true
+  },
+  "logging": {
+    "enabled": false,
+    "level": "info",
+    "retention_days": 14
   }
 }

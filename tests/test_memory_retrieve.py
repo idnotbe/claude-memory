@@ -21,6 +21,7 @@ from memory_retrieve import (
     confidence_label,
     _sanitize_title,
     _output_results,
+    _emit_search_hint,
     CATEGORY_PRIORITY,
     STOP_WORDS,
     _RECENCY_DAYS,
@@ -690,3 +691,333 @@ class TestOutputResultsConfidence:
         out = capsys.readouterr().out
         assert "</result><fake>" not in out
         assert "&lt;/result&gt;&lt;fake&gt;" in out
+
+
+# ---------------------------------------------------------------------------
+# Action #1: confidence_label abs_floor tests
+# ---------------------------------------------------------------------------
+
+
+class TestConfidenceLabelAbsFloor:
+    """Tests for abs_floor parameter in confidence_label()."""
+
+    def test_abs_floor_zero_preserves_legacy(self):
+        """abs_floor=0.0 (default) preserves existing behavior."""
+        assert confidence_label(3.7, 3.7, abs_floor=0.0) == "high"
+        assert confidence_label(-5.2, -5.2, abs_floor=0.0) == "high"
+
+    def test_abs_floor_caps_weak_single_result(self):
+        """Single weak result capped to medium when below abs_floor."""
+        # score=1.0, best_score=1.0, ratio=1.0 -> normally "high"
+        # but abs(best_score)=1.0 < abs_floor=2.0 -> capped to "medium"
+        assert confidence_label(1.0, 1.0, abs_floor=2.0) == "medium"
+
+    def test_abs_floor_does_not_cap_strong_result(self):
+        """Strong result above abs_floor remains "high"."""
+        assert confidence_label(-5.0, -5.0, abs_floor=3.0) == "high"
+
+    def test_abs_floor_boundary_exact(self):
+        """When abs(best_score) == abs_floor, no cap (strictly less than)."""
+        # abs(best_score) = 3.0, abs_floor = 3.0 -> NOT < abs_floor, so no cap
+        assert confidence_label(3.0, 3.0, abs_floor=3.0) == "high"
+
+    def test_abs_floor_boundary_just_below(self):
+        """When abs(best_score) is just below abs_floor, cap applies."""
+        assert confidence_label(2.99, 2.99, abs_floor=3.0) == "medium"
+
+    def test_abs_floor_medium_ratio_unaffected(self):
+        """abs_floor only caps "high" -> "medium"; medium stays medium."""
+        # ratio ~0.5 -> medium, abs_floor doesn't affect medium results
+        assert confidence_label(2.5, 5.0, abs_floor=10.0) == "medium"
+
+    def test_abs_floor_low_ratio_unaffected(self):
+        """abs_floor doesn't affect "low" results."""
+        assert confidence_label(1.0, 5.0, abs_floor=10.0) == "low"
+
+    def test_abs_floor_bm25_negative_scores(self):
+        """abs_floor works correctly with BM25 negative scores."""
+        # abs(-1.5) = 1.5 < abs_floor=2.0 -> cap to medium
+        assert confidence_label(-1.5, -1.5, abs_floor=2.0) == "medium"
+        # abs(-3.0) = 3.0 >= abs_floor=2.0 -> no cap
+        assert confidence_label(-3.0, -3.0, abs_floor=2.0) == "high"
+
+    def test_abs_floor_best_score_zero(self):
+        """best_score=0 returns "low" regardless of abs_floor."""
+        assert confidence_label(0, 0, abs_floor=5.0) == "low"
+
+    def test_cluster_count_zero_preserves_legacy(self):
+        """cluster_count=0 (disabled) preserves existing behavior."""
+        assert confidence_label(3.7, 3.7, cluster_count=0) == "high"
+        assert confidence_label(-5.2, -5.2, cluster_count=0) == "high"
+
+    def test_both_params_default_preserves_legacy(self):
+        """Both params at default values preserve all existing behavior."""
+        # Replicate all core scenarios from TestConfidenceLabel
+        assert confidence_label(7.5, 10.0, abs_floor=0.0, cluster_count=0) == "high"
+        assert confidence_label(7.499, 10.0, abs_floor=0.0, cluster_count=0) == "medium"
+        assert confidence_label(3.999, 10.0, abs_floor=0.0, cluster_count=0) == "low"
+
+
+# ---------------------------------------------------------------------------
+# Action #2: Tiered output mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestTieredOutput:
+    """Tests for tiered output mode in _output_results()."""
+
+    def _make_entries(self, scores):
+        """Create test entries with given scores."""
+        entries = []
+        for i, score in enumerate(scores):
+            entries.append({
+                "title": f"Entry {i}",
+                "path": f".claude/memory/decisions/entry-{i}.json",
+                "category": "DECISION",
+                "tags": {f"tag{i}"},
+                "score": score,
+            })
+        return entries
+
+    def test_legacy_mode_all_results_as_result(self, capsys):
+        """Legacy mode outputs all entries as <result> regardless of confidence."""
+        entries = self._make_entries([-5.0, -2.0, -0.5])
+        _output_results(entries, {}, output_mode="legacy")
+        out = capsys.readouterr().out
+        assert out.count("<result ") == 3
+        assert "<memory-compact" not in out
+
+    def test_tiered_high_as_result(self, capsys):
+        """Tiered mode outputs HIGH confidence as <result>."""
+        entries = self._make_entries([-5.0])
+        _output_results(entries, {}, output_mode="tiered")
+        out = capsys.readouterr().out
+        assert '<result category="DECISION" confidence="high">' in out
+
+    def test_tiered_medium_as_compact(self, capsys):
+        """Tiered mode outputs MEDIUM confidence as <memory-compact>."""
+        # Two entries: first is high, second is medium (ratio ~0.5)
+        entries = self._make_entries([-5.0, -2.5])
+        _output_results(entries, {}, output_mode="tiered")
+        out = capsys.readouterr().out
+        assert "<result " in out  # HIGH entry
+        assert "<memory-compact " in out  # MEDIUM entry
+
+    def test_tiered_low_silenced(self, capsys):
+        """Tiered mode silences LOW confidence results."""
+        # LOW: ratio < 0.40 -> score=-1.0 vs best=-5.0 -> ratio=0.2
+        entries = self._make_entries([-5.0, -1.0])
+        _output_results(entries, {}, output_mode="tiered")
+        out = capsys.readouterr().out
+        lines = [l for l in out.strip().split("\n") if l.strip()]
+        result_lines = [l for l in lines if "Entry 1" in l]
+        assert len(result_lines) == 0, "LOW confidence entry should be silenced"
+
+    def test_tiered_all_low_skips_wrapper(self, capsys):
+        """Tiered mode with all LOW results skips <memory-context> wrapper."""
+        # All entries have score 0 -> best_score=0 -> all "low"
+        entries = [
+            {"title": "Test", "path": ".claude/memory/decisions/test.json",
+             "category": "DECISION", "tags": set()},
+        ]
+        _output_results(entries, {}, output_mode="tiered")
+        out = capsys.readouterr().out
+        assert "<memory-context" not in out
+        assert "<memory-note>" in out
+        assert "confidence was low" in out
+
+    def test_tiered_medium_present_hint(self, capsys):
+        """Tiered mode with medium-only results emits search hint."""
+        # abs_floor=10 forces all results below floor -> max "medium"
+        entries = self._make_entries([-5.0, -4.0])
+        _output_results(entries, {}, output_mode="tiered", abs_floor=10.0)
+        out = capsys.readouterr().out
+        # With abs_floor=10, best_score=5.0 < 10.0, so cap to medium
+        assert "<memory-compact " in out
+        assert "medium confidence" in out
+
+    def test_tiered_mixed_high_medium_low(self, capsys):
+        """Tiered mode correctly separates HIGH, MEDIUM, LOW in output."""
+        entries = self._make_entries([-10.0, -5.0, -1.0])
+        _output_results(entries, {}, output_mode="tiered")
+        out = capsys.readouterr().out
+        assert '<result category="DECISION" confidence="high">' in out
+        assert '<memory-compact category="DECISION" confidence="medium">' in out
+        # LOW entry (ratio=0.1) should not appear
+        assert "Entry 2" not in out
+
+    def test_tiered_compact_preserves_tags(self, capsys):
+        """Compact format preserves tags in output."""
+        entries = [{
+            "title": "JWT Auth",
+            "path": ".claude/memory/decisions/jwt.json",
+            "category": "DECISION",
+            "tags": {"auth", "jwt"},
+            "score": -3.0,
+        }]
+        # Use abs_floor to force medium for easy testing
+        _output_results(entries, {}, output_mode="tiered", abs_floor=5.0)
+        out = capsys.readouterr().out
+        assert "<memory-compact " in out
+        assert "#tags:" in out
+        assert "auth" in out
+        assert "jwt" in out
+
+    def test_tiered_compact_xml_escaping(self, capsys):
+        """Compact format properly escapes XML in user content."""
+        entries = [{
+            "title": '<script>alert("xss")</script>',
+            "path": ".claude/memory/decisions/evil.json",
+            "category": "DECISION",
+            "tags": {"evil<tag>"},
+            "score": -3.0,
+        }]
+        _output_results(entries, {}, output_mode="tiered", abs_floor=5.0)
+        out = capsys.readouterr().out
+        assert "<script>" not in out
+        assert "&lt;script&gt;" in out
+
+    def test_legacy_default_when_mode_missing(self, capsys):
+        """Default output_mode is legacy (backward compatible)."""
+        entries = self._make_entries([-5.0])
+        _output_results(entries, {})
+        out = capsys.readouterr().out
+        assert "<result " in out
+        assert "<memory-compact" not in out
+
+
+# ---------------------------------------------------------------------------
+# Action #3: Hint improvement tests
+# ---------------------------------------------------------------------------
+
+
+class TestEmitSearchHint:
+    """Tests for _emit_search_hint() helper function."""
+
+    def test_no_match_hint(self, capsys):
+        _emit_search_hint("no_match")
+        out = capsys.readouterr().out
+        assert "<memory-note>" in out
+        assert "No matching memories found" in out
+        assert "</memory-note>" in out
+
+    def test_all_low_hint(self, capsys):
+        _emit_search_hint("all_low")
+        out = capsys.readouterr().out
+        assert "<memory-note>" in out
+        assert "confidence was low" in out
+        assert "/memory:search" in out
+
+    def test_medium_present_hint(self, capsys):
+        _emit_search_hint("medium_present")
+        out = capsys.readouterr().out
+        assert "<memory-note>" in out
+        assert "medium confidence" in out
+        assert "/memory:search" in out
+
+    def test_default_reason_is_no_match(self, capsys):
+        _emit_search_hint()
+        out = capsys.readouterr().out
+        assert "No matching memories found" in out
+
+    def test_hint_contains_no_user_data(self, capsys):
+        """Hint text is hardcoded -- no user-controlled data injection."""
+        _emit_search_hint("no_match")
+        out = capsys.readouterr().out
+        # Should only contain our hardcoded strings, not dynamic data
+        assert "<memory-note>" in out
+        assert "</memory-note>" in out
+        # Verify XML-safe: <topic> in hint is escaped as &lt;topic&gt;
+        assert "&lt;topic&gt;" in out
+
+    def test_hint_uses_xml_not_html_comment(self, capsys):
+        """Hints use <memory-note> tags, not HTML comments."""
+        _emit_search_hint("no_match")
+        out = capsys.readouterr().out
+        assert "<!--" not in out
+        assert "<memory-note>" in out
+
+
+# ---------------------------------------------------------------------------
+# Config error path + cross-action integration tests (V2-logic gap fixes)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigErrorPaths:
+    """Tests for config parsing error handling (V2-logic review gap fix)."""
+
+    def _run_retrieve_with_config(self, tmp_path, config_data, prompt="JWT authentication setup"):
+        proj = tmp_path / "project"
+        proj.mkdir()
+        dc = proj / ".claude"
+        dc.mkdir()
+        mem_root = dc / "memory"
+        mem_root.mkdir()
+        for folder in ["sessions", "decisions", "runbooks", "constraints", "tech-debt", "preferences"]:
+            (mem_root / folder).mkdir()
+        mem = make_decision_memory()
+        write_memory_file(mem_root, mem)
+        from conftest import build_enriched_index
+        (mem_root / "index.md").write_text(build_enriched_index(mem))
+        if config_data is not None:
+            (mem_root / "memory-config.json").write_text(
+                json.dumps(config_data), encoding="utf-8"
+            )
+        result = subprocess.run(
+            [PYTHON, RETRIEVE_SCRIPT],
+            input=json.dumps({"user_prompt": prompt, "cwd": str(proj)}),
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout, result.returncode
+
+    def test_invalid_abs_floor_defaults_to_zero(self, tmp_path):
+        """Invalid confidence_abs_floor gracefully defaults to 0.0."""
+        config = {"retrieval": {"confidence_abs_floor": "not_a_number"}}
+        stdout, rc = self._run_retrieve_with_config(tmp_path, config)
+        assert rc == 0
+        # Should still work with abs_floor=0.0 (default)
+        if stdout.strip():
+            assert "<memory-context" in stdout or "<memory-note>" in stdout
+
+    def test_inf_abs_floor_defaults_to_zero(self, tmp_path):
+        """Infinity abs_floor is caught by isfinite guard, defaults to 0.0."""
+        config = {"retrieval": {"confidence_abs_floor": "inf"}}
+        stdout, rc = self._run_retrieve_with_config(tmp_path, config)
+        assert rc == 0
+        # With abs_floor=0.0 (inf rejected), high confidence should be possible
+        if "<memory-context" in stdout:
+            assert 'confidence="high"' in stdout
+
+    def test_invalid_output_mode_defaults_to_legacy(self, tmp_path):
+        """Invalid output_mode falls back to legacy."""
+        config = {"retrieval": {"output_mode": "unknown_mode"}}
+        stdout, rc = self._run_retrieve_with_config(tmp_path, config)
+        assert rc == 0
+        # Legacy mode: all results as <result>
+        if "<memory-context" in stdout:
+            assert "<result " in stdout
+            assert "<memory-compact" not in stdout
+
+    def test_abs_floor_in_legacy_mode(self, capsys):
+        """abs_floor works correctly in legacy mode (still outputs all results)."""
+        entries = [
+            {"title": "Weak Result", "path": ".claude/memory/decisions/w.json",
+             "category": "DECISION", "tags": set(), "score": -1.0},
+        ]
+        # abs_floor=5.0 caps to medium, but legacy mode still outputs as <result>
+        _output_results(entries, {}, output_mode="legacy", abs_floor=5.0)
+        out = capsys.readouterr().out
+        assert '<result category="DECISION" confidence="medium">' in out
+        assert "<memory-compact" not in out
+
+    def test_tiered_with_descriptions(self, capsys):
+        """Tiered mode works correctly with category descriptions."""
+        entries = [
+            {"title": "JWT Auth", "path": ".claude/memory/decisions/jwt.json",
+             "category": "DECISION", "tags": {"auth"}, "score": -5.0},
+        ]
+        descs = {"decision": "Architectural choices with rationale"}
+        _output_results(entries, descs, output_mode="tiered")
+        out = capsys.readouterr().out
+        assert "descriptions=" in out
+        assert '<result category="DECISION" confidence="high">' in out

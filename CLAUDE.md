@@ -46,6 +46,7 @@ The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku
 | hooks/scripts/memory_write.py | Schema-enforced CRUD + lifecycle (retire/archive/unarchive/restore) | pydantic v2 |
 | hooks/scripts/memory_enforce.py | Rolling window enforcement: scans category, retires oldest beyond limit | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_judge.py | LLM-as-judge for retrieval verification (anti-position-bias, anti-injection, parallel batch splitting via ThreadPoolExecutor) | stdlib only (urllib.request, concurrent.futures) |
+| hooks/scripts/memory_logger.py | Shared JSONL structured logging (fail-open, atomic append) | stdlib only |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
 | hooks/scripts/memory_staging_guard.py | PreToolUse:Bash guard blocking heredoc writes to .staging/ | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
@@ -63,7 +64,7 @@ Config: .claude/memory/memory-config.json (per-project, runtime) | Defaults: ass
 ### Config Architecture
 
 Config keys fall into two categories:
-- **Script-read** (parsed by Python scripts): `triage.enabled`, `triage.max_messages`, `triage.thresholds.*`, `triage.parallel.*`, `retrieval.enabled`, `retrieval.max_inject`, `retrieval.judge.*` (enabled, model, timeout_per_call, candidate_pool_size, fallback_top_k, include_conversation_context, context_turns), `delete.grace_period_days`, `categories.*.description` (used by triage and retrieval scripts)
+- **Script-read** (parsed by Python scripts): `triage.enabled`, `triage.max_messages`, `triage.thresholds.*`, `triage.parallel.*`, `retrieval.enabled`, `retrieval.max_inject`, `retrieval.judge.*` (enabled, model, timeout_per_call, candidate_pool_size, fallback_top_k, include_conversation_context, context_turns), `delete.grace_period_days`, `logging.enabled`, `logging.level`, `logging.retention_days`, `categories.*.description` (used by triage and retrieval scripts)
 - **Agent-interpreted** (read by LLM via SKILL.md instructions, not by Python): `memory_root`, `categories.*.enabled`, `categories.*.folder` (informational mapping), `categories.*.description` (category purpose text for triage context files and retrieval output), `categories.*.auto_capture`, `categories.*.retention_days`, `auto_commit`, `max_memories_per_category`, `retrieval.match_strategy`, `delete.archive_retired`
 
 ## Testing
