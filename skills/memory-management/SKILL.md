@@ -35,8 +35,29 @@ Each category has a configurable `description` field in `memory-config.json` (un
 
 When a triage hook fires with a save instruction:
 
+### Pre-Phase: Staging Cleanup
+
+Before parsing triage output, check for stale staging files from a previous failed session.
+Only run this check when **no** `<triage_data>` or `<triage_data_file>` tag is present in the
+current hook output (i.e., manual `/memory:save` invocation or recovery). If triage output IS
+present, skip directly to Phase 0 -- the current triage data is fresh.
+
+1. Check if ANY of these exist:
+   - `.claude/memory/.staging/.triage-pending.json`
+   - `.claude/memory/.staging/triage-data.json` WITHOUT a corresponding `$HOME/.claude/last-save-result.json`
+2. If found, clean up ALL staging files before proceeding:
+   ```bash
+   rm -f .claude/memory/.staging/triage-data.json .claude/memory/.staging/context-*.txt .claude/memory/.staging/.triage-handled .claude/memory/.staging/.triage-pending.json
+   ```
+3. Proceed with normal fresh triage below.
+
+> Pre-existing context files may be stale (unknown age, missing transcript). Always run fresh triage for accurate saves.
+
 ### Phase 0: Parse Triage Output
-Extract the `<triage_data>` JSON block from the stop hook output.
+
+1. First try: Extract the file path from within `<triage_data_file>...</triage_data_file>` tags in the stop hook output. If present, read the JSON file at that path.
+2. Fallback: Extract inline `<triage_data>` JSON block (backwards compatibility).
+
 Read `memory-config.json` for `triage.parallel.category_models`.
 
 Categories are triggered by keyword heuristic scoring in `memory_triage.py`. Each category has primary keyword patterns and co-occurrence boosters (e.g., DECISION triggers on "decided", "chose" + rationale co-occurrence like "because", "rationale"). Thresholds are configurable via `triage.thresholds.*` in config (default range: 0.4-0.6). SESSION_SUMMARY uses activity metrics instead of text matching.
@@ -210,6 +231,35 @@ python3 "$CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_enforce.py" --category session
 This replaces the previous inline Python enforcement. The script automatically reads `max_retained` from `memory-config.json` and retires the oldest sessions to stay within the limit.
 
 > Note: Enforcement also runs automatically after `memory_write.py --action create --category session_summary`. This explicit call is a safety belt.
+
+**Post-save: Clean staging first, then write result file.**
+
+After ALL saves complete (regardless of category):
+
+1. Clean up staging files **first** (prevents false orphan detection if a concurrent prompt fires between steps):
+   ```bash
+   rm -f .claude/memory/.staging/triage-data.json .claude/memory/.staging/context-*.txt .claude/memory/.staging/.triage-handled .claude/memory/.staging/.triage-pending.json
+   ```
+
+2. Write save results to the **global** path `$HOME/.claude/last-save-result.json` using **atomic write-then-rename** (prevents concurrent reader from seeing truncated/empty file):
+   ```bash
+   mkdir -p "$HOME/.claude"
+   cat > "$HOME/.claude/.last-save-result.tmp" <<'__MEMORY_SAVE_RESULT_EOF__'
+   {
+     "saved_at": "<ISO 8601 UTC>",
+     "project": "<cwd absolute path>",
+     "categories": ["category1", "category2"],
+     "titles": ["Title of memory 1", "Title of memory 2"],
+     "errors": [{"category": "decision", "error": "OCC_CONFLICT"}]
+   }
+   __MEMORY_SAVE_RESULT_EOF__
+   mv -f "$HOME/.claude/.last-save-result.tmp" "$HOME/.claude/last-save-result.json"
+   ```
+   - `saved_at`: current UTC timestamp in ISO 8601
+   - `project`: absolute path of the current working directory
+   - `categories`: list of categories that were saved (PASS only)
+   - `titles`: list of titles corresponding to each saved memory
+   - `errors`: list of `{"category": "<name>", "error": "<message>"}` objects for any failed saves (empty array if all succeeded)
 
 ### Write Pipeline Protections
 

@@ -419,6 +419,82 @@ def main():
         except (json.JSONDecodeError, OSError):
             pass  # Fail-open: proceed with empty config (logging disabled by default)
 
+    # --- Block 1: Save confirmation from previous session (global path) ---
+    _just_saved = False  # Flag for Block 2 orphan suppression
+    try:
+        _save_result_path = Path.home() / ".claude" / "last-save-result.json"
+        if _save_result_path.exists():
+            _just_saved = True
+            try:
+                _save_data = json.loads(_save_result_path.read_text(encoding="utf-8"))
+                _saved_at = _save_data.get("saved_at", "")
+                _is_recent_save = False
+                if _saved_at:
+                    _saved_dt = datetime.fromisoformat(str(_saved_at).replace("Z", "+00:00"))
+                    if _saved_dt.tzinfo is None:
+                        _saved_dt = _saved_dt.replace(tzinfo=timezone.utc)
+                    _age_secs = (datetime.now(timezone.utc) - _saved_dt).total_seconds()
+                    _is_recent_save = _age_secs < 86400  # 24 hours
+                if _is_recent_save:
+                    _save_project = _save_data.get("project", "")
+                    _save_categories = _save_data.get("categories", [])
+                    _save_titles = _save_data.get("titles", [])
+                    _save_errors = _save_data.get("errors", [])
+                    if _save_project == cwd:
+                        _cats_str = html.escape(", ".join(str(c) for c in _save_categories)) if _save_categories else "unknown"
+                        _titles_str = html.escape(", ".join(str(t) for t in _save_titles)) if _save_titles else ""
+                        _msg = f"Memories saved ({_cats_str})"
+                        if _titles_str:
+                            _msg += f": {_titles_str}"
+                        if _save_errors:
+                            _err_parts = []
+                            for _e in _save_errors:
+                                if isinstance(_e, dict):
+                                    _err_parts.append(f"{_e.get('category', '?')}: {_e.get('error', '?')}")
+                                else:
+                                    _err_parts.append(str(_e))
+                            _msg += f" [errors: {html.escape(', '.join(_err_parts))}]"
+                        print(f"<memory-note>{_msg}</memory-note>")
+                    else:
+                        _proj_name = html.escape(Path(str(_save_project)).name) if _save_project else "unknown"
+                        print(f"<memory-note>Memories saved in project: {_proj_name}</memory-note>")
+            finally:
+                # One-shot: always delete after read, even on parse errors
+                _save_result_path.unlink(missing_ok=True)
+    except Exception:
+        pass  # Fail-open
+
+    # --- Block 2: Orphan crash detection ---
+    try:
+        _staging_dir = memory_root / ".staging"
+        _triage_data_path = _staging_dir / "triage-data.json"
+        _triage_pending_path = _staging_dir / ".triage-pending.json"
+        if (_triage_data_path.exists()
+                and not _just_saved
+                and not _triage_pending_path.exists()):
+            _triage_age = time.time() - _triage_data_path.stat().st_mtime
+            if 0 <= _triage_age > 300:
+                print("<memory-note>Orphaned triage data detected (possible previous save crash). "
+                      "Run /memory:save to retry or clean up staging files.</memory-note>")
+    except Exception:
+        pass  # Fail-open
+
+    # --- Block 3: Pending save notification ---
+    try:
+        _pending_path = memory_root / ".staging" / ".triage-pending.json"
+        if _pending_path.exists():
+            _pending_data = json.loads(_pending_path.read_text(encoding="utf-8"))
+            if not isinstance(_pending_data, dict):
+                raise ValueError("unexpected pending data type")
+            _pending_cats = _pending_data.get("categories", [])
+            _cat_count = len(_pending_cats) if isinstance(_pending_cats, list) else 0
+            if _cat_count > 0:
+                print(f"<memory-note>Pending memory save: {_cat_count} "
+                      f"{'category' if _cat_count == 1 else 'categories'} "
+                      f"from last session. Run /memory:save to re-triage and save.</memory-note>")
+    except Exception:
+        pass  # Fail-open
+
     # Skip very short prompts (greetings, acks)
     if len(user_prompt.strip()) < 10:
         emit_event("retrieval.skip", {"reason": "short_prompt", "prompt_length": len(user_prompt.strip())},
