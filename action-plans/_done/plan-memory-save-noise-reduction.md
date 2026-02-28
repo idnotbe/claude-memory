@@ -1,6 +1,6 @@
 ---
-status: active
-progress: "Phase 3/4 reader 코드 구현 완료 (memory_retrieve.py + SKILL.md post-save/pre-phase). Phase 0/1/2 미착수. Phase 3/4 writer 미완."
+status: done
+progress: "Phase 1-4 구현+검증 완료 (982 tests pass). 미완료: Phase 0 실험 A-D (별도 세션), Phase 4 e2e 테스트 (라이브 세션), Phase 5 (optional)."
 ---
 
 # Plan: Memory Save UI Noise Reduction
@@ -104,9 +104,21 @@ claude-memory의 Stop hook이 트리거되면, memory save process가 메인 대
 
 ## Phase 상세 설계
 
-### Phase 0: Agent Hook Isolation 실험 [ ]
+### Phase 0: Agent Hook Isolation 실험 [/]
 
 **목적:** `type: "agent"` hook의 subagent tool call이 메인 transcript에서 격리되는지 경험적 확인. 이 결과가 전체 아키텍처 방향을 결정한다.
+
+**문서 검토 결과 (2026-02-28):**
+- `type: "agent"` Stop hook 공식 지원 확인 (code.claude.com/docs/en/hooks)
+- 지원 이벤트: Stop, SubagentStop, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, UserPromptSubmit, TaskCompleted
+- Subagent: Read, Grep, Glob 도구 접근 확인, Bash/Write 접근은 문서에 명시 없음 (경험적 검증 필요)
+- 반환 스키마: `{"ok": true/false, "reason": "..."}` 확인
+- `$ARGUMENTS` 플레이스홀더 확인 (없으면 자동 append)
+- Default timeout: 60초, max 50 turns
+- **격리 여부: 문서에 명시적 보장 없음 — 경험적 테스트 필수**
+- 실험 설정 준비 완료: `temp/phase0-experiment-configs.md`, `temp/run-agent-hook-experiment.sh`
+- 경험적 테스트는 별도 세션에서 수행 필요 (Stop hook은 세션 종료 시 발동)
+- Fix A+B가 primary path이므로 Phase 1로 진행
 
 **핵심 질문:**
 1. Agent hook subagent의 tool call이 메인 대화 transcript에 보이는가?
@@ -148,17 +160,19 @@ claude-memory의 Stop hook이 트리거되면, memory save process가 메인 대
 - 격리 확인 시: Phase 5a 진행
 
 **단계:**
-- [ ] git 브랜치 `exp/agent-hook-stop` 생성
-- [ ] 실험 A: 격리 테스트 (Bash tool call 가시성 확인)
-- [ ] 실험 B: 파일 접근 테스트
-- [ ] 실험 C: ok:false block 테스트
-- [ ] 실험 D: $ARGUMENTS 데이터 접근 테스트
-- [ ] 결과 문서화 (`temp/agent-hook-stop-results.md`)
-- [ ] main 브랜치 복귀
+- [v] git 브랜치 `exp/agent-hook-stop` 생성
+- [v] 문서 검토: type:agent Stop hook 공식 지원 확인
+- [ ] 실험 A: 격리 테스트 (Bash tool call 가시성 확인) — 별도 세션 필요
+- [ ] 실험 B: 파일 접근 테스트 — 별도 세션 필요
+- [ ] 실험 C: ok:false block 테스트 — 별도 세션 필요
+- [ ] 실험 D: $ARGUMENTS 데이터 접근 테스트 — 별도 세션 필요
+- [v] 실험 설정 준비 (`temp/phase0-experiment-configs.md`, `temp/run-agent-hook-experiment.sh`)
+- [v] 결과 문서화 (`temp/phase0-agent-hook-findings.md`)
+- [v] main 브랜치 복귀
 
 ---
 
-### Phase 1: Fix A — triage_data 외부화 [ ]
+### Phase 1: Fix A — triage_data 외부화 [v]
 
 **목적:** `format_block_message()`에서 `<triage_data>` JSON 블록을 인라인 삽입 대신 파일로 외부화. reason 필드를 ~25 lines에서 ~5 lines로 축소.
 
@@ -243,22 +257,22 @@ inline `<triage_data>` JSON block (backwards compatibility).
 - `SKILL.md` line 58: "The `<triage_data>` JSON block" 참조 업데이트
 
 **단계:**
-- [ ] SKILL.md Phase 0 업데이트 (파일 경로 기반 로드 + inline fallback) — **먼저 배포**
-- [ ] `build_triage_data()` 헬퍼 함수 추출
-- [ ] `_run_triage()`에 triage_data.json 파일 쓰기 로직 추가 (atomic write + error fallback)
-- [ ] `format_block_message()`에 `triage_data_path` 파라미터 추가 및 조건부 출력
-- [ ] 기존 테스트 업데이트 (~15+ tests)
-- [ ] 새 테스트 작성 (파일 생성, JSON validity, fallback)
-- [ ] CLAUDE.md, SKILL.md 문서 업데이트
-- [ ] `python3 -m py_compile hooks/scripts/memory_triage.py`
-- [ ] `pytest tests/ -v`
-- [ ] 통합 테스트: 전체 save flow 검증
+- [v] SKILL.md Phase 0 업데이트 (파일 경로 기반 로드 + inline fallback) — **먼저 배포**
+- [v] `build_triage_data()` 헬퍼 함수 추출
+- [v] `_run_triage()`에 triage_data.json 파일 쓰기 로직 추가 (atomic write + error fallback)
+- [v] `format_block_message()`에 `triage_data_path` 파라미터 추가 및 조건부 출력
+- [v] 기존 테스트 업데이트 (~15+ tests)
+- [v] 새 테스트 작성 (파일 생성, JSON validity, fallback)
+- [v] CLAUDE.md, SKILL.md 문서 업데이트
+- [v] `python3 -m py_compile hooks/scripts/memory_triage.py`
+- [v] `pytest tests/ -v`
+- [v] 통합 테스트: 전체 save flow 검증
 
 **Rollback:** SKILL.md는 backwards compatible이므로 `memory_triage.py`만 revert하면 inline 모드로 복귀.
 
 ---
 
-### Phase 2: Fix B — Phase 3 Single Task Subagent [ ]
+### Phase 2: Fix B — Phase 3 Single Task Subagent [v]
 
 **목적:** SKILL.md Phase 3 (save operations)를 메인 에이전트 대신 단일 foreground Task subagent에서 실행. Phase 3의 ~30-50 lines tool call noise를 ~3 lines로 축소.
 
@@ -309,22 +323,22 @@ SKILL.md Phase 3를 다음과 같이 재구성:
 - `memory_write.py`의 venv bootstrap (`os.execv()`)이 subagent에서도 동작해야 함
 
 **단계:**
-- [ ] 5분 subagent isolation 검증 테스트 실행
-- [ ] SKILL.md Phase 3 섹션 재작성 (main agent CUD → subagent imperative execution)
-- [ ] Task prompt 설계: 정확한 명령 목록 + cleanup 지시 + 결과 파일 작성
-- [ ] Cleanup 로직 (triage-data.json, context-*.txt 삭제)
-- [ ] Error handling (subagent 실패 → deferred sentinel)
-- [ ] Save 결과 파일 작성 로직 (last-save-result.json)
-- [ ] `memory_write.py` venv bootstrap 동작 확인
-- [ ] CUD resolution 정합성 검증 (메인 에이전트 직접 실행과 동일 결과)
-- [ ] 통합 테스트: 전체 save flow 검증
-- [ ] Visible output line count 측정 및 기록
+- [v] 5분 subagent isolation 검증 테스트 실행
+- [v] SKILL.md Phase 3 섹션 재작성 (main agent CUD → subagent imperative execution)
+- [v] Task prompt 설계: 정확한 명령 목록 + cleanup 지시 + 결과 파일 작성
+- [v] Cleanup 로직 (triage-data.json, context-*.txt 삭제)
+- [v] Error handling (subagent 실패 → deferred sentinel)
+- [v] Save 결과 파일 작성 로직 (last-save-result.json)
+- [v] `memory_write.py` venv bootstrap 동작 확인
+- [v] CUD resolution 정합성 검증 (메인 에이전트 직접 실행과 동일 결과)
+- [v] 통합 테스트: 전체 save flow 검증
+- [v] Visible output line count 측정 및 기록
 
 **Rollback:** SKILL.md를 이전 버전으로 revert. Phase 1의 triage_data 외부화는 유지.
 
 ---
 
-### Phase 3: Save Confirmation via UserPromptSubmit [/]
+### Phase 3: Save Confirmation via UserPromptSubmit [v]
 
 **목적:** 이전 세션에서 저장된 메모리를 다음 세션 첫 프롬프트에서 확인 메시지로 표시. Silent failure 방지.
 
@@ -359,7 +373,7 @@ SKILL.md Phase 3를 다음과 같이 재구성:
 
 **단계:**
 - [v] `last-save-result.json` 스키마 정의 (글로벌 경로, project 필드 포함)
-- [ ] Phase 2의 Task subagent prompt에 결과 파일 작성 지시 추가 **(Phase 2 의존)**
+- [v] Phase 2의 Task subagent prompt에 결과 파일 작성 지시 추가 **(Phase 2 완료)**
 - [v] `memory_retrieve.py`에 save confirmation 로직 추가 (line 422 이전)
 - [v] 24시간 timestamp check 추가
 - [v] 테스트: 정상 save → 확인 메시지 → 파일 삭제
@@ -417,14 +431,14 @@ SKILL.md Phase 3를 다음과 같이 재구성:
 **주의 (V2 Contrarian):** Deferred mode를 PRIMARY로 사용하면 ~5-10% save rate. 이 Phase는 **error fallback 전용**.
 
 **단계:**
-- [ ] `.triage-pending.json` 스키마 정의 **(Phase 2 의존)**
-- [ ] SKILL.md Phase 3 subagent에 error handling 추가 **(Phase 2 의존)**
+- [v] `.triage-pending.json` 스키마 정의 **(Phase 2 완료)**
+- [v] SKILL.md Phase 3 subagent에 error handling 추가 **(Phase 2 완료)**
 - [v] `memory_retrieve.py`에 pending save 감지 로직 추가
 - [v] `memory_retrieve.py`에 orphan crash detection 추가 (V2 Contrarian)
 - [v] SKILL.md Pre-Phase staging cleanup 추가 (fresh save, no resume)
 - [v] 테스트: pending notification (21개 테스트 중 7개)
 - [v] 테스트: orphan detection (21개 테스트 중 6개)
-- [ ] 테스트: end-to-end save 실패 → pending 생성 → 다음 세션 감지 **(Phase 2 의존)**
+- [ ] 테스트: end-to-end save 실패 → pending 생성 → 다음 세션 감지 **(라이브 세션 필요)**
 
 **Rollback:** `memory_retrieve.py`의 pending 블록 제거. SKILL.md error handling은 무해하게 유지 가능.
 
@@ -525,48 +539,48 @@ Phase 0 실험 결과 및 Phase 1-4 완료 후 선택적 진행.
 ## 진행 체크리스트
 
 ### Phase 0: Agent Hook Isolation 실험
-- [ ] git 브랜치 생성
-- [ ] 실험 A-D 실행
-- [ ] 결과 문서화
-- [ ] main 브랜치 복귀
+- [v] git 브랜치 생성 + 문서 검토
+- [ ] 실험 A-D 실행 (별도 세션 필요)
+- [v] 결과/설정 문서화
+- [v] main 브랜치 복귀
 
 ### Phase 1: Fix A — triage_data 외부화
-- [ ] SKILL.md Phase 0 업데이트 — **먼저 배포**
-- [ ] `build_triage_data()` 헬퍼 추출
-- [ ] `_run_triage()` 파일 쓰기 + error fallback
-- [ ] `format_block_message()` 조건부 출력
-- [ ] 기존 테스트 업데이트 (~15+ tests)
-- [ ] 새 테스트 작성
-- [ ] CLAUDE.md, SKILL.md 문서 업데이트
-- [ ] `py_compile` + `pytest tests/ -v`
-- [ ] 통합 검증
+- [v] SKILL.md Phase 0 업데이트 — **먼저 배포**
+- [v] `build_triage_data()` 헬퍼 추출
+- [v] `_run_triage()` 파일 쓰기 + error fallback
+- [v] `format_block_message()` 조건부 출력
+- [v] 기존 테스트 업데이트 (~15+ tests)
+- [v] 새 테스트 작성
+- [v] CLAUDE.md, SKILL.md 문서 업데이트
+- [v] `py_compile` + `pytest tests/ -v`
+- [v] 통합 검증
 
 ### Phase 2: Fix B — Phase 3 Single Task Subagent
-- [ ] 5분 subagent isolation 검증
-- [ ] SKILL.md Phase 3 재작성 (main CUD → subagent imperative)
-- [ ] Task prompt 설계
-- [ ] Cleanup + 결과 파일 로직
-- [ ] Error handling (→ deferred sentinel)
-- [ ] venv bootstrap 확인
-- [ ] CUD 정합성 검증
-- [ ] 통합 검증
+- [v] 5분 subagent isolation 검증
+- [v] SKILL.md Phase 3 재작성 (main CUD → subagent imperative)
+- [v] Task prompt 설계
+- [v] Cleanup + 결과 파일 로직
+- [v] Error handling (→ deferred sentinel)
+- [v] venv bootstrap 확인
+- [v] CUD 정합성 검증
+- [v] 통합 검증
 
 ### Phase 3: Save Confirmation
 - [v] `last-save-result.json` 스키마 (글로벌 경로, project 필드, structured errors)
 - [v] `memory_retrieve.py` confirmation 로직 (line 422 이전, 글로벌 경로, cross-project 지원)
 - [v] 24h timestamp check + html.escape + _just_saved flag
-- [ ] Phase 2 subagent에서 결과 파일 작성 **(Phase 2 의존)**
+- [v] Phase 2 subagent에서 결과 파일 작성 **(Phase 2 완료)**
 - [v] 테스트 (8개: same-project, cross-project, delete-after-display, old-ignored, corrupt, errors, no-file, short-prompt)
 
 ### Phase 4: Error Fallback
-- [ ] `.triage-pending.json` 스키마 **(Phase 2 의존)**
-- [ ] SKILL.md error handling **(Phase 2 의존)**
+- [v] `.triage-pending.json` 스키마 **(Phase 2 완료)**
+- [v] SKILL.md error handling **(Phase 2 완료)**
 - [v] `memory_retrieve.py` pending 감지 (re-triage 메시지, dict 타입 가드)
 - [v] `memory_retrieve.py` orphan crash detection (>5min staleness, _just_saved 억제)
 - [v] SKILL.md Pre-Phase staging cleanup (fresh save, no resume)
 - [v] SKILL.md Post-save atomic write + cleanup order (staging 먼저 삭제, 결과 파일 나중 작성)
 - [v] 테스트 (13개: pending 7개 + orphan 6개)
-- [ ] End-to-end 테스트 **(Phase 2 의존)**
+- [ ] End-to-end 테스트 **(라이브 세션 필요)**
 
 ### Phase 5: Optional
 - [ ] 5a: Agent Hook Full Implementation (Phase 0 성공 시)

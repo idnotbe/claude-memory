@@ -28,6 +28,7 @@ from memory_triage import (
     load_config,
     write_context_files,
     format_block_message,
+    build_triage_data,
     extract_text_content,
     extract_activity_metrics,
     parse_transcript,
@@ -1556,3 +1557,347 @@ class TestSentinelIdempotency:
         assert captured_out.getvalue().strip() == "", (
             "Sentinel at TTL-1s should still be considered fresh"
         )
+
+
+# ---------------------------------------------------------------------------
+# build_triage_data() helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildTriageData:
+    """Tests for the build_triage_data() helper function."""
+
+    def test_build_triage_data_basic_structure(self):
+        """build_triage_data() returns correct top-level keys."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
+        ]
+        context_paths = {"decision": "/tmp/context-decision.txt"}
+        parallel_config = _deep_copy_parallel_defaults()
+
+        data = build_triage_data(results, context_paths, parallel_config)
+
+        assert "categories" in data
+        assert "parallel_config" in data
+        assert len(data["categories"]) == 1
+        cat = data["categories"][0]
+        assert cat["category"] == "decision"
+        assert cat["score"] == 0.72
+        assert cat["context_file"] == "/tmp/context-decision.txt"
+
+    def test_build_triage_data_includes_descriptions(self):
+        """build_triage_data() includes descriptions when provided."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["test"]},
+            {"category": "RUNBOOK", "score": 0.55, "snippets": ["test"]},
+        ]
+        context_paths = {}
+        parallel_config = _deep_copy_parallel_defaults()
+        cat_descs = {
+            "decision": "Architectural choices",
+            "runbook": "Debugging procedures",
+        }
+
+        data = build_triage_data(results, context_paths, parallel_config,
+                                 category_descriptions=cat_descs)
+
+        cats = {c["category"]: c for c in data["categories"]}
+        assert cats["decision"]["description"] == "Architectural choices"
+        assert cats["runbook"]["description"] == "Debugging procedures"
+
+    def test_build_triage_data_no_description_when_absent(self):
+        """build_triage_data() omits description when not provided."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["test"]},
+        ]
+        data = build_triage_data(results, {}, _deep_copy_parallel_defaults())
+        assert "description" not in data["categories"][0]
+
+    def test_build_triage_data_parallel_config_defaults(self):
+        """build_triage_data() uses defaults for missing parallel config keys."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["test"]},
+        ]
+        # Pass a partial parallel config
+        data = build_triage_data(results, {}, {"enabled": False})
+
+        pc = data["parallel_config"]
+        assert pc["enabled"] is False
+        # Missing keys should fall back to defaults
+        assert "category_models" in pc
+        assert "verification_model" in pc
+        assert "default_model" in pc
+
+    def test_build_triage_data_no_context_path(self):
+        """build_triage_data() omits context_file when no path exists."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["test"]},
+        ]
+        data = build_triage_data(results, {}, _deep_copy_parallel_defaults())
+        assert "context_file" not in data["categories"][0]
+
+    def test_build_triage_data_json_serializable(self):
+        """build_triage_data() output is JSON-serializable."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["test"]},
+            {"category": "SESSION_SUMMARY", "score": 0.85, "snippets": ["5 tool uses"]},
+        ]
+        cat_descs = {"decision": "Choices", "session_summary": "Summary"}
+        data = build_triage_data(
+            results, {"decision": "/tmp/ctx.txt"}, _deep_copy_parallel_defaults(),
+            category_descriptions=cat_descs,
+        )
+        # Must not raise
+        serialized = json.dumps(data, indent=2)
+        roundtripped = json.loads(serialized)
+        assert roundtripped == data
+
+
+# ---------------------------------------------------------------------------
+# format_block_message() with triage_data_path tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatBlockMessageTriageDataPath:
+    """Tests for file-based vs inline triage_data output."""
+
+    def test_format_block_message_with_triage_data_path(self):
+        """When triage_data_path is provided, output <triage_data_file> tag."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
+        ]
+        parallel_config = _deep_copy_parallel_defaults()
+        path = "/home/user/.claude/memory/.staging/triage-data.json"
+
+        message = format_block_message(
+            results, {}, parallel_config,
+            triage_data_path=path,
+        )
+
+        assert "<triage_data_file>" in message
+        assert path in message
+        assert "</triage_data_file>" in message
+        # Must NOT contain inline triage_data
+        assert "<triage_data>" not in message
+        assert "</triage_data>" not in message.replace("</triage_data_file>", "")
+        # Human-readable part should still be present
+        assert "memories before stopping" in message
+
+    def test_format_block_message_without_triage_data_path(self):
+        """When triage_data_path is None, output inline <triage_data>."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
+        ]
+        parallel_config = _deep_copy_parallel_defaults()
+
+        message = format_block_message(
+            results, {}, parallel_config,
+            triage_data_path=None,
+        )
+
+        assert "<triage_data>" in message
+        assert "</triage_data>" in message
+        assert "<triage_data_file>" not in message
+        # Verify the inline JSON is valid
+        start = message.index("<triage_data>") + len("<triage_data>")
+        end = message.index("</triage_data>")
+        triage_json = json.loads(message[start:end])
+        assert "categories" in triage_json
+        assert "parallel_config" in triage_json
+
+    def test_format_block_message_default_is_inline(self):
+        """Default (no triage_data_path kwarg) falls back to inline."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided"]},
+        ]
+        parallel_config = _deep_copy_parallel_defaults()
+
+        message = format_block_message(results, {}, parallel_config)
+
+        assert "<triage_data>" in message
+        assert "<triage_data_file>" not in message
+
+    def test_format_block_message_file_path_with_descriptions(self):
+        """File-based output with descriptions: descriptions in human part only."""
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
+        ]
+        parallel_config = _deep_copy_parallel_defaults()
+        cat_descs = {"decision": "Architectural choices"}
+        path = "/tmp/triage-data.json"
+
+        message = format_block_message(
+            results, {}, parallel_config,
+            category_descriptions=cat_descs,
+            triage_data_path=path,
+        )
+
+        assert "<triage_data_file>" in message
+        # Human-readable part should still include description
+        file_tag_start = message.index("<triage_data_file>")
+        human_part = message[:file_tag_start]
+        assert "Architectural choices" in human_part
+
+
+# ---------------------------------------------------------------------------
+# _run_triage() triage-data.json file output tests
+# ---------------------------------------------------------------------------
+
+
+class TestRunTriageWritesTriageDataFile:
+    """Tests that _run_triage() writes triage-data.json and uses file reference."""
+
+    def _make_blocking_transcript(self, tmp_path):
+        """Create a transcript that triggers DECISION category."""
+        messages = [
+            {"type": "user", "message": {"role": "user", "content":
+                "We decided to use PostgreSQL because of JSONB support. "
+                "We chose PostgreSQL over MySQL because of better JSON handling. "
+                "We selected this approach due to performance reasons."}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Understood, recording the decision."}
+            ]}},
+        ]
+        transcript_path = str(tmp_path / "transcript.jsonl")
+        with open(transcript_path, "w") as f:
+            for msg in messages:
+                f.write(json.dumps(msg) + "\n")
+        return transcript_path
+
+    def test_triage_data_file_written(self, tmp_path):
+        """_run_triage() writes triage-data.json to staging directory."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "memory-config.json").write_text(
+            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
+        )
+        transcript_path = self._make_blocking_transcript(tmp_path)
+
+        hook_input = json.dumps({
+            "transcript_path": transcript_path,
+            "cwd": str(proj),
+        })
+
+        # Mock run_triage to guarantee a blocking result regardless of transcript
+        forced_results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
+        ]
+
+        captured_out = io.StringIO()
+        with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
+             mock.patch("sys.stdout", captured_out), \
+             mock.patch("memory_triage.check_stop_flag", return_value=False), \
+             mock.patch("memory_triage.run_triage", return_value=forced_results):
+            exit_code = _run_triage()
+
+        assert exit_code == 0
+
+        stdout_text = captured_out.getvalue().strip()
+        assert stdout_text, "Expected blocking output but got empty stdout"
+        response = json.loads(stdout_text)
+        assert response["decision"] == "block"
+
+        # Check that triage-data.json was written
+        triage_data_path = proj / ".claude" / "memory" / ".staging" / "triage-data.json"
+        assert triage_data_path.exists(), "triage-data.json should exist"
+
+        # Verify it's valid JSON with expected structure
+        triage_data = json.loads(triage_data_path.read_text(encoding="utf-8"))
+        assert "categories" in triage_data
+        assert "parallel_config" in triage_data
+
+        # Verify the reason references the file
+        reason = response["reason"]
+        assert "<triage_data_file>" in reason
+        assert str(triage_data_path) in reason
+
+    def test_triage_data_file_fallback_on_write_error(self, tmp_path):
+        """If triage-data.json write fails, falls back to inline <triage_data>."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "memory-config.json").write_text(
+            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
+        )
+        transcript_path = self._make_blocking_transcript(tmp_path)
+
+        hook_input = json.dumps({
+            "transcript_path": transcript_path,
+            "cwd": str(proj),
+        })
+
+        # Mock run_triage to guarantee a blocking result
+        forced_results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
+        ]
+
+        captured_out = io.StringIO()
+        # Mock os.open to fail only for triage-data.json.*.tmp writes
+        original_os_open = os.open
+        def mock_os_open(path, flags, mode=0o777):
+            if isinstance(path, str) and "triage-data.json." in path and path.endswith(".tmp"):
+                raise OSError("Simulated write failure")
+            return original_os_open(path, flags, mode)
+
+        with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
+             mock.patch("sys.stdout", captured_out), \
+             mock.patch("memory_triage.check_stop_flag", return_value=False), \
+             mock.patch("memory_triage.run_triage", return_value=forced_results), \
+             mock.patch("memory_triage.os.open", side_effect=mock_os_open):
+            exit_code = _run_triage()
+
+        assert exit_code == 0
+
+        stdout_text = captured_out.getvalue().strip()
+        assert stdout_text, "Expected blocking output but got empty stdout"
+        response = json.loads(stdout_text)
+        assert response["decision"] == "block"
+        reason = response["reason"]
+        # Should fall back to inline triage_data
+        assert "<triage_data>" in reason
+        assert "<triage_data_file>" not in reason
+
+    def test_triage_data_file_fallback_on_replace_error(self, tmp_path):
+        """If os.replace() fails after write, falls back to inline <triage_data>."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "memory-config.json").write_text(
+            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
+        )
+        transcript_path = self._make_blocking_transcript(tmp_path)
+
+        hook_input = json.dumps({
+            "transcript_path": transcript_path,
+            "cwd": str(proj),
+        })
+
+        forced_results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
+        ]
+
+        captured_out = io.StringIO()
+        original_replace = os.replace
+        def mock_replace(src, dst):
+            if isinstance(dst, str) and "triage-data.json" in dst and ".tmp" not in dst:
+                raise OSError("Simulated replace failure")
+            return original_replace(src, dst)
+
+        with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
+             mock.patch("sys.stdout", captured_out), \
+             mock.patch("memory_triage.check_stop_flag", return_value=False), \
+             mock.patch("memory_triage.run_triage", return_value=forced_results), \
+             mock.patch("memory_triage.os.replace", side_effect=mock_replace):
+            exit_code = _run_triage()
+
+        assert exit_code == 0
+
+        stdout_text = captured_out.getvalue().strip()
+        assert stdout_text, "Expected blocking output but got empty stdout"
+        response = json.loads(stdout_text)
+        assert response["decision"] == "block"
+        reason = response["reason"]
+        # Should fall back to inline triage_data
+        assert "<triage_data>" in reason
+        assert "<triage_data_file>" not in reason

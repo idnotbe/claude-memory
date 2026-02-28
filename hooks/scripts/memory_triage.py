@@ -867,17 +867,67 @@ def _sanitize_snippet(text: str) -> str:
     return text.strip()[:120]
 
 
+def build_triage_data(
+    results: list[dict],
+    context_paths: dict[str, str],
+    parallel_config: dict,
+    category_descriptions: dict[str, str] | None = None,
+) -> dict:
+    """Build structured triage data dict from results.
+
+    Extracted from format_block_message() so _run_triage() can write
+    the data to a file before formatting the message.
+    """
+    triage_categories = []
+    for r in results:
+        category = r["category"]
+        cat_lower = category.lower()
+        entry = {
+            "category": cat_lower,
+            "score": round(r["score"], 4),
+        }
+        if category_descriptions:
+            desc = category_descriptions.get(cat_lower, "")
+            if desc:
+                entry["description"] = desc
+        ctx_path = context_paths.get(cat_lower)
+        if ctx_path:
+            entry["context_file"] = ctx_path
+        triage_categories.append(entry)
+
+    return {
+        "categories": triage_categories,
+        "parallel_config": {
+            "enabled": parallel_config.get("enabled", True),
+            "category_models": parallel_config.get(
+                "category_models",
+                DEFAULT_PARALLEL_CONFIG["category_models"],
+            ),
+            "verification_model": parallel_config.get(
+                "verification_model",
+                DEFAULT_PARALLEL_CONFIG["verification_model"],
+            ),
+            "default_model": parallel_config.get(
+                "default_model",
+                DEFAULT_PARALLEL_CONFIG["default_model"],
+            ),
+        },
+    }
+
+
 def format_block_message(
     results: list[dict],
     context_paths: dict[str, str],
     parallel_config: dict,
     *,
     category_descriptions: dict[str, str] | None = None,
+    triage_data_path: str | None = None,
 ) -> str:
     """Format the block message for stdout JSON response (block stop).
 
     Produces a human-readable message that Claude can understand and act on,
-    followed by a structured <triage_data> JSON block for programmatic parsing.
+    followed by either a file reference (<triage_data_file>) or inline
+    structured (<triage_data>) JSON block for programmatic parsing.
     """
     if not results:
         return ""
@@ -908,49 +958,19 @@ def format_block_message(
         "After saving, you may stop."
     )
 
-    # Build structured triage data
-    triage_categories = []
-    for r in results:
-        category = r["category"]
-        # Emit lowercase in structured data to match downstream scripts
-        # (memory_candidate.py argparse expects lowercase category names)
-        cat_lower = category.lower()
-        entry = {
-            "category": cat_lower,
-            "score": round(r["score"], 4),
-        }
-        if category_descriptions:
-            desc = category_descriptions.get(cat_lower, "")
-            if desc:
-                entry["description"] = desc
-        ctx_path = context_paths.get(cat_lower)
-        if ctx_path:
-            entry["context_file"] = ctx_path
-        triage_categories.append(entry)
-
-    triage_data = {
-        "categories": triage_categories,
-        "parallel_config": {
-            "enabled": parallel_config.get("enabled", True),
-            "category_models": parallel_config.get(
-                "category_models",
-                DEFAULT_PARALLEL_CONFIG["category_models"],
-            ),
-            "verification_model": parallel_config.get(
-                "verification_model",
-                DEFAULT_PARALLEL_CONFIG["verification_model"],
-            ),
-            "default_model": parallel_config.get(
-                "default_model",
-                DEFAULT_PARALLEL_CONFIG["default_model"],
-            ),
-        },
-    }
-
-    lines.append("")
-    lines.append("<triage_data>")
-    lines.append(json.dumps(triage_data, indent=2))
-    lines.append("</triage_data>")
+    # Structured triage data: file reference or inline fallback
+    if triage_data_path:
+        lines.append("")
+        lines.append(f"<triage_data_file>{triage_data_path}</triage_data_file>")
+    else:
+        triage_data = build_triage_data(
+            results, context_paths, parallel_config,
+            category_descriptions=category_descriptions,
+        )
+        lines.append("")
+        lines.append("<triage_data>")
+        lines.append(json.dumps(triage_data, indent=2))
+        lines.append("</triage_data>")
 
     return "\n".join(lines)
 
@@ -1122,11 +1142,45 @@ def _run_triage() -> int:
             category_descriptions=cat_descs,
         )
 
-        # Format message with structured triage data
+        # Build triage data and write to file (atomic)
         parallel_config = config.get("parallel", _deep_copy_parallel_defaults())
+        triage_data = build_triage_data(
+            results, context_paths, parallel_config,
+            category_descriptions=cat_descs,
+        )
+        triage_data_path = os.path.join(
+            cwd, ".claude", "memory", ".staging", "triage-data.json",
+        )
+        tmp_path = None
+        try:
+            tmp_path = f"{triage_data_path}.{os.getpid()}.tmp"
+            fd = os.open(
+                tmp_path,
+                os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+                0o600,
+            )
+            try:
+                f = os.fdopen(fd, "w", encoding="utf-8")
+            except Exception:
+                os.close(fd)
+                raise
+            with f:
+                json.dump(triage_data, f, indent=2)
+            os.replace(tmp_path, triage_data_path)
+        except Exception:
+            # Clean up stale tmp on failure (catches OSError + unexpected errors)
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            triage_data_path = None  # Fallback to inline
+
+        # Format message with structured triage data
         message = format_block_message(
             results, context_paths, parallel_config,
             category_descriptions=cat_descs,
+            triage_data_path=triage_data_path,
         )
         print(json.dumps({"decision": "block", "reason": message}))
         return 0

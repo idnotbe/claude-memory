@@ -47,7 +47,7 @@ present, skip directly to Phase 0 -- the current triage data is fresh.
    - `.claude/memory/.staging/triage-data.json` WITHOUT a corresponding `$HOME/.claude/last-save-result.json`
 2. If found, clean up ALL staging files before proceeding:
    ```bash
-   rm -f .claude/memory/.staging/triage-data.json .claude/memory/.staging/context-*.txt .claude/memory/.staging/.triage-handled .claude/memory/.staging/.triage-pending.json
+   rm -f .claude/memory/.staging/triage-data.json .claude/memory/.staging/context-*.txt .claude/memory/.staging/draft-*.json .claude/memory/.staging/input-*.json .claude/memory/.staging/new-info-*.txt .claude/memory/.staging/.triage-handled .claude/memory/.staging/.triage-pending.json
    ```
 3. Proceed with normal fresh triage below.
 
@@ -206,60 +206,90 @@ For each draft from Phase 1, spawn a verification Task subagent with `verificati
 
 Spawn ALL verification subagents in PARALLEL.
 
-### Phase 3: Save (Main Agent)
-The main agent collects all Phase 1 and Phase 2 results, then applies the CUD resolution table (see below) to determine the final action for each category.
+### Phase 3: Save (Subagent)
 
-For each verified draft (PASS only):
+The main agent performs CUD resolution, then delegates all save execution to a single Task subagent. This keeps save operations (30-50 lines of Bash commands) out of the main conversation.
 
-**Draft path validation:** Before reading any draft file, verify the path
+**Step 1: CUD Resolution (Main Agent)**
+
+Collect all Phase 1 (Draft) and Phase 2 (Verify) results. Apply the CUD Verification Rules table (below) to determine the final action for each category:
+
+For each category, state the CUD resolution (CREATE / UPDATE / RETIRE / NOOP) and a one-line justification. Then build the exact command list for the subagent.
+
+**Draft path validation:** Before including any draft file path in commands, verify it
 starts with `.claude/memory/.staging/draft-` and contains no `..` path components.
 Reject any draft with a non-conforming path.
 
-- **CREATE**: `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action create --category <cat> --target <path> --input <draft>`
+Command templates:
+- **CREATE**: `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action create --category <cat> --target "<path>" --input "<draft>"`
 - **UPDATE**: Read the candidate file, compute its MD5 hash for OCC.
-  `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action update --category <cat> --target <path> --input <draft> --hash <md5>`
-- **DELETE** (soft retire): `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action retire --target <path> --reason "<why>"`. No temp file needed.
+  `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action update --category <cat> --target "<path>" --input "<draft>" --hash <md5>`
+- **DELETE** (soft retire): `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action retire --target "<path>" --reason "<why>"`
 
-State the chosen action and one-line justification before each memory_write.py call.
-
-After all saves, if session_summary was created, enforce the rolling window:
-
-```bash
-python3 "$CLAUDE_PLUGIN_ROOT/hooks/scripts/memory_enforce.py" --category session_summary
-```
-
-This replaces the previous inline Python enforcement. The script automatically reads `max_retained` from `memory-config.json` and retires the oldest sessions to stay within the limit.
+If session_summary was created, include the enforce command:
+`python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_enforce.py" --category session_summary`
 
 > Note: Enforcement also runs automatically after `memory_write.py --action create --category session_summary`. This explicit call is a safety belt.
 
-**Post-save: Clean staging first, then write result file.**
+**Step 2: Spawn Save Subagent**
 
-After ALL saves complete (regardless of category):
+Spawn ONE foreground Task subagent (model: haiku) with the pre-computed command list:
 
-1. Clean up staging files **first** (prevents false orphan detection if a concurrent prompt fires between steps):
-   ```bash
-   rm -f .claude/memory/.staging/triage-data.json .claude/memory/.staging/context-*.txt .claude/memory/.staging/.triage-handled .claude/memory/.staging/.triage-pending.json
+```
+Task(
+  model: "haiku",
+  subagent_type: "general-purpose",
+  prompt: "Execute these memory save commands in order. For each command,
+run it via Bash. If a command fails, record the error and continue with
+the next command. After ALL commands complete, clean up staging files
+and write the result file.
+
+Commands:
+1. <first memory_write.py command>
+2. <second memory_write.py command>
+...
+N. <memory_enforce.py command, if applicable>
+
+If ALL commands succeeded (no errors), run cleanup:
+rm -f .claude/memory/.staging/triage-data.json .claude/memory/.staging/context-*.txt .claude/memory/.staging/draft-*.json .claude/memory/.staging/input-*.json .claude/memory/.staging/new-info-*.txt .claude/memory/.staging/.triage-handled .claude/memory/.staging/.triage-pending.json
+If ANY command failed, do NOT delete staging files (preserve for retry).
+
+Then write the result file (atomic, regardless of success/failure):
+mkdir -p \"$HOME/.claude\"
+cat > \"$HOME/.claude/.last-save-result.tmp\" <<'__MEMORY_SAVE_RESULT_EOF__'
+{
+  \"saved_at\": \"<ISO 8601 UTC>\",
+  \"project\": \"<cwd absolute path>\",
+  \"categories\": [\"<saved categories>\"],
+  \"titles\": [\"<saved titles>\"],
+  \"errors\": [<{\"category\": \"name\", \"error\": \"message\"} for each failure, or empty []>]
+}
+__MEMORY_SAVE_RESULT_EOF__
+mv -f \"$HOME/.claude/.last-save-result.tmp\" \"$HOME/.claude/last-save-result.json\"
+
+Return a summary: which categories saved, which failed, any errors."
+)
+```
+
+Result file fields:
+- `saved_at`: current UTC timestamp in ISO 8601
+- `project`: absolute path of the current working directory
+- `categories`: list of categories that were saved (PASS only)
+- `titles`: list of titles corresponding to each saved memory
+- `errors`: list of `{"category": "<name>", "error": "<message>"}` objects for any failed saves (empty array if all succeeded)
+
+**Step 3: Error Handling**
+
+If the Task subagent fails, times out, or returns errors:
+1. Write a pending sentinel using the Write tool (NOT Bash — staging guard blocks Bash writes to `.staging/`):
    ```
-
-2. Write save results to the **global** path `$HOME/.claude/last-save-result.json` using **atomic write-then-rename** (prevents concurrent reader from seeing truncated/empty file):
-   ```bash
-   mkdir -p "$HOME/.claude"
-   cat > "$HOME/.claude/.last-save-result.tmp" <<'__MEMORY_SAVE_RESULT_EOF__'
-   {
-     "saved_at": "<ISO 8601 UTC>",
-     "project": "<cwd absolute path>",
-     "categories": ["category1", "category2"],
-     "titles": ["Title of memory 1", "Title of memory 2"],
-     "errors": [{"category": "decision", "error": "OCC_CONFLICT"}]
-   }
-   __MEMORY_SAVE_RESULT_EOF__
-   mv -f "$HOME/.claude/.last-save-result.tmp" "$HOME/.claude/last-save-result.json"
+   Write(
+     file_path: ".claude/memory/.staging/.triage-pending.json",
+     content: '{"timestamp": "<ISO 8601 UTC>", "categories": ["<failed categories>"], "reason": "subagent_error"}'
+   )
    ```
-   - `saved_at`: current UTC timestamp in ISO 8601
-   - `project`: absolute path of the current working directory
-   - `categories`: list of categories that were saved (PASS only)
-   - `titles`: list of titles corresponding to each saved memory
-   - `errors`: list of `{"category": "<name>", "error": "<message>"}` objects for any failed saves (empty array if all succeeded)
+2. Do NOT delete staging files (preserve triage-data.json, context-*.txt for retry).
+3. The next session's UserPromptSubmit hook will detect the pending sentinel.
 
 ### Write Pipeline Protections
 

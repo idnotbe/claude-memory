@@ -14,7 +14,7 @@ Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the
 
 | Hook Type | What It Does |
 |-----------|-------------|
-| Stop (x1) | Deterministic triage hook (command type) -- keyword heuristic, evaluates all 6 categories, outputs structured `<triage_data>` JSON + per-category context files for parallel subagent consumption |
+| Stop (x1) | Deterministic triage hook (command type) -- keyword heuristic, evaluates all 6 categories, writes `triage-data.json` to staging (file-based `<triage_data_file>` with inline `<triage_data>` fallback) + per-category context files for parallel subagent consumption |
 | UserPromptSubmit | Retrieval hook -- FTS5 BM25 keyword matcher injects relevant memories (fallback: legacy keyword), optional LLM judge layer filters false positives |
 | PreToolUse:Write | Write guard -- blocks direct writes to memory directory |
 | PreToolUse:Bash | Staging guard -- blocks Bash writes to .staging/ directory (prevents Guardian false positives) |
@@ -28,10 +28,10 @@ Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the
 
 When the Stop hook triggers categories, it produces:
 1. **Human-readable message** (backwards-compatible) listing triggered categories
-2. **`<triage_data>` JSON block** with per-category scores, context file paths, and model assignments
+2. **`triage-data.json`** file at `.claude/memory/.staging/triage-data.json` (referenced via `<triage_data_file>` tag; falls back to inline `<triage_data>` JSON on write failure)
 3. **Context files** at `.claude/memory/.staging/context-<CATEGORY>.txt` with generous transcript excerpts
 
-The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku/sonnet/opus per `triage.parallel.category_models` config) for parallel drafting, then runs verification subagents, then saves via memory_write.py. See `skills/memory-management/SKILL.md` for the full 4-phase flow.
+The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku/sonnet/opus per `triage.parallel.category_models` config) for parallel drafting, then runs verification subagents, then delegates save execution to a single foreground Task subagent (haiku) that runs all memory_write.py commands, staging cleanup, and result file creation. See `skills/memory-management/SKILL.md` for the full 4-phase flow.
 
 ## Key Files
 
