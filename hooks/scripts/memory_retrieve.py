@@ -419,10 +419,10 @@ def main():
         except (json.JSONDecodeError, OSError):
             pass  # Fail-open: proceed with empty config (logging disabled by default)
 
-    # --- Block 1: Save confirmation from previous session (global path) ---
+    # --- Block 1: Save confirmation from previous session (project-local path) ---
     _just_saved = False  # Flag for Block 2 orphan suppression
     try:
-        _save_result_path = Path.home() / ".claude" / "last-save-result.json"
+        _save_result_path = memory_root / ".staging" / "last-save-result.json"
         if _save_result_path.exists():
             _just_saved = True
             try:
@@ -436,28 +436,23 @@ def main():
                     _age_secs = (datetime.now(timezone.utc) - _saved_dt).total_seconds()
                     _is_recent_save = _age_secs < 86400  # 24 hours
                 if _is_recent_save:
-                    _save_project = _save_data.get("project", "")
                     _save_categories = _save_data.get("categories", [])
                     _save_titles = _save_data.get("titles", [])
                     _save_errors = _save_data.get("errors", [])
-                    if _save_project == cwd:
-                        _cats_str = html.escape(", ".join(str(c) for c in _save_categories)) if _save_categories else "unknown"
-                        _titles_str = html.escape(", ".join(str(t) for t in _save_titles)) if _save_titles else ""
-                        _msg = f"Memories saved ({_cats_str})"
-                        if _titles_str:
-                            _msg += f": {_titles_str}"
-                        if _save_errors:
-                            _err_parts = []
-                            for _e in _save_errors:
-                                if isinstance(_e, dict):
-                                    _err_parts.append(f"{_e.get('category', '?')}: {_e.get('error', '?')}")
-                                else:
-                                    _err_parts.append(str(_e))
-                            _msg += f" [errors: {html.escape(', '.join(_err_parts))}]"
-                        print(f"<memory-note>{_msg}</memory-note>")
-                    else:
-                        _proj_name = html.escape(Path(str(_save_project)).name) if _save_project else "unknown"
-                        print(f"<memory-note>Memories saved in project: {_proj_name}</memory-note>")
+                    _cats_str = html.escape(", ".join(str(c) for c in _save_categories)) if _save_categories else "unknown"
+                    _titles_str = html.escape(", ".join(str(t) for t in _save_titles)) if _save_titles else ""
+                    _msg = f"Memories saved ({_cats_str})"
+                    if _titles_str:
+                        _msg += f": {_titles_str}"
+                    if _save_errors:
+                        _err_parts = []
+                        for _e in _save_errors:
+                            if isinstance(_e, dict):
+                                _err_parts.append(f"{_e.get('category', '?')}: {_e.get('error', '?')}")
+                            else:
+                                _err_parts.append(str(_e))
+                        _msg += f" [errors: {html.escape(', '.join(_err_parts))}]"
+                    print(f"<memory-note>{_msg}</memory-note>")
             finally:
                 # One-shot: always delete after read, even on parse errors
                 _save_result_path.unlink(missing_ok=True)

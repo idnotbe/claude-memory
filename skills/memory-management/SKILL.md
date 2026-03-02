@@ -44,10 +44,10 @@ present, skip directly to Phase 0 -- the current triage data is fresh.
 
 1. Check if ANY of these exist:
    - `.claude/memory/.staging/.triage-pending.json`
-   - `.claude/memory/.staging/triage-data.json` WITHOUT a corresponding `$HOME/.claude/last-save-result.json`
+   - `.claude/memory/.staging/triage-data.json` WITHOUT a corresponding `.claude/memory/.staging/last-save-result.json`
 2. If found, clean up ALL staging files before proceeding:
    ```bash
-   rm -f .claude/memory/.staging/triage-data.json .claude/memory/.staging/context-*.txt .claude/memory/.staging/draft-*.json .claude/memory/.staging/input-*.json .claude/memory/.staging/new-info-*.txt .claude/memory/.staging/.triage-handled .claude/memory/.staging/.triage-pending.json
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action cleanup-staging --staging-dir .claude/memory/.staging
    ```
 3. Proceed with normal fresh triage below.
 
@@ -251,21 +251,11 @@ Commands:
 N. <memory_enforce.py command, if applicable>
 
 If ALL commands succeeded (no errors), run cleanup:
-rm -f .claude/memory/.staging/triage-data.json .claude/memory/.staging/context-*.txt .claude/memory/.staging/draft-*.json .claude/memory/.staging/input-*.json .claude/memory/.staging/new-info-*.txt .claude/memory/.staging/.triage-handled .claude/memory/.staging/.triage-pending.json
+python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action cleanup-staging --staging-dir .claude/memory/.staging
 If ANY command failed, do NOT delete staging files (preserve for retry).
 
 Then write the result file (atomic, regardless of success/failure):
-mkdir -p \"$HOME/.claude\"
-cat > \"$HOME/.claude/.last-save-result.tmp\" <<'__MEMORY_SAVE_RESULT_EOF__'
-{
-  \"saved_at\": \"<ISO 8601 UTC>\",
-  \"project\": \"<cwd absolute path>\",
-  \"categories\": [\"<saved categories>\"],
-  \"titles\": [\"<saved titles>\"],
-  \"errors\": [<{\"category\": \"name\", \"error\": \"message\"} for each failure, or empty []>]
-}
-__MEMORY_SAVE_RESULT_EOF__
-mv -f \"$HOME/.claude/.last-save-result.tmp\" \"$HOME/.claude/last-save-result.json\"
+python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result --staging-dir .claude/memory/.staging --result-json '{\"saved_at\": \"<ISO 8601 UTC>\", \"categories\": [\"<saved categories>\"], \"titles\": [\"<saved titles>\"], \"errors\": [<{\"category\": \"name\", \"error\": \"message\"} for each failure, or empty []>]}'
 
 Return a summary: which categories saved, which failed, any errors."
 )
@@ -273,7 +263,6 @@ Return a summary: which categories saved, which failed, any errors."
 
 Result file fields:
 - `saved_at`: current UTC timestamp in ISO 8601
-- `project`: absolute path of the current working directory
 - `categories`: list of categories that were saved (PASS only)
 - `titles`: list of titles corresponding to each saved memory
 - `errors`: list of `{"category": "<name>", "error": "<message>"}` objects for any failed saves (empty array if all succeeded)

@@ -493,6 +493,135 @@ def atomic_write_json(target: str, data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Staging utilities (cleanup + save-result)
+# ---------------------------------------------------------------------------
+
+_STAGING_CLEANUP_PATTERNS = [
+    "triage-data.json",
+    "context-*.txt",
+    "draft-*.json",
+    "input-*.json",
+    "new-info-*.txt",
+    ".triage-handled",
+    ".triage-pending.json",
+]
+
+
+def cleanup_staging(staging_dir: str) -> dict:
+    """Remove transient staging files after a successful save.
+
+    Path containment: staging_dir must resolve to a path ending in
+    memory/.staging. Individual files are checked to be within the
+    resolved staging directory before deletion.
+    """
+    staging_path = Path(staging_dir).resolve()
+
+    if not staging_path.is_dir():
+        return {"status": "ok", "deleted": [], "errors": [], "skipped": 0}
+
+    parts = staging_path.parts
+    if len(parts) < 2 or parts[-1] != ".staging" or parts[-2] != "memory":
+        return {
+            "status": "error",
+            "message": f"Path does not end with memory/.staging: {staging_dir}",
+        }
+
+    deleted: list[str] = []
+    errors: list[dict] = []
+    skipped = 0
+
+    for pattern in _STAGING_CLEANUP_PATTERNS:
+        for f in staging_path.glob(pattern):
+            # Extra containment: resolved path must be within staging_dir
+            try:
+                f.resolve().relative_to(staging_path)
+            except ValueError:
+                skipped += 1
+                continue
+            try:
+                f.unlink()
+                deleted.append(f.name)
+            except OSError as e:
+                errors.append({"file": f.name, "error": str(e)})
+
+    return {"status": "ok", "deleted": deleted, "errors": errors, "skipped": skipped}
+
+
+_SAVE_RESULT_ALLOWED_KEYS = {"saved_at", "categories", "titles", "errors"}
+_SAVE_RESULT_MAX_SIZE = 10240  # 10KB
+_SAVE_RESULT_MAX_ITEMS = 10
+_SAVE_RESULT_MAX_TITLE_LEN = 120
+_SAVE_RESULT_MAX_ERROR_LEN = 500
+
+
+def write_save_result(staging_dir: str, result_json: str) -> dict:
+    """Write save result file atomically to staging directory.
+
+    Validates schema (allowed keys, type enforcement, length caps) and
+    writes to <staging_dir>/last-save-result.json via atomic tmp+rename.
+    """
+    staging_path = Path(staging_dir).resolve()
+
+    parts = staging_path.parts
+    if len(parts) < 2 or parts[-1] != ".staging" or parts[-2] != "memory":
+        return {
+            "status": "error",
+            "message": f"Path does not end with memory/.staging: {staging_dir}",
+        }
+
+    if len(result_json) > _SAVE_RESULT_MAX_SIZE:
+        return {"status": "error", "message": "Result JSON exceeds 10KB limit"}
+
+    try:
+        data = json.loads(result_json)
+    except json.JSONDecodeError as e:
+        return {"status": "error", "message": f"Invalid JSON: {e}"}
+
+    if not isinstance(data, dict):
+        return {"status": "error", "message": "Result must be a JSON object"}
+
+    unexpected = set(data.keys()) - _SAVE_RESULT_ALLOWED_KEYS
+    if unexpected:
+        return {"status": "error", "message": f"Unexpected keys: {unexpected}"}
+
+    # Type + length enforcement
+    cats = data.get("categories", [])
+    titles = data.get("titles", [])
+    errs = data.get("errors", [])
+
+    if not isinstance(cats, list) or not all(isinstance(c, str) for c in cats):
+        return {"status": "error", "message": "categories must be a list of strings"}
+    if not isinstance(titles, list) or not all(isinstance(t, str) for t in titles):
+        return {"status": "error", "message": "titles must be a list of strings"}
+    if not isinstance(errs, list):
+        return {"status": "error", "message": "errors must be a list"}
+
+    if len(cats) > _SAVE_RESULT_MAX_ITEMS:
+        return {"status": "error", "message": f"Too many categories (max {_SAVE_RESULT_MAX_ITEMS})"}
+    if len(titles) > _SAVE_RESULT_MAX_ITEMS:
+        return {"status": "error", "message": f"Too many titles (max {_SAVE_RESULT_MAX_ITEMS})"}
+    if len(errs) > _SAVE_RESULT_MAX_ITEMS:
+        return {"status": "error", "message": f"Too many errors (max {_SAVE_RESULT_MAX_ITEMS})"}
+
+    for t in titles:
+        if len(t) > _SAVE_RESULT_MAX_TITLE_LEN:
+            return {"status": "error", "message": f"Title exceeds {_SAVE_RESULT_MAX_TITLE_LEN} chars: {t[:40]}..."}
+
+    for e in errs:
+        if not isinstance(e, dict) or set(e.keys()) - {"category", "error"}:
+            return {"status": "error", "message": "Each error must be {category, error}"}
+        err_msg = e.get("error", "")
+        if isinstance(err_msg, str) and len(err_msg) > _SAVE_RESULT_MAX_ERROR_LEN:
+            return {"status": "error", "message": f"Error message exceeds {_SAVE_RESULT_MAX_ERROR_LEN} chars"}
+
+    os.makedirs(str(staging_path), exist_ok=True)
+    target = str(staging_path / "last-save-result.json")
+    atomic_write_text(target, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+    return {"status": "ok", "path": target}
+
+
+# ---------------------------------------------------------------------------
 # Merge protections (UPDATE)
 # ---------------------------------------------------------------------------
 
@@ -1448,11 +1577,14 @@ def main():
     )
     parser.add_argument(
         "--action", required=True,
-        choices=["create", "update", "retire", "archive", "unarchive", "restore"],
+        choices=[
+            "create", "update", "retire", "archive", "unarchive", "restore",
+            "cleanup-staging", "write-save-result",
+        ],
     )
     parser.add_argument("--category", choices=list(CATEGORY_FOLDERS.keys()))
     parser.add_argument(
-        "--target", required=True, help="Relative path to memory file"
+        "--target", help="Relative path to memory file (required for CRUD actions)"
     )
     parser.add_argument("--input", help="Path to temp JSON input file")
     parser.add_argument(
@@ -1460,8 +1592,41 @@ def main():
         help="MD5 hash of existing file for OCC (update only)",
     )
     parser.add_argument("--reason", help="Reason for retirement or archival (retire/archive)")
+    parser.add_argument(
+        "--staging-dir",
+        help="Path to staging directory (for cleanup-staging and write-save-result)",
+    )
+    parser.add_argument(
+        "--result-json",
+        help="JSON string for save result (write-save-result only)",
+    )
 
     args = parser.parse_args()
+
+    # --- Staging utility actions (no --target needed) ---
+    if args.action == "cleanup-staging":
+        if not args.staging_dir:
+            print("ERROR: --staging-dir is required for cleanup-staging.")
+            return 1
+        result = cleanup_staging(args.staging_dir)
+        print(json.dumps(result))
+        return 0 if result["status"] == "ok" else 1
+
+    if args.action == "write-save-result":
+        if not args.staging_dir:
+            print("ERROR: --staging-dir is required for write-save-result.")
+            return 1
+        if not args.result_json:
+            print("ERROR: --result-json is required for write-save-result.")
+            return 1
+        result = write_save_result(args.staging_dir, args.result_json)
+        print(json.dumps(result))
+        return 0 if result["status"] == "ok" else 1
+
+    # --- CRUD actions (require --target) ---
+    if not args.target:
+        print("ERROR: --target is required for this action.")
+        return 1
 
     # Validate required args per action
     if args.action in ("create", "update") and not args.input:

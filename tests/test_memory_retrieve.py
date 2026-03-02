@@ -1031,7 +1031,7 @@ class TestConfigErrorPaths:
 
 
 class TestSaveConfirmation:
-    """Tests for Block 1: Save confirmation from previous session (global path)."""
+    """Tests for Block 1: Save confirmation from previous session (project-local path)."""
 
     def _run_retrieve(self, hook_input):
         result = subprocess.run(
@@ -1058,23 +1058,18 @@ class TestSaveConfirmation:
         (mem_root / "index.md").write_text(build_enriched_index(*memories))
         return proj
 
-    def test_same_project_detailed_confirmation(self, tmp_path, monkeypatch):
-        """Recent save in same project shows detailed confirmation."""
+    def test_same_project_detailed_confirmation(self, tmp_path):
+        """Recent save shows detailed confirmation."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        # Create global save result file
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        claude_dir = fake_home / ".claude"
-        claude_dir.mkdir()
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "project": str(proj),
             "categories": ["decision", "preference"],
             "titles": ["Use JWT", "Prefer dark mode"],
             "errors": [],
         }
-        (claude_dir / "last-save-result.json").write_text(json.dumps(save_result))
+        (staging / "last-save-result.json").write_text(json.dumps(save_result))
         hook_input = {
             "user_prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
@@ -1086,48 +1081,18 @@ class TestSaveConfirmation:
         assert "decision" in stdout
         assert "Use JWT" in stdout
 
-    def test_different_project_brief_note(self, tmp_path, monkeypatch):
-        """Save in different project shows brief cross-project note."""
-        proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        claude_dir = fake_home / ".claude"
-        claude_dir.mkdir()
-        save_result = {
-            "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "project": "/some/other/project",
-            "categories": ["decision"],
-            "titles": ["Some title"],
-            "errors": [],
-        }
-        (claude_dir / "last-save-result.json").write_text(json.dumps(save_result))
-        hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
-            "cwd": str(proj),
-        }
-        stdout, rc = self._run_retrieve(hook_input)
-        assert rc == 0
-        assert "<memory-note>" in stdout
-        assert "Memories saved in project:" in stdout
-        assert "project" in stdout  # basename of /some/other/project
-
-    def test_save_result_deleted_after_display(self, tmp_path, monkeypatch):
+    def test_save_result_deleted_after_display(self, tmp_path):
         """Save result file is deleted after being shown (one-shot)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        claude_dir = fake_home / ".claude"
-        claude_dir.mkdir()
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "project": str(proj),
             "categories": ["decision"],
             "titles": ["Test"],
             "errors": [],
         }
-        result_path = claude_dir / "last-save-result.json"
+        result_path = staging / "last-save-result.json"
         result_path.write_text(json.dumps(save_result))
         hook_input = {
             "user_prompt": "How does JWT authentication work in this project?",
@@ -1136,23 +1101,19 @@ class TestSaveConfirmation:
         self._run_retrieve(hook_input)
         assert not result_path.exists(), "Save result file should be deleted after display"
 
-    def test_old_save_result_ignored(self, tmp_path, monkeypatch):
+    def test_old_save_result_ignored(self, tmp_path):
         """Save result older than 24 hours is ignored (still deleted)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        claude_dir = fake_home / ".claude"
-        claude_dir.mkdir()
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
         old_time = datetime.now(timezone.utc) - timedelta(hours=25)
         save_result = {
             "saved_at": old_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "project": str(proj),
             "categories": ["decision"],
             "titles": ["Test"],
             "errors": [],
         }
-        result_path = claude_dir / "last-save-result.json"
+        result_path = staging / "last-save-result.json"
         result_path.write_text(json.dumps(save_result))
         hook_input = {
             "user_prompt": "How does JWT authentication work in this project?",
@@ -1164,15 +1125,12 @@ class TestSaveConfirmation:
         # File should still be cleaned up (deleted unconditionally after read)
         assert not result_path.exists()
 
-    def test_corrupt_save_result_ignored(self, tmp_path, monkeypatch):
+    def test_corrupt_save_result_ignored(self, tmp_path):
         """Corrupt save result file is silently ignored (fail-open)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        claude_dir = fake_home / ".claude"
-        claude_dir.mkdir()
-        (claude_dir / "last-save-result.json").write_text("{bad json")
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / "last-save-result.json").write_text("{bad json")
         hook_input = {
             "user_prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
@@ -1182,22 +1140,18 @@ class TestSaveConfirmation:
         # Should not crash, should still return normal results
         assert "Memories saved" not in stdout
 
-    def test_save_result_with_errors(self, tmp_path, monkeypatch):
+    def test_save_result_with_errors(self, tmp_path):
         """Save result with errors shows error info."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        claude_dir = fake_home / ".claude"
-        claude_dir.mkdir()
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "project": str(proj),
             "categories": ["decision"],
             "titles": ["Test"],
             "errors": [{"category": "decision", "error": "OCC_CONFLICT"}],
         }
-        (claude_dir / "last-save-result.json").write_text(json.dumps(save_result))
+        (staging / "last-save-result.json").write_text(json.dumps(save_result))
         hook_input = {
             "user_prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
@@ -1218,22 +1172,18 @@ class TestSaveConfirmation:
         assert rc == 0
         assert "Memories saved" not in stdout
 
-    def test_fires_for_short_prompts(self, tmp_path, monkeypatch):
+    def test_fires_for_short_prompts(self, tmp_path):
         """Save confirmation fires even for short prompts (before the short prompt check)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        claude_dir = fake_home / ".claude"
-        claude_dir.mkdir()
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "project": str(proj),
             "categories": ["decision"],
             "titles": ["Test"],
             "errors": [],
         }
-        (claude_dir / "last-save-result.json").write_text(json.dumps(save_result))
+        (staging / "last-save-result.json").write_text(json.dumps(save_result))
         hook_input = {
             "user_prompt": "hi",
             "cwd": str(proj),
@@ -1271,14 +1221,10 @@ class TestOrphanCrashDetection:
         (mem_root / "index.md").write_text(build_enriched_index(*memories))
         return proj
 
-    def test_orphan_detected_old_triage(self, tmp_path, monkeypatch):
+    def test_orphan_detected_old_triage(self, tmp_path):
         """Old triage-data.json without save result or pending triggers orphan alert."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        (fake_home / ".claude").mkdir()
-        # No last-save-result.json in fake home
+        # No last-save-result.json in staging (orphan condition)
         staging = proj / ".claude" / "memory" / ".staging"
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
@@ -1296,24 +1242,19 @@ class TestOrphanCrashDetection:
         assert "Orphaned triage data" in stdout
         assert "/memory:save" in stdout
 
-    def test_no_orphan_when_save_result_exists(self, tmp_path, monkeypatch):
+    def test_no_orphan_when_save_result_exists(self, tmp_path):
         """No orphan alert when last-save-result.json exists (_just_saved flag suppresses)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        claude_dir = fake_home / ".claude"
-        claude_dir.mkdir()
+        staging = proj / ".claude" / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
         # Create save result (Block 1 sets _just_saved=True, suppressing Block 2)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "project": str(proj),
             "categories": ["decision"],
             "titles": ["Test"],
             "errors": [],
         }
-        (claude_dir / "last-save-result.json").write_text(json.dumps(save_result))
-        staging = proj / ".claude" / "memory" / ".staging"
+        (staging / "last-save-result.json").write_text(json.dumps(save_result))
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
         triage_path.write_text(json.dumps({"categories": ["decision"]}))
