@@ -1,8 +1,8 @@
-# claude-memory -- Development Guide (v5.0.0)
+# claude-memory -- Development Guide (v5.1.0)
 
 Structured memory plugin for Claude Code. Auto-captures decisions, runbooks, constraints, tech debt, session summaries, and preferences as JSON files with intelligent retrieval.
 
-Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the previous 6 prompt-type Stop hooks.
+Architecture: v5.1.0 -- Phase 1 subagents use `memory-drafter` agent file (tools: Read, Write only) for structural Guardian compatibility. Main agent performs deterministic script execution in Phase 1.5.
 
 ## Golden Rules
 
@@ -18,7 +18,7 @@ Architecture: v5.0.0 -- single deterministic command-type Stop hook replaced the
 | UserPromptSubmit | Retrieval hook -- FTS5 BM25 keyword matcher injects relevant memories (fallback: legacy keyword), optional LLM judge layer filters false positives |
 | PreToolUse:Write | Write guard -- blocks direct writes to memory directory |
 | PreToolUse:Bash | Staging guard -- blocks Bash writes to .staging/ directory (prevents Guardian false positives) |
-| PostToolUse:Write | Validation hook -- schema-validates any memory JSON, quarantines invalid (detection-only: PostToolUse deny cannot prevent writes, only inform) |
+| PostToolUse:Write | Validation hook -- schema-validates any memory JSON, quarantines invalid (detection-only: PostToolUse deny cannot prevent writes, only inform). Excludes `.staging/` temp files. Only fires on Write tool calls; Python `open()` writes (memory_write.py, memory_draft.py) are not intercepted. |
 
 ### Write Actions
 
@@ -31,7 +31,7 @@ When the Stop hook triggers categories, it produces:
 2. **`triage-data.json`** file at `.claude/memory/.staging/triage-data.json` (referenced via `<triage_data_file>` tag; falls back to inline `<triage_data>` JSON on write failure)
 3. **Context files** at `.claude/memory/.staging/context-<CATEGORY>.txt` with generous transcript excerpts
 
-The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku/sonnet/opus per `triage.parallel.category_models` config) for parallel drafting, then runs verification subagents, then delegates save execution to a single foreground Task subagent (haiku) that runs all memory_write.py commands, staging cleanup, and result file creation. See `skills/memory-management/SKILL.md` for the full 4-phase flow.
+The SKILL.md orchestration uses this to spawn per-category `memory-drafter` Agent subagents (`tools: Read, Write` only -- no Bash, structurally preventing Guardian conflicts) for parallel intent drafting. The main agent then performs deterministic execution (Phase 1.5): candidate selection, CUD resolution, and draft assembly via Bash. Verification subagents check draft quality, then a single foreground Task subagent (haiku) runs all memory_write.py commands, staging cleanup, and result file creation. See `skills/memory-management/SKILL.md` for the full 5-phase flow (Phase 0, 1, 1.5, 2, 3).
 
 ## Key Files
 
@@ -47,6 +47,7 @@ The SKILL.md orchestration uses this to spawn per-category Task subagents (haiku
 | hooks/scripts/memory_enforce.py | Rolling window enforcement: scans category, retires oldest beyond limit | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_judge.py | LLM-as-judge for retrieval verification (anti-position-bias, anti-injection, parallel batch splitting via ThreadPoolExecutor) | stdlib only (urllib.request, concurrent.futures) |
 | hooks/scripts/memory_logger.py | Shared JSONL structured logging (fail-open, atomic append) | stdlib only |
+| agents/memory-drafter.md | Phase 1 intent drafting agent (tools: Read, Write only, no Bash) | Claude Code agent file |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
 | hooks/scripts/memory_staging_guard.py | PreToolUse:Bash guard blocking heredoc writes to .staging/ | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
@@ -107,6 +108,7 @@ Known threat vectors (implementation details in `action-plans/_ref/TEST-PLAN.md`
 - **FTS5 injection:** Restrict queries to safe chars, use parameterized queries only.
 - **LLM judge integrity:** Wrap untrusted data in XML tags, use deterministic shuffling (anti-position-bias).
 - **Thread safety:** No shared mutable state in parallel judge executions.
+- **PostToolUse scope:** Only intercepts Write tool calls; Python `open()` writes (memory_write.py, memory_draft.py) are invisible. Staging files (`.staging/`) are excluded via `os.path.realpath()` + marker check — traversal-safe.
 
 ## Action Plans
 

@@ -10,7 +10,51 @@ import pytest
 
 SCRIPTS_DIR = Path(__file__).parent.parent / "hooks" / "scripts"
 VALIDATE_SCRIPT = str(SCRIPTS_DIR / "memory_validate_hook.py")
+GUARD_SCRIPT = str(SCRIPTS_DIR / "memory_write_guard.py")
 PYTHON = sys.executable
+
+
+# ---------------------------------------------------------------------------
+# Helpers (modeled after test_memory_staging_guard.py)
+# ---------------------------------------------------------------------------
+
+def run_validate_hook(file_path):
+    """Run validate hook with a file_path, return (stdout, stderr, returncode)."""
+    hook_input = {"tool_input": {"file_path": file_path}}
+    result = subprocess.run(
+        [PYTHON, VALIDATE_SCRIPT],
+        input=json.dumps(hook_input),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.strip(), result.stderr.strip(), result.returncode
+
+
+def run_write_guard(file_path):
+    """Run write guard (PreToolUse) with a file_path, return (stdout, stderr, returncode)."""
+    hook_input = {"tool_input": {"file_path": file_path}}
+    result = subprocess.run(
+        [PYTHON, GUARD_SCRIPT],
+        input=json.dumps(hook_input),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.strip(), result.stderr.strip(), result.returncode
+
+
+def assert_allow(stdout, msg=""):
+    """Assert the hook allowed the operation (empty stdout = allow)."""
+    assert stdout == "", f"Expected empty stdout (allow), got: {stdout!r}. {msg}"
+
+
+def assert_deny(stdout, msg=""):
+    """Assert stdout contains a deny decision."""
+    assert stdout, f"Expected deny output, got empty. {msg}"
+    output = json.loads(stdout)
+    decision = output.get("hookSpecificOutput", {}).get("permissionDecision")
+    assert decision == "deny", f"Expected deny, got '{decision}'. {msg}"
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 from memory_validate_hook import (
@@ -240,3 +284,276 @@ class TestValidateHookIntegration:
         assert len(quarantined) >= 1 or "deny" in stdout, (
             "Invalid memory file was not quarantined"
         )
+
+
+# ============================================================
+# Phase 2: Staging Exemption Tests (TrueNegatives)
+# ============================================================
+
+class TestStagingExemption:
+    """Staging files must pass through without quarantine or deny."""
+
+    def test_staging_json_file_allowed(self, tmp_path):
+        """intent-*.json in .staging/ should exit(0) with no deny."""
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "intent-decision.json"
+        f.write_text('{"intent": "create"}')
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        assert_allow(stdout, "staging JSON file should be allowed")
+        assert f.exists(), "Staging file should not be quarantined (renamed)"
+        assert not list(staging_dir.glob("*.invalid.*")), "No quarantine artifacts"
+
+    def test_staging_txt_file_allowed(self, tmp_path):
+        """new-info-*.txt in .staging/ should exit(0) with no deny."""
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "new-info-session.txt"
+        f.write_text("session notes here")
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        assert_allow(stdout, "staging txt file should be allowed")
+        assert f.exists(), "Staging file should not be quarantined (renamed)"
+
+    def test_staging_nested_path_allowed(self, tmp_path):
+        """Files in .staging/sub/dir/ should also be allowed."""
+        nested_dir = tmp_path / ".claude" / "memory" / ".staging" / "sub" / "dir"
+        nested_dir.mkdir(parents=True)
+        f = nested_dir / "file.json"
+        f.write_text('{}')
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        assert_allow(stdout, "nested staging file should be allowed")
+        assert f.exists(), "Nested staging file should not be quarantined"
+
+    def test_staging_no_bypass_warning(self, tmp_path):
+        """Staging path should NOT produce 'bypassed PreToolUse guard' warning."""
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "intent-decision.json"
+        f.write_text('{"intent": "create"}')
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        assert "bypassed PreToolUse guard" not in stderr, (
+            "Staging file should not trigger bypass warning"
+        )
+
+    def test_staging_triage_data_allowed(self, tmp_path):
+        """triage-data.json (most critical staging file) should exit(0)."""
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "triage-data.json"
+        f.write_text('{"categories": []}')
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        assert_allow(stdout, "triage-data.json should be allowed")
+        assert f.exists(), "triage-data.json should not be quarantined"
+
+    def test_non_staging_shows_bypass_warning(self, tmp_path):
+        """Non-staging memory file should show 'bypassed PreToolUse guard' warning."""
+        from conftest import make_decision_memory
+        mem_dir = tmp_path / ".claude" / "memory" / "decisions"
+        mem_dir.mkdir(parents=True)
+        f = mem_dir / "test-decision.json"
+        f.write_text(json.dumps(make_decision_memory()))
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        assert "bypassed PreToolUse guard" in stderr, (
+            "Non-staging memory file should trigger bypass warning"
+        )
+
+
+# ============================================================
+# Phase 2: Security Tests (TruePositives)
+# ============================================================
+
+# ============================================================
+# Phase 2+: Near-miss regression tests (advisory fix)
+# ============================================================
+
+class TestStagingNearMiss:
+    """Near-miss paths that should NOT be exempted by staging exclusion."""
+
+    def test_staging_as_file_not_exempted(self, tmp_path):
+        """.staging as a FILE (not directory) should not be exempted."""
+        mem_dir = tmp_path / ".claude" / "memory"
+        mem_dir.mkdir(parents=True)
+        # Create .staging as a regular file, not a directory
+        f = mem_dir / ".staging"
+        f.write_text("this is a file named .staging")
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        # .staging has no trailing slash in resolved path → marker doesn't match
+        # Also not .json → non-JSON deny fires
+        assert_deny(stdout, ".staging as file should be denied (non-JSON)")
+
+    def test_stagingfoo_not_exempted(self, tmp_path):
+        """.stagingfoo/ should not be exempted (prefix collision guard)."""
+        bad_dir = tmp_path / ".claude" / "memory" / ".stagingfoo"
+        bad_dir.mkdir(parents=True)
+        f = bad_dir / "evil.json"
+        f.write_text(json.dumps({"title": "evil", "category": "decision"}))
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        # .stagingfoo/ does NOT match /.claude/memory/.staging/ marker
+        quarantined = list(bad_dir.glob("evil.json.invalid.*"))
+        has_deny = stdout and "deny" in stdout
+        assert len(quarantined) >= 1 or has_deny, (
+            ".stagingfoo/ should not be exempted by staging exclusion"
+        )
+
+    def test_staging_at_wrong_level_not_exempted(self, tmp_path):
+        """decisions/.staging/file.json should not be exempted."""
+        wrong_dir = tmp_path / ".claude" / "memory" / "decisions" / ".staging"
+        wrong_dir.mkdir(parents=True)
+        f = wrong_dir / "file.json"
+        f.write_text(json.dumps({"title": "wrong", "category": "decision"}))
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        # Path is /.claude/memory/decisions/.staging/file.json
+        # Marker is /.claude/memory/.staging/ — different position
+        quarantined = list(wrong_dir.glob("file.json.invalid.*"))
+        has_deny = stdout and "deny" in stdout
+        assert len(quarantined) >= 1 or has_deny, (
+            ".staging/ at wrong nesting level should not be exempted"
+        )
+
+
+class TestStagingHardLink:
+    """Hard-link detection in staging exclusion."""
+
+    def test_hardlinked_staging_file_not_exempted(self, tmp_path):
+        """A hard-linked file in .staging/ should NOT be exempted (nlink > 1)."""
+        decisions_dir = tmp_path / ".claude" / "memory" / "decisions"
+        decisions_dir.mkdir(parents=True)
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+
+        # Create a real memory file (invalid, will be quarantined)
+        real_file = decisions_dir / "real.json"
+        real_file.write_text(json.dumps({"title": "real", "category": "decision"}))
+
+        # Hard-link it into .staging/
+        hardlink = staging_dir / "real.json"
+        os.link(str(real_file), str(hardlink))
+
+        # Verify hard link was created (nlink == 2)
+        assert os.stat(str(hardlink)).st_nlink == 2
+
+        stdout, stderr, rc = run_validate_hook(str(hardlink))
+        assert rc == 0
+        # Should NOT be exempted — hard link detected
+        assert "unexpected nlink" in stderr, (
+            "Hard-linked staging file should trigger nlink warning"
+        )
+
+    def test_normal_staging_file_exempted(self, tmp_path):
+        """A normal staging file (nlink == 1) should be exempted."""
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "intent.json"
+        f.write_text('{"intent": "create"}')
+
+        # Verify normal file (nlink == 1)
+        assert os.stat(str(f)).st_nlink == 1
+
+        stdout, stderr, rc = run_validate_hook(str(f))
+        assert rc == 0
+        assert_allow(stdout, "normal staging file (nlink=1) should be exempted")
+        assert "unexpected nlink" not in stderr
+
+
+class TestStagingSecurity:
+    """Security: staging exclusion must not bypass real validation."""
+
+    def test_staging_traversal_blocked(self, tmp_path):
+        """Path .staging/../decisions/evil.json should resolve and be validated."""
+        # Create the actual target directory that traversal resolves to
+        decisions_dir = tmp_path / ".claude" / "memory" / "decisions"
+        decisions_dir.mkdir(parents=True)
+        evil_file = decisions_dir / "evil.json"
+        evil_file.write_text(json.dumps({"title": "evil", "category": "decision"}))
+
+        # Also create .staging/ so the path is plausible
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+
+        # Path traversal: .staging/../decisions/evil.json -> decisions/evil.json
+        traversal_path = str(staging_dir / ".." / "decisions" / "evil.json")
+        stdout, stderr, rc = run_validate_hook(traversal_path)
+        assert rc == 0
+        # Should be quarantined or denied (not exempted via staging)
+        quarantined = list(decisions_dir.glob("evil.json.invalid.*"))
+        has_deny = stdout and "deny" in stdout
+        assert len(quarantined) >= 1 or has_deny, (
+            "Traversal path should NOT be exempted by staging exclusion"
+        )
+
+    def test_non_staging_memory_still_validated(self, tmp_path):
+        """Invalid memory file outside .staging/ should still be quarantined."""
+        mem_dir = tmp_path / ".claude" / "memory" / "decisions"
+        mem_dir.mkdir(parents=True)
+        bad_file = mem_dir / "bad.json"
+        bad_file.write_text(json.dumps({"title": "bad", "category": "decision"}))
+
+        stdout, stderr, rc = run_validate_hook(str(bad_file))
+        assert rc == 0
+        quarantined = list(mem_dir.glob("bad.json.invalid.*"))
+        has_deny = stdout and "deny" in stdout
+        assert len(quarantined) >= 1 or has_deny, (
+            "Non-staging invalid file should be quarantined"
+        )
+
+
+# ============================================================
+# Phase 2: Cross-Hook Parity Tests
+# ============================================================
+
+class TestCrossHookParity:
+    """Pre/PostToolUse hooks must agree on staging and config exemptions."""
+
+    def test_parity_staging_both_hooks_allow(self, tmp_path):
+        """Both PreToolUse and PostToolUse must allow .staging/ files."""
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "intent-decision.json"
+        f.write_text('{"intent": "create"}')
+        path = str(f)
+
+        # PostToolUse (validate hook)
+        post_stdout, _, post_rc = run_validate_hook(path)
+        assert post_rc == 0
+        assert_allow(post_stdout, "PostToolUse should allow staging")
+
+        # PreToolUse (write guard)
+        pre_stdout, _, pre_rc = run_write_guard(path)
+        assert pre_rc == 0
+        assert_allow(pre_stdout, "PreToolUse should allow staging")
+
+    def test_parity_config_both_hooks_allow(self, tmp_path):
+        """Both PreToolUse and PostToolUse must allow memory-config.json."""
+        mem_dir = tmp_path / ".claude" / "memory"
+        mem_dir.mkdir(parents=True)
+        config_file = mem_dir / "memory-config.json"
+        config_file.write_text(json.dumps({"retrieval": {"enabled": True}}))
+        path = str(config_file)
+
+        # PostToolUse (validate hook)
+        post_stdout, _, post_rc = run_validate_hook(path)
+        assert post_rc == 0
+        assert_allow(post_stdout, "PostToolUse should allow config")
+
+        # PreToolUse (write guard)
+        pre_stdout, _, pre_rc = run_write_guard(path)
+        assert pre_rc == 0
+        assert_allow(pre_stdout, "PreToolUse should allow config")

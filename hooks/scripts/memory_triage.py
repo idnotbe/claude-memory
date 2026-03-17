@@ -685,6 +685,10 @@ CONTEXT_WINDOW_LINES = 10
 # Maximum context file size in bytes (prevents oversized subagent prompts)
 MAX_CONTEXT_FILE_BYTES = 50_000  # 50 KB
 
+# Session summary transcript excerpts (head = opening goals, tail = final state)
+SESSION_SUMMARY_HEAD_LINES = 80
+SESSION_SUMMARY_TAIL_LINES = 200
+
 
 def _find_match_line_indices(lines: list[str], category: str) -> list[int]:
     """Find line indices where primary patterns match for a category."""
@@ -791,6 +795,25 @@ def write_context_files(
                 parts.append(f"  Tool uses: {metrics.get('tool_uses', 0)}")
                 parts.append(f"  Distinct tools: {metrics.get('distinct_tools', 0)}")
                 parts.append(f"  Exchanges: {metrics.get('exchanges', 0)}")
+                # Transcript excerpts for session summary context
+                total = len(lines)
+                # Avoid boundary flip: "280 lines\n".split("\n") → 281 elements
+                if total > 1 and lines[-1] == '':
+                    total -= 1
+                if total > 0 and text.strip():
+                    parts.append("")
+                    if total <= SESSION_SUMMARY_HEAD_LINES + SESSION_SUMMARY_TAIL_LINES:
+                        parts.append("Transcript (full):")
+                        parts.append("")
+                        parts.append("\n".join(lines))
+                    else:
+                        parts.append("Transcript (opening excerpt):")
+                        parts.append("")
+                        parts.append("\n".join(lines[:SESSION_SUMMARY_HEAD_LINES]))
+                        parts.append("\n---\n")
+                        parts.append("Transcript (closing excerpt):")
+                        parts.append("")
+                        parts.append("\n".join(lines[-SESSION_SUMMARY_TAIL_LINES:]))
             else:
                 # Text-based category: include generous context excerpts
                 match_indices = _find_match_line_indices(lines, category)

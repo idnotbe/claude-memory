@@ -1901,3 +1901,147 @@ class TestRunTriageWritesTriageDataFile:
         # Should fall back to inline triage_data
         assert "<triage_data>" in reason
         assert "<triage_data_file>" not in reason
+
+
+# ============================================================
+# Phase 4: Session summary transcript excerpt tests
+# ============================================================
+
+
+class TestSessionSummaryTranscriptExcerpt:
+    """Tests for transcript head/tail excerpts in session_summary context files."""
+
+    def test_long_transcript_has_head_and_tail(self, tmp_path):
+        """Long transcript (>280 lines) should produce head+tail excerpts."""
+        lines = [f"Line {i}: conversation content here" for i in range(400)]
+        text = "\n".join(lines)
+        metrics = {"tool_uses": 10, "distinct_tools": 3, "exchanges": 20}
+        results = [
+            {"category": "SESSION_SUMMARY", "score": 0.80, "snippets": ["10 tool uses"]},
+        ]
+
+        context_paths = write_context_files(
+            text, metrics, results, cwd=str(tmp_path),
+        )
+
+        content = Path(context_paths["session_summary"]).read_text(encoding="utf-8")
+        assert "Transcript (opening excerpt):" in content
+        assert "Transcript (closing excerpt):" in content
+        assert "Line 0:" in content
+        assert "Line 79:" in content
+        assert "Line 399:" in content
+        assert "Transcript (full):" not in content
+
+    def test_short_transcript_has_full(self, tmp_path):
+        """Short transcript (<280 lines) should produce full transcript."""
+        lines = [f"Line {i}: short conversation" for i in range(100)]
+        text = "\n".join(lines)
+        metrics = {"tool_uses": 5, "distinct_tools": 2, "exchanges": 10}
+        results = [
+            {"category": "SESSION_SUMMARY", "score": 0.70, "snippets": ["5 tool uses"]},
+        ]
+
+        context_paths = write_context_files(
+            text, metrics, results, cwd=str(tmp_path),
+        )
+
+        content = Path(context_paths["session_summary"]).read_text(encoding="utf-8")
+        assert "Transcript (full):" in content
+        assert "Line 0:" in content
+        assert "Line 99:" in content
+        assert "Transcript (opening excerpt):" not in content
+
+    def test_boundary_transcript_exact_280_lines(self, tmp_path):
+        """Exactly 280 lines (80+200) should use full mode."""
+        lines = [f"Line {i}" for i in range(280)]
+        text = "\n".join(lines)
+        metrics = {"tool_uses": 5, "distinct_tools": 2, "exchanges": 10}
+        results = [
+            {"category": "SESSION_SUMMARY", "score": 0.70, "snippets": []},
+        ]
+
+        context_paths = write_context_files(
+            text, metrics, results, cwd=str(tmp_path),
+        )
+
+        content = Path(context_paths["session_summary"]).read_text(encoding="utf-8")
+        assert "Transcript (full):" in content
+
+    def test_trailing_newline_280_lines_uses_full(self, tmp_path):
+        """280 content lines + trailing newline should still use full mode."""
+        lines = [f"Line {i}" for i in range(280)]
+        text = "\n".join(lines) + "\n"  # trailing newline
+        metrics = {"tool_uses": 5, "distinct_tools": 2, "exchanges": 10}
+        results = [
+            {"category": "SESSION_SUMMARY", "score": 0.70, "snippets": []},
+        ]
+
+        context_paths = write_context_files(
+            text, metrics, results, cwd=str(tmp_path),
+        )
+
+        content = Path(context_paths["session_summary"]).read_text(encoding="utf-8")
+        assert "Transcript (full):" in content, (
+            "280 lines + trailing newline should use full mode, not head/tail"
+        )
+        assert "Transcript (opening excerpt):" not in content
+
+    def test_empty_transcript_no_excerpt(self, tmp_path):
+        """Empty transcript should not produce any transcript section."""
+        text = ""
+        metrics = {"tool_uses": 5, "distinct_tools": 2, "exchanges": 10}
+        results = [
+            {"category": "SESSION_SUMMARY", "score": 0.70, "snippets": []},
+        ]
+
+        context_paths = write_context_files(
+            text, metrics, results, cwd=str(tmp_path),
+        )
+
+        content = Path(context_paths["session_summary"]).read_text(encoding="utf-8")
+        assert "Activity Metrics:" in content
+        assert "Transcript (full):" not in content
+        assert "Transcript (opening excerpt):" not in content
+
+    def test_50kb_cap_still_works(self, tmp_path):
+        """Long transcript should be truncated at 50KB cap."""
+        # Each selected line must be ~180 bytes so 280 selected lines > 50KB
+        # (head 80 + tail 200 = 280 lines * 180 bytes ≈ 50.4KB + header)
+        lines = [f"Line {i}: {'x' * 170}" for i in range(600)]
+        text = "\n".join(lines)
+        metrics = {"tool_uses": 10, "distinct_tools": 3, "exchanges": 20}
+        results = [
+            {"category": "SESSION_SUMMARY", "score": 0.80, "snippets": []},
+        ]
+
+        context_paths = write_context_files(
+            text, metrics, results, cwd=str(tmp_path),
+        )
+
+        content_bytes = Path(context_paths["session_summary"]).read_bytes()
+        content = content_bytes.decode("utf-8", errors="ignore")
+        # Should be near 50KB cap (with truncation suffix)
+        assert len(content_bytes) <= 51_000
+        # Truncation message should be present (proves truncation actually ran)
+        assert "[Truncated:" in content, "Truncation should have been triggered"
+        # Tag integrity: closing tag must still be present after truncation
+        assert "</transcript_data>" in content, (
+            "Closing </transcript_data> tag must survive truncation"
+        )
+
+    def test_other_categories_unaffected(self, tmp_path):
+        """Non-session categories should still use keyword-matched excerpts."""
+        text = "We decided to use PostgreSQL because of JSONB support."
+        metrics = {"tool_uses": 5, "distinct_tools": 2, "exchanges": 10}
+        results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PostgreSQL"]},
+        ]
+
+        context_paths = write_context_files(
+            text, metrics, results, cwd=str(tmp_path),
+        )
+
+        content = Path(context_paths["decision"]).read_text(encoding="utf-8")
+        assert "Relevant transcript excerpts:" in content
+        assert "Transcript (opening excerpt):" not in content
+        assert "Transcript (full):" not in content

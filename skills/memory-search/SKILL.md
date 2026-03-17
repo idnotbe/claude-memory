@@ -45,7 +45,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_search_engine.py" \
 | Flag | Description |
 |------|-------------|
 | `--query '<terms>'` | Search terms (required). Supports multiple words. |
-| `--root <path>` | Memory root directory (default: `.claude/memory`) |
+| `--root <path>` | Memory root directory (required, typically `.claude/memory`) |
 | `--mode search` | Use full-body search mode (reads all JSON files) |
 | `--include-retired` | Also search retired and archived memories |
 | `--max-results N` | Limit number of results (default: 10) |

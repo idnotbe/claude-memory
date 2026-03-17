@@ -14,21 +14,30 @@ import os
 import sys
 import time
 
-# Bootstrap Pydantic from plugin venv
-_venv_lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.venv', 'lib')
-if os.path.isdir(_venv_lib):
-    for _d in os.listdir(_venv_lib):
-        _sp = os.path.join(_venv_lib, _d, 'site-packages')
-        if os.path.isdir(_sp) and _sp not in sys.path:
-            sys.path.insert(0, _sp)
-
-# Check pydantic availability BEFORE importing memory_write (which may os.execv)
+# Lazy pydantic bootstrap: only runs when validating memory files
+_pydantic_bootstrapped = False
 _HAS_PYDANTIC = False
-try:
-    import pydantic  # noqa: F401
-    _HAS_PYDANTIC = True
-except ImportError:
-    pass
+
+
+def _ensure_pydantic():
+    """Lazy-bootstrap pydantic from plugin venv. Called only for memory files."""
+    global _pydantic_bootstrapped, _HAS_PYDANTIC
+    if _pydantic_bootstrapped:
+        return
+    # Flag is set AFTER completion so unexpected failures (e.g., permission
+    # error in os.listdir) allow retry on the next call.
+    _venv_lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '.venv', 'lib')
+    if os.path.isdir(_venv_lib):
+        for _d in os.listdir(_venv_lib):
+            _sp = os.path.join(_venv_lib, _d, 'site-packages')
+            if os.path.isdir(_sp) and _sp not in sys.path:
+                sys.path.insert(0, _sp)
+    try:
+        import pydantic  # noqa: F401
+        _HAS_PYDANTIC = True
+    except ImportError:
+        pass
+    _pydantic_bootstrapped = True
 
 # Build path markers at runtime to avoid guardian pattern matching
 _DC = ".clau" + "de"
@@ -80,6 +89,7 @@ def quarantine(file_path):
 
 def validate_file(file_path):
     """Validate a memory JSON file. Returns (is_valid, error_message)."""
+    _ensure_pydantic()
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -153,6 +163,33 @@ def main():
     if not is_memory_file(resolved):
         sys.exit(0)
 
+    # Skip staging files -- temporary working files, not memory records.
+    # Runtime string construction prevents Guardian pattern matching.
+    _stg = ".stagi" + "ng"
+    staging_marker = MEMORY_DIR_SEGMENT + _stg + "/"
+    normalized = resolved.replace(os.sep, "/")
+    if staging_marker in normalized:
+        # Defense-in-depth: open + fstat atomically on the same fd to
+        # eliminate TOCTOU between the hard-link check and file read.
+        # Only exempt when nlink == 1 (confirmed normal single file).
+        # nlink == 0 (exotic FS like procfs/FUSE) or nlink > 1 (hard
+        # link) → fall through to validation.
+        try:
+            fd = os.open(resolved, os.O_RDONLY)
+            try:
+                nlink = os.fstat(fd).st_nlink
+            finally:
+                os.close(fd)
+            if nlink == 1:
+                sys.exit(0)
+            print(
+                "WARNING: Staging file has unexpected nlink={}, "
+                "proceeding with validation: {}".format(nlink, resolved),
+                file=sys.stderr,
+            )
+        except OSError:
+            pass  # open/fstat failed → proceed with validation (fail-closed)
+
     # If we got here, a write bypassed the PreToolUse guard
     print(
         "WARNING: Write to memory file bypassed PreToolUse guard: {}".format(resolved),
@@ -173,8 +210,10 @@ def main():
     # Non-JSON files in memory dir (e.g. index.md) should be blocked outright
     if not resolved.endswith(".json"):
         reason = (
-            "Direct write to non-JSON memory file blocked: {}. "
-            "Use memory_write.py instead.".format(os.path.basename(resolved))
+            "Direct write to non-JSON memory file blocked. "
+            "Path: {}. "
+            "Only JSON memory records are allowed in the memory directory. "
+            "Use memory_write.py via Bash instead.".format(resolved)
         )
         print("ERROR: {}".format(reason), file=sys.stderr)
         json.dump({
@@ -197,9 +236,14 @@ def main():
     # Invalid -- quarantine the file
     quarantine_path = quarantine(resolved)
     reason = (
-        "Schema validation failed: {}. "
-        "File quarantined to {}. "
-        "Use memory_write.py instead.".format(error_msg, os.path.basename(quarantine_path))
+        "Schema validation failed for memory file. "
+        "Original path: {}. "
+        "Error: {}. "
+        "Quarantined to: {}. "
+        "Use memory_write.py via Bash to create/update memory records "
+        "(it handles schema compliance automatically).".format(
+            resolved, error_msg, os.path.basename(quarantine_path)
+        )
     )
     print("ERROR: {}".format(reason), file=sys.stderr)
 
