@@ -40,11 +40,12 @@ from memory_search_engine import (  # noqa: E402
 
 # Lazy import: logging module may not exist during partial deployments
 try:
-    from memory_logger import emit_event, get_session_id, parse_logging_config
+    from memory_logger import emit_event, emit_error, get_session_id, parse_logging_config
 except (ImportError, SyntaxError) as e:
     if isinstance(e, ImportError) and getattr(e, 'name', None) != 'memory_logger':
         raise  # Transitive dependency failure -- fail-fast
     def emit_event(*args, **kwargs): pass
+    def emit_error(*args, **kwargs): pass
     def get_session_id(*args, **kwargs): return ""
     def parse_logging_config(*args, **kwargs): return {"enabled": False, "level": "info", "retention_days": 14}
 
@@ -390,16 +391,24 @@ def _output_results(top: list[dict], category_descriptions: dict[str, str],
 
 
 def main():
+    _start_time = time.perf_counter()
+
     # Read hook input from stdin
     try:
         raw = sys.stdin.read()
         if not raw.strip():
             sys.exit(0)
         hook_input = json.loads(raw)
-    except (json.JSONDecodeError, EOFError):
+    except (json.JSONDecodeError, EOFError) as exc:
+        _mr = str(Path(os.getcwd()) / ".claude" / "memory")
+        emit_error("retrieval.error", exc,
+                   hook="UserPromptSubmit", script="memory_retrieve.py",
+                   duration_ms=round((time.perf_counter() - _start_time) * 1000, 2),
+                   data={"phase": "stdin_parse"},
+                   memory_root=_mr)
         sys.exit(0)
 
-    user_prompt = hook_input.get("user_prompt", "")
+    user_prompt = hook_input.get("prompt") or hook_input.get("user_prompt") or ""
     cwd = hook_input.get("cwd", os.getcwd())
 
     # Extract session_id for logging correlation
@@ -416,8 +425,12 @@ def main():
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 _raw_config = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass  # Fail-open: proceed with empty config (logging disabled by default)
+        except (json.JSONDecodeError, OSError) as exc:
+            emit_error("retrieval.error", exc,
+                       hook="UserPromptSubmit", script="memory_retrieve.py",
+                       data={"phase": "config_parse"},
+                       memory_root=str(memory_root))
+            # Fail-open: proceed with empty config (logging disabled by default)
 
     # --- Block 1: Save confirmation from previous session (project-local path) ---
     _just_saved = False  # Flag for Block 2 orphan suppression
@@ -487,14 +500,19 @@ def main():
                 print(f"<memory-note>Pending memory save: {_cat_count} "
                       f"{'category' if _cat_count == 1 else 'categories'} "
                       f"from last session. Run /memory:save to re-triage and save.</memory-note>")
-    except Exception:
-        pass  # Fail-open
+    except Exception as exc:
+        emit_error("retrieval.error", exc,
+                   hook="UserPromptSubmit", script="memory_retrieve.py",
+                   session_id=_session_id,
+                   data={"phase": "pending_notification"},
+                   memory_root=str(memory_root), config=_raw_config)
 
     # Skip very short prompts (greetings, acks)
     if len(user_prompt.strip()) < 10:
         emit_event("retrieval.skip", {"reason": "short_prompt", "prompt_length": len(user_prompt.strip())},
                    hook="UserPromptSubmit", script="memory_retrieve.py",
                    session_id=_session_id,
+                   duration_ms=round((time.perf_counter() - _start_time) * 1000, 2),
                    memory_root=str(memory_root),
                    config=_raw_config)
         sys.exit(0)

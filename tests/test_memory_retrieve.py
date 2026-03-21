@@ -216,7 +216,7 @@ class TestRetrieveIntegration:
     def test_short_prompt_skipped(self, tmp_path):
         """Prompts < 10 chars are skipped."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        hook_input = {"user_prompt": "hi", "cwd": str(proj)}
+        hook_input = {"prompt": "hi", "cwd": str(proj)}
         stdout, rc = self._run_retrieve(hook_input)
         assert rc == 0
         assert stdout.strip() == ""
@@ -226,7 +226,7 @@ class TestRetrieveIntegration:
         mem = make_decision_memory()
         proj = self._setup_memory_project(tmp_path, [mem])
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -239,7 +239,7 @@ class TestRetrieveIntegration:
         mem = make_decision_memory()
         proj = self._setup_memory_project(tmp_path, [mem])
         hook_input = {
-            "user_prompt": "What is the weather forecast for tomorrow's meeting?",
+            "prompt": "What is the weather forecast for tomorrow's meeting?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -264,7 +264,7 @@ class TestRetrieveIntegration:
         )
         proj = self._setup_memory_project(tmp_path, [decision, tech_debt])
         hook_input = {
-            "user_prompt": "What is the database connection strategy?",
+            "prompt": "What is the database connection strategy?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -295,7 +295,7 @@ class TestRetrieveIntegration:
         old["updated_at"] = "2025-01-01T00:00:00Z"
         proj = self._setup_memory_project(tmp_path, [recent, old])
         hook_input = {
-            "user_prompt": "What about the database migration work?",
+            "prompt": "What about the database migration work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -332,7 +332,7 @@ class TestRetrieveIntegration:
             f"- [DECISION] {mem['title']} -> .claude/memory/decisions/{mem['id']}.json\n"
         )
         hook_input = {
-            "user_prompt": "JWT authentication implementation details",
+            "prompt": "JWT authentication implementation details",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -462,7 +462,7 @@ class TestRetrievalOutputIncludesDescriptions:
         }
         proj = self._setup_memory_project_with_config(tmp_path, [mem], config_data)
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -483,7 +483,7 @@ class TestRetrievalOutputIncludesDescriptions:
         }
         proj = self._setup_memory_project_with_config(tmp_path, [mem], config_data)
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -967,7 +967,7 @@ class TestConfigErrorPaths:
             )
         result = subprocess.run(
             [PYTHON, RETRIEVE_SCRIPT],
-            input=json.dumps({"user_prompt": prompt, "cwd": str(proj)}),
+            input=json.dumps({"prompt": prompt, "cwd": str(proj)}),
             capture_output=True, text=True, timeout=10,
         )
         return result.stdout, result.returncode
@@ -1071,7 +1071,7 @@ class TestSaveConfirmation:
         }
         (staging / "last-save-result.json").write_text(json.dumps(save_result))
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1095,7 +1095,7 @@ class TestSaveConfirmation:
         result_path = staging / "last-save-result.json"
         result_path.write_text(json.dumps(save_result))
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         self._run_retrieve(hook_input)
@@ -1116,7 +1116,7 @@ class TestSaveConfirmation:
         result_path = staging / "last-save-result.json"
         result_path.write_text(json.dumps(save_result))
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1132,7 +1132,7 @@ class TestSaveConfirmation:
         staging.mkdir(parents=True, exist_ok=True)
         (staging / "last-save-result.json").write_text("{bad json")
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1153,7 +1153,7 @@ class TestSaveConfirmation:
         }
         (staging / "last-save-result.json").write_text(json.dumps(save_result))
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1165,7 +1165,7 @@ class TestSaveConfirmation:
         """No save result file produces no confirmation output."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1185,7 +1185,7 @@ class TestSaveConfirmation:
         }
         (staging / "last-save-result.json").write_text(json.dumps(save_result))
         hook_input = {
-            "user_prompt": "hi",
+            "prompt": "hi",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1234,7 +1234,7 @@ class TestOrphanCrashDetection:
         old_time = time.time() - 600
         os.utime(triage_path, (old_time, old_time))
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1261,7 +1261,7 @@ class TestOrphanCrashDetection:
         old_time = time.time() - 600
         os.utime(triage_path, (old_time, old_time))
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1288,7 +1288,7 @@ class TestOrphanCrashDetection:
         # Create pending file -> save is in progress, not orphaned
         (staging / ".triage-pending.json").write_text(json.dumps({"categories": ["decision"]}))
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1308,7 +1308,7 @@ class TestOrphanCrashDetection:
         triage_path.write_text(json.dumps({"categories": ["decision"]}))
         # mtime is now (< 300 seconds), so not considered orphaned
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1323,7 +1323,7 @@ class TestOrphanCrashDetection:
         monkeypatch.setenv("HOME", str(fake_home))
         (fake_home / ".claude").mkdir()
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1344,7 +1344,7 @@ class TestOrphanCrashDetection:
         old_time = time.time() - 600
         os.utime(triage_path, (old_time, old_time))
         hook_input = {
-            "user_prompt": "hi",
+            "prompt": "hi",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1388,7 +1388,7 @@ class TestPendingSaveNotification:
         pending_data = {"categories": ["decision", "preference", "tech_debt"]}
         (staging / ".triage-pending.json").write_text(json.dumps(pending_data))
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1404,7 +1404,7 @@ class TestPendingSaveNotification:
         staging.mkdir(parents=True, exist_ok=True)
         (staging / ".triage-pending.json").write_text(json.dumps({"categories": ["decision"]}))
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1416,7 +1416,7 @@ class TestPendingSaveNotification:
         """No pending file produces no notification."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1431,7 +1431,7 @@ class TestPendingSaveNotification:
         pending_path = staging / ".triage-pending.json"
         pending_path.write_text(json.dumps({"categories": ["decision"]}))
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         self._run_retrieve(hook_input)
@@ -1444,7 +1444,7 @@ class TestPendingSaveNotification:
         staging.mkdir(parents=True, exist_ok=True)
         (staging / ".triage-pending.json").write_text("{bad json")
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1458,7 +1458,7 @@ class TestPendingSaveNotification:
         staging.mkdir(parents=True, exist_ok=True)
         (staging / ".triage-pending.json").write_text(json.dumps({"categories": ["decision"]}))
         hook_input = {
-            "user_prompt": "hi",
+            "prompt": "hi",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)
@@ -1472,7 +1472,7 @@ class TestPendingSaveNotification:
         staging.mkdir(parents=True, exist_ok=True)
         (staging / ".triage-pending.json").write_text(json.dumps({"categories": []}))
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, rc = self._run_retrieve(hook_input)

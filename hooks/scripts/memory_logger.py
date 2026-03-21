@@ -338,3 +338,41 @@ def emit_event(
 
     except Exception:
         pass  # Fail-open: never block hook execution
+
+
+def emit_error(
+    event_type,    # type: str
+    exc,           # type: Exception
+    *,
+    hook="",               # type: str
+    script="",             # type: str
+    session_id="",         # type: str
+    duration_ms=None,      # type: float
+    data=None,             # type: dict
+    memory_root="",        # type: str
+    config=None,           # type: dict
+):
+    # type: (...) -> None
+    """Convenience wrapper: emit an error-level event with structured error info.
+
+    Extracts error_type and message from the exception. Fail-open like emit_event.
+    """
+    try:
+        error_info = {
+            "error_type": type(exc).__name__,
+            "message": str(exc)[:500],  # Truncate to prevent oversized log lines
+        }
+        emit_event(
+            event_type,
+            data if isinstance(data, dict) else {},
+            level="error",
+            hook=hook,
+            script=script,
+            session_id=session_id,
+            duration_ms=duration_ms,
+            error=error_info,
+            memory_root=memory_root,
+            config=config,
+        )
+    except Exception:
+        pass  # Fail-open

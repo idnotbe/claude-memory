@@ -845,61 +845,6 @@ class TestParseTranscriptFiltering:
 class TestScoreLogging:
     """Tests for the score logging improvement."""
 
-    def test_score_log_written(self, tmp_path):
-        """After triage, .triage-scores.log should be written to staging dir with valid JSON."""
-        # Create a transcript that triggers SESSION_SUMMARY
-        messages = []
-        for i in range(20):
-            messages.append(_user_msg(f"Message {i}"))
-            messages.append(_assistant_msg([
-                {"type": "text", "text": f"Response {i}"},
-                {"type": "tool_use", "name": f"Tool{i % 5}", "input": {}},
-            ]))
-        transcript_path = _write_transcript(tmp_path, messages)
-
-        proj = tmp_path / "proj"
-        claude_dir = proj / ".claude" / "memory"
-        claude_dir.mkdir(parents=True)
-        (claude_dir / "memory-config.json").write_text(
-            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
-        )
-        hook_input = json.dumps({
-            "transcript_path": transcript_path,
-            "cwd": str(proj),
-        })
-
-        # Score log now goes to {cwd}/.claude/memory/.staging/.triage-scores.log
-        log_path = str(proj / ".claude" / "memory" / ".staging" / ".triage-scores.log")
-        # Remove old log file if it exists to get a clean state
-        try:
-            os.remove(log_path)
-        except OSError:
-            pass
-
-        captured_out = io.StringIO()
-        with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
-             mock.patch("sys.stdout", captured_out), \
-             mock.patch("memory_triage.check_stop_flag", return_value=False):
-            _run_triage()
-
-        # Verify log file was written
-        assert os.path.isfile(log_path), "Score log file should exist in staging dir"
-        with open(log_path, "r", encoding="utf-8") as f:
-            last_line = None
-            for line in f:
-                if line.strip():
-                    last_line = line.strip()
-            assert last_line is not None, "Log file should have at least one line"
-
-        log_entry = json.loads(last_line)
-        assert "ts" in log_entry
-        assert "cwd" in log_entry
-        assert "text_len" in log_entry
-        assert "exchanges" in log_entry
-        assert "tool_uses" in log_entry
-        assert "triggered" in log_entry
-        assert isinstance(log_entry["triggered"], list)
-
     def test_score_log_no_stdout_interference(self, tmp_path):
         """Score logging should not produce any output on stdout."""
         messages = [
@@ -1272,44 +1217,6 @@ class TestStagingPaths:
         stat_result = os.stat(context_paths["decision"])
         perms = stat_result.st_mode & 0o777
         assert perms == 0o600, f"Expected 0o600 permissions, got {oct(perms)}"
-
-    def test_score_log_in_staging_dir(self, tmp_path):
-        """Score log should be written to staging dir when cwd is provided."""
-        messages = []
-        for i in range(20):
-            messages.append(_user_msg(f"User message {i}"))
-            messages.append(_assistant_msg([
-                {"type": "text", "text": f"Response {i}"},
-                {"type": "tool_use", "name": f"Tool{i % 5}", "input": {}},
-            ]))
-        transcript_path = _write_transcript(tmp_path, messages)
-
-        proj = tmp_path / "proj"
-        claude_dir = proj / ".claude" / "memory"
-        claude_dir.mkdir(parents=True)
-        (claude_dir / "memory-config.json").write_text(
-            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
-        )
-        hook_input = json.dumps({
-            "transcript_path": transcript_path,
-            "cwd": str(proj),
-        })
-
-        captured_out = io.StringIO()
-        with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
-             mock.patch("sys.stdout", captured_out), \
-             mock.patch("memory_triage.check_stop_flag", return_value=False):
-            _run_triage()
-
-        log_path = proj / ".claude" / "memory" / ".staging" / ".triage-scores.log"
-        assert log_path.is_file(), "Score log should be in staging dir"
-
-        with open(str(log_path), "r", encoding="utf-8") as f:
-            lines = [l.strip() for l in f if l.strip()]
-        assert len(lines) >= 1
-        log_entry = json.loads(lines[-1])
-        assert "ts" in log_entry
-        assert "triggered" in log_entry
 
 
 # ---------------------------------------------------------------------------

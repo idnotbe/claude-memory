@@ -1639,7 +1639,7 @@ class TestEndToEndLogging:
         )
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-e2e-test-abc.json",
         }
@@ -1722,7 +1722,7 @@ class TestEndToEndLogging:
         proj, mem_root = _setup_e2e_project(tmp_path, [decision])
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-results-check.json",
         }
@@ -1757,7 +1757,7 @@ class TestEndToEndLogging:
         proj, mem_root = _setup_e2e_project(tmp_path, [decision])
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-inject-check.json",
         }
@@ -1795,7 +1795,7 @@ class TestEndToEndLogging:
         proj, mem_root = _setup_e2e_project(tmp_path, [decision])
 
         hook_input = {
-            "user_prompt": "hi",
+            "prompt": "hi",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-skip-test.json",
         }
@@ -1836,7 +1836,7 @@ class TestEndToEndLogging:
         proj, mem_root = _setup_e2e_project(tmp_path, [decision])
 
         hook_input = {
-            "user_prompt": "  ok  ",
+            "prompt": "  ok  ",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-empty-skip.json",
         }
@@ -1857,7 +1857,7 @@ class TestEndToEndLogging:
         proj, mem_root = _setup_e2e_project(tmp_path, [decision])
 
         hook_input = {
-            "user_prompt": "What is the weather forecast for tomorrow morning?",
+            "prompt": "What is the weather forecast for tomorrow morning?",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-no-match.json",
         }
@@ -1895,7 +1895,7 @@ class TestEndToEndLogging:
         )
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-disabled.json",
         }
@@ -1928,7 +1928,7 @@ class TestEndToEndLogging:
         )
 
         hook_input = {
-            "user_prompt": "How does JWT token authentication work in this project?",
+            "prompt": "How does JWT token authentication work in this project?",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-multi-match.json",
         }
@@ -1955,7 +1955,7 @@ class TestEndToEndLogging:
         proj, mem_root = _setup_e2e_project(tmp_path, [decision])
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-order-test.json",
         }
@@ -1992,7 +1992,7 @@ class TestEndToEndLogging:
         proj, mem_root = _setup_e2e_project(tmp_path, [decision])
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
             "transcript_path": "/tmp/transcript-duration-test.json",
         }

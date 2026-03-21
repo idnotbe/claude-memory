@@ -501,6 +501,7 @@ _STAGING_CLEANUP_PATTERNS = [
     "context-*.txt",
     "draft-*.json",
     "input-*.json",
+    "intent-*.json",
     "new-info-*.txt",
     ".triage-handled",
     ".triage-pending.json",

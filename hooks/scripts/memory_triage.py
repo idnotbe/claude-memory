@@ -16,7 +16,6 @@ No external dependencies (stdlib only).
 from __future__ import annotations
 
 import collections
-import datetime
 import json
 import math
 import os
@@ -29,11 +28,12 @@ from typing import Optional
 
 # Lazy import: logging module may not exist during partial deployments
 try:
-    from memory_logger import emit_event, get_session_id, parse_logging_config
+    from memory_logger import emit_event, emit_error, get_session_id, parse_logging_config
 except (ImportError, SyntaxError) as e:
     if isinstance(e, ImportError) and getattr(e, 'name', None) != 'memory_logger':
         raise  # Transitive dependency failure -- fail-fast
     def emit_event(*args, **kwargs): pass
+    def emit_error(*args, **kwargs): pass
     def get_session_id(*args, **kwargs): return ""
     def parse_logging_config(*args, **kwargs): return {"enabled": False, "level": "info", "retention_days": 14}
 
@@ -86,8 +86,15 @@ _WORD = r"\b"
 CATEGORY_PATTERNS: dict[str, dict] = {
     "DECISION": {
         "primary": [
+            # Original terms with negative lookbehind for common negation patterns
+            # to avoid false positives like "haven't decided", "never decided"
             re.compile(
-                rf"{_WORD}(decided|chose|selected|went\s+with|picked){_WORD}",
+                rf"(?<!not )(?<!never )(?<!n't ){_WORD}(decided|chose|selected|went\s+with|picked){_WORD}",
+                re.IGNORECASE,
+            ),
+            # Expanded: deliberate choice phrases (inherently affirmative)
+            re.compile(
+                rf"{_WORD}(let's\s+go\s+with|we\s+should\s+use|opting\s+for|switching\s+to|adopting|settled\s+on|going\s+with|architecture\s+decision|design\s+decision){_WORD}",
                 re.IGNORECASE,
             ),
         ],
@@ -162,8 +169,14 @@ CATEGORY_PATTERNS: dict[str, dict] = {
     },
     "PREFERENCE": {
         "primary": [
+            # Original preference signals
             re.compile(
                 rf"{_WORD}(always\s+use|prefer|convention|from\s+now\s+on|standard|never\s+use|established){_WORD}",
+                re.IGNORECASE,
+            ),
+            # Expanded: user habit/style phrases
+            re.compile(
+                rf"{_WORD}(default\s+to|stick\s+with|always\s+remember|my\s+style|keep\s+using|our\s+convention|I\s+like\s+to){_WORD}",
                 re.IGNORECASE,
             ),
         ],
@@ -1012,12 +1025,19 @@ def main() -> int:
         return _run_triage()
     except Exception as e:
         # Fail open: never trap the user on unexpected errors
+        _mr = str(Path(os.getcwd()) / ".claude" / "memory")
+        emit_error("triage.error", e,
+                   hook="Stop", script="memory_triage.py",
+                   data={"phase": "run_triage"},
+                   memory_root=_mr)
         print(f"[memory_triage] Error (fail-open): {e}", file=sys.stderr)
         return 0
 
 
 def _run_triage() -> int:
     """Internal triage logic, separated for testability."""
+    _triage_start = time.perf_counter()
+
     # 1. Read stdin JSON
     raw_input = read_stdin(timeout_seconds=2.0)
     if not raw_input.strip():
@@ -1097,43 +1117,8 @@ def _run_triage() -> int:
         "all_scores": all_scores,
     }, hook="Stop", script="memory_triage.py",
        session_id=_triage_session_id,
+       duration_ms=round((time.perf_counter() - _triage_start) * 1000, 2),
        memory_root=_memory_root_str, config=_triage_raw_config)
-
-    # LEGACY: remove after migration validation
-    try:
-        log_entry = {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "cwd": cwd,
-            "text_len": len(text),
-            "exchanges": metrics.get("exchanges", 0),
-            "tool_uses": metrics.get("tool_uses", 0),
-            "triggered": [
-                {"category": r["category"], "score": round(r["score"], 4)}
-                for r in results
-            ],
-        }
-        staging_log_dir = os.path.join(cwd, ".claude", "memory", ".staging")
-        try:
-            os.makedirs(staging_log_dir, exist_ok=True)
-            log_path = os.path.join(staging_log_dir, ".triage-scores.log")
-        except OSError:
-            log_path = "/tmp/.memory-triage-scores.log"
-        fd = os.open(
-            log_path,
-            os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW,
-            0o600,
-        )
-        try:
-            with os.fdopen(fd, "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_entry) + "\n")
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
-    except OSError:
-        pass  # LEGACY: Non-critical: fail silently
 
     # 8. Output decision
     if results:

@@ -285,7 +285,7 @@ class TestFTS5Fallback:
         result = subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "memory_retrieve.py")],
             input=__import__("json").dumps({
-                "user_prompt": "How does JWT authentication work?",
+                "prompt": "How does JWT authentication work?",
                 "cwd": str(proj),
             }),
             capture_output=True, text=True, timeout=10,

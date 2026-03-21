@@ -55,6 +55,11 @@ present, skip directly to Phase 0 -- the current triage data is fresh.
 
 ### Phase 0: Parse Triage Output
 
+**Step 0: Clean stale intent files.** Before processing triage data, remove leftover intent files from previous sessions to prevent stale data contamination. Only delete `intent-*.json` files (NOT `context-*.txt` or `triage-data.json` — those were just written by the triage hook for this session):
+```bash
+find .claude/memory/.staging -maxdepth 1 -name 'intent-*.json' -delete 2>/dev/null; echo "ok"
+```
+
 1. First try: Extract the file path from within `<triage_data_file>...</triage_data_file>` tags in the stop hook output. If present, read the JSON file at that path.
 2. Fallback: Extract inline `<triage_data>` JSON block (backwards compatibility).
 
@@ -263,16 +268,15 @@ Task(
   subagent_type: "general-purpose",
   prompt: "Execute these memory save commands in order.
 
-**IMPORTANT: Command Isolation**
-Run each command as a SEPARATE Bash tool call. Do NOT combine multiple
-commands into a single Bash call using heredocs, scripts, loops, or
-command chaining (&&, ;). Each numbered command below = one Bash tool call.
-Do NOT use heredoc (<<) in any Bash call that contains python3.
+**IMPORTANT: Minimal Console Output**
+Combine ALL numbered commands into a SINGLE Bash tool call using `;`
+separators. This minimizes console noise. Do NOT use heredoc (<<).
 
-For each command below (numbered AND cleanup/result commands), run it
-as its own Bash tool call. If a command fails, record the error and
-continue with the next. After ALL commands complete, run cleanup and
-result file commands.
+Example: `cmd1 ; cmd2 ; cmd3`
+
+If any command fails, the `;` separator ensures remaining commands
+still execute. After ALL commands complete, run cleanup and result
+file commands in the same or a second Bash call.
 
 Commands:
 1. <first memory_write.py command>
@@ -287,7 +291,7 @@ If ANY command failed, do NOT delete staging files (preserve for retry).
 Then write the result file (atomic, regardless of success/failure):
 python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result --staging-dir .claude/memory/.staging --result-json '{\"saved_at\": \"<ISO 8601 UTC>\", \"categories\": [\"<saved categories>\"], \"titles\": [\"<saved titles>\"], \"errors\": [<{\"category\": \"name\", \"error\": \"message\"} for each failure, or empty []>]}'
 
-Return a summary: which categories saved, which failed, any errors."
+Return ONLY a single-line summary like: 'Saved: session_summary (update), constraint (create)' — no extra text."
 )
 ```
 

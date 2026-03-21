@@ -121,7 +121,7 @@ class TestIssue1IndexRebuild:
         assert not (mem_root / "index.md").exists()
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -141,7 +141,7 @@ class TestIssue1IndexRebuild:
         mtime_before = index_path.stat().st_mtime
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         _run_retrieve(hook_input)
@@ -160,7 +160,7 @@ class TestIssue1IndexRebuild:
         # `if index_tool.exists()` should skip the rebuild.
         # This test verifies no crash occurs.
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -174,7 +174,7 @@ class TestIssue1IndexRebuild:
         # After fix, subprocess.run has timeout=10. Even if rebuild hangs,
         # TimeoutExpired should be caught (or subprocess finishes quickly).
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         # We use our own timeout to ensure retrieval completes within reason
@@ -187,7 +187,7 @@ class TestIssue1IndexRebuild:
         proj.mkdir()
         # No .claude/memory/ dir at all
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -372,7 +372,7 @@ class TestIssue3MaxInjectClamp:
         _write_config(mem_root, config)
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in the project?",
+            "prompt": "How does JWT authentication work in the project?",
             "cwd": str(proj),
         }
         return _run_retrieve(hook_input)
@@ -468,7 +468,7 @@ class TestIssue3MaxInjectClamp:
         # Do NOT write config file
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -732,7 +732,7 @@ class TestIssue5TitleSanitization:
         proj, mem_root = _setup_memory_project(tmp_path, [mem])
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in this project?",
+            "prompt": "How does JWT authentication work in this project?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -754,7 +754,7 @@ class TestIssue5TitleSanitization:
         proj, mem_root = _setup_memory_project(tmp_path, [mem])
 
         hook_input = {
-            "user_prompt": "How does the evil system work?",
+            "prompt": "How does the evil system work?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -771,7 +771,7 @@ class TestIssue5TitleSanitization:
         proj, mem_root = _setup_memory_project(tmp_path, [mem])
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work in the project?",
+            "prompt": "How does JWT authentication work in the project?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -841,7 +841,7 @@ class TestIssue5TitleSanitization:
         proj, mem_root = _setup_memory_project(tmp_path, [mem])
 
         hook_input = {
-            "user_prompt": "Tell me about the title memory context",
+            "prompt": "Tell me about the title memory context",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -857,7 +857,7 @@ class TestIssue5TitleSanitization:
         proj, mem_root = _setup_memory_project(tmp_path, [mem])
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
@@ -912,7 +912,7 @@ class TestCrossIssueInteractions:
         _write_config(mem_root, config)
 
         hook_input = {
-            "user_prompt": "How does JWT authentication work?",
+            "prompt": "How does JWT authentication work?",
             "cwd": str(proj),
         }
         stdout, stderr, rc = _run_retrieve(hook_input)
