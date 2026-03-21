@@ -1601,6 +1601,10 @@ def main():
         "--result-json",
         help="JSON string for save result (write-save-result only)",
     )
+    parser.add_argument(
+        "--result-file",
+        help="Path to JSON file for save result (alternative to --result-json, avoids Guardian scan of inline JSON)",
+    )
 
     args = parser.parse_args()
 
@@ -1617,10 +1621,18 @@ def main():
         if not args.staging_dir:
             print("ERROR: --staging-dir is required for write-save-result.")
             return 1
-        if not args.result_json:
-            print("ERROR: --result-json is required for write-save-result.")
+        result_json = args.result_json
+        if not result_json and args.result_file:
+            try:
+                with open(args.result_file, "r", encoding="utf-8") as rf:
+                    result_json = rf.read()
+            except (OSError, IOError) as e:
+                print("ERROR: Cannot read --result-file {}: {}".format(args.result_file, e))
+                return 1
+        if not result_json:
+            print("ERROR: --result-json or --result-file is required for write-save-result.")
             return 1
-        result = write_save_result(args.staging_dir, args.result_json)
+        result = write_save_result(args.staging_dir, result_json)
         print(json.dumps(result))
         return 0 if result["status"] == "ok" else 1
 

@@ -209,6 +209,42 @@ class TestTrueNegatives:
         )
         assert_allow(out, "Read tool")
 
+    def test_unlink_staging_allowed(self):
+        """unlink in .staging/ should be allowed (delete, not write)."""
+        out, rc = run_guard(
+            "Bash",
+            "unlink .claude/memory/.staging/test.json",
+        )
+        assert_allow(out, "unlink in staging")
+
+
+# ============================================================
+# Hardlink blocking (ln/link)
+# ============================================================
+
+class TestHardlinkBlocking:
+    """ln and link commands targeting .staging/ must be blocked."""
+
+    def test_ln_to_staging_denied(self):
+        out, rc = run_guard("Bash", "ln /tmp/target.json .claude/memory/.staging/hardlink.json")
+        assert_deny(out, "ln to staging")
+
+    def test_ln_force_to_staging_denied(self):
+        out, rc = run_guard("Bash", "ln -f /tmp/target.json .claude/memory/.staging/link.json")
+        assert_deny(out, "ln -f to staging")
+
+    def test_link_to_staging_denied(self):
+        out, rc = run_guard("Bash", "link /tmp/target.json .claude/memory/.staging/link.json")
+        assert_deny(out, "link to staging")
+
+    def test_ln_case_insensitive_denied(self):
+        out, rc = run_guard("Bash", "LN /tmp/target.json .claude/memory/.staging/link.json")
+        assert_deny(out, "LN uppercase to staging")
+
+    def test_ln_symlink_other_dir_allowed(self):
+        out, rc = run_guard("Bash", "ln -s /tmp/target /some/other/path")
+        assert_allow(out, "ln -s to other dir")
+
 
 # ============================================================
 # Edge cases

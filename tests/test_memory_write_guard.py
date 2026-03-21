@@ -1,6 +1,7 @@
 """Tests for memory_write_guard.py -- PreToolUse guard against direct writes."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,14 @@ def run_guard(hook_input):
         timeout=10,
     )
     return result.stdout, result.returncode
+
+
+def parse_decision(stdout):
+    """Parse the hook output and return permissionDecision or None."""
+    if not stdout.strip():
+        return None  # No output = abstain
+    output = json.loads(stdout)
+    return output.get("hookSpecificOutput", {}).get("permissionDecision")
 
 
 class TestWriteGuard:
@@ -228,3 +237,128 @@ class TestWriteGuard:
                 assert hook_output.get("permissionDecision") == "deny", (
                     f"File '{name}' was incorrectly allowed -- should be blocked"
                 )
+
+
+# ============================================================
+# Staging Auto-Approve Tests (Phase 1 popup fix)
+# ============================================================
+
+class TestStagingAutoApprove:
+    """Tests for the staging file auto-approve behavior."""
+
+    def test_staging_intent_json_emits_allow(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "intent-decision.json"
+        f.write_text('{"intent": "create"}')
+        hook_input = {"tool_input": {"file_path": str(f)}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) == "allow"
+
+    def test_staging_triage_data_emits_allow(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "triage-data.json"
+        f.write_text('{"categories": []}')
+        hook_input = {"tool_input": {"file_path": str(f)}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) == "allow"
+
+    def test_staging_last_save_result_emits_allow(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "last-save-result.json"
+        f.write_text('{"saved_at": "2026-01-01"}')
+        hook_input = {"tool_input": {"file_path": str(f)}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) == "allow"
+
+    def test_staging_context_txt_emits_allow(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "context-session.txt"
+        f.write_text("session notes")
+        hook_input = {"tool_input": {"file_path": str(f)}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) == "allow"
+
+    def test_staging_new_file_emits_allow(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        path = str(staging_dir / "intent-new.json")
+        hook_input = {"tool_input": {"file_path": path}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) == "allow"
+
+    def test_staging_unknown_filename_no_allow(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "evil.json"
+        f.write_text('{"evil": true}')
+        hook_input = {"tool_input": {"file_path": str(f)}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) != "allow"
+
+    def test_staging_wrong_extension_no_allow(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = staging_dir / "intent-evil.py"
+        f.write_text("print('evil')")
+        hook_input = {"tool_input": {"file_path": str(f)}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) != "allow"
+
+    def test_staging_hardlink_no_allow(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        original = other_dir / "target.json"
+        original.write_text('{"target": true}')
+        hardlink = staging_dir / "intent-evil.json"
+        os.link(str(original), str(hardlink))
+        assert os.stat(str(hardlink)).st_nlink == 2
+        hook_input = {"tool_input": {"file_path": str(hardlink)}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) != "allow"
+
+    def test_staging_traversal_denied(self, tmp_path):
+        decisions_dir = tmp_path / ".claude" / "memory" / "decisions"
+        decisions_dir.mkdir(parents=True)
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        f = decisions_dir / "evil.json"
+        f.write_text('{"evil": true}')
+        traversal_path = str(staging_dir / ".." / "decisions" / "evil.json")
+        hook_input = {"tool_input": {"file_path": traversal_path}}
+        stdout, rc = run_guard(hook_input)
+        assert rc == 0
+        assert parse_decision(stdout) == "deny"
+
+    def test_staging_all_known_filenames(self, tmp_path):
+        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
+        staging_dir.mkdir(parents=True)
+        known_files = [
+            "intent-decision.json", "input-session.json",
+            "draft-runbook.json", "context-constraint.txt",
+            "new-info-tech_debt.txt", "triage-data.json",
+            "candidate-preference.json", "last-save-result.json",
+            ".triage-pending.json",
+        ]
+        for fname in known_files:
+            f = staging_dir / fname
+            f.write_text("{}")
+            hook_input = {"tool_input": {"file_path": str(f)}}
+            stdout, rc = run_guard(hook_input)
+            assert rc == 0
+            assert parse_decision(stdout) == "allow", (
+                f"Known staging file {fname} should auto-approve"
+            )

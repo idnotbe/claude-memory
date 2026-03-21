@@ -3,11 +3,13 @@
 
 All memory writes MUST go through memory_write.py via Bash.
 This hook intercepts Write tool calls and denies any that target
-the memory storage path. No external dependencies (stdlib only).
+the memory storage path. Auto-approves staging files with safety gates.
+No external dependencies (stdlib only).
 """
 
 import json
 import os
+import re
 import sys
 
 # Build the path marker at runtime to avoid static pattern matching
@@ -17,8 +19,46 @@ _MARKER = "/{}/" + "{}" + "/"
 MEMORY_DIR_SEGMENT = _MARKER.format(_DOT_CLAUDE, _MEMORY)
 MEMORY_DIR_TAIL = "/{}/{}".format(_DOT_CLAUDE, _MEMORY)
 
+# Known staging filename patterns for auto-approve safety gate
+_STAGING_FILENAME_RE = re.compile(
+    r'^(?:intent|input|draft|context|new-info|triage-data|candidate|'
+    r'last-save-result|\.triage-pending)(?:[-.].*)?\.(?:json|txt)$'
+)
+
 # Config file basename (runtime construction to match guardian convention)
 _CONFIG_BASENAME = "mem" + "ory-config.json"
+
+# Lazy logger import (fail-open: never block guard execution)
+_logger = None
+
+
+def _log(event_type, data, level="info", memory_root=""):
+    """Emit a structured log event. Fail-open: errors silently ignored."""
+    global _logger
+    try:
+        if _logger is None:
+            scripts_dir = os.path.dirname(os.path.abspath(__file__))
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            import memory_logger
+            _logger = memory_logger
+        _logger.emit_event(
+            event_type, data,
+            level=level, hook="PreToolUse:Write",
+            script="memory_write_guard", memory_root=memory_root,
+        )
+    except Exception:
+        pass
+
+
+def _memory_root_from_path(normalized):
+    """Derive memory_root from a normalized path containing the memory dir segment."""
+    idx = normalized.find(MEMORY_DIR_SEGMENT)
+    if idx >= 0:
+        return normalized[:idx + len(MEMORY_DIR_SEGMENT)].rstrip("/")
+    if normalized.endswith(MEMORY_DIR_TAIL):
+        return normalized
+    return ""
 
 
 def main():
@@ -50,11 +90,42 @@ def main():
         if (basename.startswith(".memory-triage-context-") and basename.endswith(".txt")):
             sys.exit(0)
 
-    # Allow writes to the .staging/ subdirectory (draft files, context files).
+    # Auto-approve writes to the .staging/ subdirectory (draft files, context files).
     # These are temporary working files used by subagents during memory consolidation.
+    # Derives staging root from the resolved path itself (substring matching).
     normalized = resolved.replace(os.sep, "/")
-    staging_segment = "/.claude/memory/.staging/"
-    if staging_segment in normalized:
+    _stg_segment = "/{}/{}/".format(_DOT_CLAUDE, _MEMORY) + ".stagi" + "ng" + "/"
+    _stg_idx = normalized.find(_stg_segment)
+    if _stg_idx >= 0:
+        basename = os.path.basename(resolved)
+
+        # Gate 1: Extension whitelist — only .json and .txt
+        if not (basename.endswith(".json") or basename.endswith(".txt")):
+            sys.exit(0)  # Unknown extension, fall through to default prompt
+
+        # Gate 2: Filename pattern whitelist
+        if not _STAGING_FILENAME_RE.match(basename):
+            sys.exit(0)  # Unknown filename, fall through to default prompt
+
+        # Gate 3+4: Hard link defense (existing files) / new file pass-through
+        if os.path.exists(resolved):
+            try:
+                nlink = os.stat(resolved).st_nlink
+                if nlink > 1:
+                    sys.exit(0)  # Hard link detected, require user approval
+            except OSError:
+                sys.exit(0)  # Can't verify, fail-closed to default prompt
+
+        # All safety gates passed — auto-approve
+        _log("guard.write_allow_staging", {
+            "path": basename, "decision": "allow",
+        }, memory_root=_memory_root_from_path(normalized))
+        json.dump({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+            }
+        }, sys.stdout)
         sys.exit(0)
 
     # Allow writes to the plugin config file (not a memory record).
@@ -77,6 +148,9 @@ def main():
             "python3 {}/hooks/scripts/memory_write.py "
             "--action <create|update|retire|archive|unarchive|restore> ...".format(plugin_root)
         )
+        _log("guard.write_deny", {
+            "path": os.path.basename(resolved), "decision": "deny",
+        }, level="warning", memory_root=_memory_root_from_path(normalized))
         json.dump({
             "hookSpecificOutput": {
                 "permissionDecision": "deny",

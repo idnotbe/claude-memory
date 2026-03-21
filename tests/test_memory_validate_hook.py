@@ -432,8 +432,12 @@ class TestStagingNearMiss:
 class TestStagingHardLink:
     """Hard-link detection in staging exclusion."""
 
-    def test_hardlinked_staging_file_not_exempted(self, tmp_path):
-        """A hard-linked file in .staging/ should NOT be exempted (nlink > 1)."""
+    def test_hardlinked_staging_file_warns_but_skips(self, tmp_path):
+        """A hard-linked file in .staging/ should warn but still skip validation.
+
+        nlink is now diagnostic-only in PostToolUse (warning, not gate).
+        PreToolUse write_guard is the primary defense with nlink gating.
+        """
         decisions_dir = tmp_path / ".claude" / "memory" / "decisions"
         decisions_dir.mkdir(parents=True)
         staging_dir = tmp_path / ".claude" / "memory" / ".staging"
@@ -452,10 +456,13 @@ class TestStagingHardLink:
 
         stdout, stderr, rc = run_validate_hook(str(hardlink))
         assert rc == 0
-        # Should NOT be exempted — hard link detected
+        # Should warn about nlink but still skip validation (warning-only)
         assert "unexpected nlink" in stderr, (
             "Hard-linked staging file should trigger nlink warning"
         )
+        # Should NOT quarantine — staging skip is unconditional
+        assert_allow(stdout, "Hard-linked staging file should still be skipped")
+        assert hardlink.exists(), "Hard-linked staging file should not be quarantined"
 
     def test_normal_staging_file_exempted(self, tmp_path):
         """A normal staging file (nlink == 1) should be exempted."""
@@ -535,10 +542,16 @@ class TestCrossHookParity:
         assert post_rc == 0
         assert_allow(post_stdout, "PostToolUse should allow staging")
 
-        # PreToolUse (write guard)
+        # PreToolUse (write guard) — explicit allow for staging
         pre_stdout, _, pre_rc = run_write_guard(path)
         assert pre_rc == 0
-        assert_allow(pre_stdout, "PreToolUse should allow staging")
+        if pre_stdout:
+            output = json.loads(pre_stdout)
+            decision = output.get("hookSpecificOutput", {}).get("permissionDecision")
+            assert decision == "allow", (
+                f"PreToolUse should allow staging, got '{decision}'"
+            )
+        # Empty stdout is also acceptable (abstain = no deny)
 
     def test_parity_config_both_hooks_allow(self, tmp_path):
         """Both PreToolUse and PostToolUse must allow memory-config.json."""

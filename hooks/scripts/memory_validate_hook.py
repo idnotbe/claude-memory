@@ -14,6 +14,29 @@ import os
 import sys
 import time
 
+# Lazy logger import (fail-open: never block hook execution)
+_logger = None
+
+
+def _log(event_type, data, level="info", memory_root=""):
+    """Emit a structured log event. Fail-open."""
+    global _logger
+    try:
+        if _logger is None:
+            scripts_dir = os.path.dirname(os.path.abspath(__file__))
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            import memory_logger
+            _logger = memory_logger
+        _logger.emit_event(
+            event_type, data,
+            level=level, hook="PostToolUse:Write",
+            script="memory_validate_hook", memory_root=memory_root,
+        )
+    except Exception:
+        pass
+
+
 # Lazy pydantic bootstrap: only runs when validating memory files
 _pydantic_bootstrapped = False
 _HAS_PYDANTIC = False
@@ -168,29 +191,48 @@ def main():
     _stg = ".stagi" + "ng"
     staging_marker = MEMORY_DIR_SEGMENT + _stg + "/"
     normalized = resolved.replace(os.sep, "/")
+    # Derive memory_root for logging
+    _mem_root = ""
+    _mem_idx = normalized.find(MEMORY_DIR_SEGMENT)
+    if _mem_idx >= 0:
+        _mem_root = normalized[:_mem_idx + len(MEMORY_DIR_SEGMENT)].rstrip("/")
+
     if staging_marker in normalized:
-        # Defense-in-depth: open + fstat atomically on the same fd to
-        # eliminate TOCTOU between the hard-link check and file read.
-        # Only exempt when nlink == 1 (confirmed normal single file).
-        # nlink == 0 (exotic FS like procfs/FUSE) or nlink > 1 (hard
-        # link) → fall through to validation.
+        # Defense-in-depth: check nlink as diagnostic warning (not gate).
+        # PreToolUse write_guard is the primary defense with nlink gating.
+        # PostToolUse is detection-only and should not quarantine staging files
+        # that were already approved. WSL2 may report inconsistent st_nlink.
+        nlink_val = None
         try:
             fd = os.open(resolved, os.O_RDONLY)
             try:
-                nlink = os.fstat(fd).st_nlink
+                nlink_val = os.fstat(fd).st_nlink
             finally:
                 os.close(fd)
-            if nlink == 1:
-                sys.exit(0)
-            print(
-                "WARNING: Staging file has unexpected nlink={}, "
-                "proceeding with validation: {}".format(nlink, resolved),
-                file=sys.stderr,
-            )
+            if nlink_val > 1:
+                print(
+                    "WARNING: Staging file has unexpected nlink={}, "
+                    "possible hard link (diagnostic only): {}".format(
+                        nlink_val, resolved
+                    ),
+                    file=sys.stderr,
+                )
+                _log("validate.staging_skip", {
+                    "path": os.path.basename(resolved),
+                    "nlink": nlink_val, "nlink_warning": True,
+                }, level="warning", memory_root=_mem_root)
         except OSError:
-            pass  # open/fstat failed → proceed with validation (fail-closed)
+            pass  # open/fstat failed — staging file may be transient, skip
+        if nlink_val is None or nlink_val == 1:
+            _log("validate.staging_skip", {
+                "path": os.path.basename(resolved),
+            }, memory_root=_mem_root)
+        sys.exit(0)  # Always skip validation for staging files
 
     # If we got here, a write bypassed the PreToolUse guard
+    _log("validate.bypass_detected", {
+        "path": os.path.basename(resolved),
+    }, level="warning", memory_root=_mem_root)
     print(
         "WARNING: Write to memory file bypassed PreToolUse guard: {}".format(resolved),
         file=sys.stderr,
@@ -234,6 +276,9 @@ def main():
         sys.exit(0)
 
     # Invalid -- quarantine the file
+    _log("validate.quarantine", {
+        "path": os.path.basename(resolved), "error": error_msg[:200],
+    }, level="error", memory_root=_mem_root)
     quarantine_path = quarantine(resolved)
     reason = (
         "Schema validation failed for memory file. "
