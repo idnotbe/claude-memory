@@ -50,7 +50,11 @@ from memory_write import (  # noqa: E402
     ChangeEntry,
     ValidationError,
 )
-from memory_staging_utils import validate_staging_dir  # noqa: E402
+from memory_staging_utils import (  # noqa: E402
+    STAGING_DIR_PREFIX as _STAGING_PREFIX,
+    RESOLVED_TMP_PREFIX as _RESOLVED_TMP_PREFIX,
+    validate_staging_dir,
+)
 
 
 def _ensure_staging_dir_safe(staging_dir: str) -> None:
@@ -87,10 +91,10 @@ def validate_input_path(path: str) -> str | None:
         return f"Input path must not contain '..' components: {path}"
 
     in_staging = (
-        resolved.startswith("/tmp/.claude-memory-staging-")
+        resolved.startswith(_STAGING_PREFIX)
         or "/.claude/memory/.staging/" in resolved
     )
-    in_tmp = resolved.startswith("/tmp/")
+    in_tmp = resolved.startswith(_RESOLVED_TMP_PREFIX)
 
     if not in_staging and not in_tmp:
         return (
@@ -247,7 +251,7 @@ def write_draft(data: dict, category: str, root: str) -> str:
     If root looks like a /tmp/.claude-memory-staging-* path, write directly there.
     Otherwise, use root/.staging/ (legacy behavior).
     """
-    if root.startswith("/tmp/.claude-memory-staging-"):
+    if root.startswith(_STAGING_PREFIX):
         staging_dir = root
     else:
         staging_dir = os.path.join(root, ".staging")
@@ -365,6 +369,7 @@ def main() -> int:
     # Success output (stdout)
     result = {
         "status": "ok",
+        "category": args.category,
         "action": args.action,
         "draft_path": draft_path,
     }

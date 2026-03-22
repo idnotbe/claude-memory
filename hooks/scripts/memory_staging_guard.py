@@ -40,7 +40,15 @@ def _log(event_type, data, level="info"):
 
 # Detect bash writes targeting staging directory.
 # Matches both the new /tmp/.claude-memory-staging-* path and legacy .claude/memory/.staging/
-_STAGING_PATH_PATTERN = r'(?:\.claude/memory/\.staging/|/tmp/\.claude-memory-staging-[a-f0-9]+/)'
+# Build regex dynamically using os.path.realpath("/tmp") to handle macOS /private/tmp.
+# Generate alternation from sorted({"/tmp", os.path.realpath("/tmp")}) to match both
+# literal and resolved prefixes in command strings.
+_RESOLVED_TMP = os.path.realpath("/tmp")
+_tmp_variants = sorted({"/tmp", _RESOLVED_TMP})
+_tmp_alt = "|".join(re.escape(t) for t in _tmp_variants)
+_STAGING_PATH_PATTERN = (
+    r'(?:\.claude/memory/\.staging/|(?:' + _tmp_alt + r')/\.claude-memory-staging-[a-f0-9]+/)'
+)
 _STAGING_WRITE_PATTERN = re.compile(
     r'(?:cat|echo|printf)\s+[^|&;\n>\s]*>\s*[^\s]*' + _STAGING_PATH_PATTERN
     + r'|'

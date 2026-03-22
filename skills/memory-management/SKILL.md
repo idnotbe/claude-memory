@@ -33,7 +33,7 @@ Each category has a configurable `description` field in `memory-config.json` (un
 
 ## Memory Consolidation
 
-**Staging directory**: Memory staging files are stored in `/tmp/.claude-memory-staging-<hash>/` where `<hash>` is a deterministic SHA-256 prefix derived from the project path. This avoids Claude Code's hardcoded `.claude/` protected directory prompts. The `triage-data.json` file includes a `staging_dir` field with the exact path. All staging file references below use `<staging_dir>` as shorthand.
+**Staging directory**: Memory staging files are stored in `<resolved_tmp>/.claude-memory-staging-<hash>/` where `<resolved_tmp>` is `os.path.realpath("/tmp")` (resolves to `/tmp` on Linux, `/private/tmp` on macOS) and `<hash>` is a deterministic SHA-256 prefix derived from the project path. This avoids Claude Code's hardcoded `.claude/` protected directory prompts. The `triage-data.json` file includes a `staging_dir` field with the exact path. All staging file references below use `<staging_dir>` as shorthand.
 
 When a triage hook fires with a save instruction:
 
@@ -44,7 +44,7 @@ Only run this check when **no** `<triage_data>` or `<triage_data_file>` tag is p
 current hook output (i.e., manual `/memory:save` invocation or recovery). If triage output IS
 present, skip directly to Phase 0 -- the current triage data is fresh.
 
-1. Determine the staging directory: Read the `staging_dir` field from `triage-data.json` if available, or compute it as `/tmp/.claude-memory-staging-<hash>/` (where `<hash>` is derived from the project path by `memory_triage.py`). Check if ANY of these exist:
+1. Determine the staging directory: Read the `staging_dir` field from `triage-data.json` if available, or compute it using `memory_staging_utils.get_staging_dir()` (path is `<resolved_tmp>/.claude-memory-staging-<hash>/` where `<hash>` is derived from the project path). Check if ANY of these exist:
    - `<staging_dir>/.triage-pending.json`
    - `<staging_dir>/triage-data.json` WITHOUT a corresponding `<staging_dir>/last-save-result.json`
 2. If found, clean up ALL staging files before proceeding:
@@ -81,6 +81,7 @@ For EACH triggered category, spawn an Agent subagent using the `memory-drafter` 
 Agent(
   subagent_type: "memory-drafter",
   model: config.category_models[category.lower()] or default_model,
+  run_in_background: true,
   prompt: "Category: <cat>\nContext file: <staging_dir>/context-<cat>.txt\nOutput: <staging_dir>/intent-<cat>.json"
 )
 ```
@@ -95,10 +96,16 @@ and file operations.
 
 Spawn ALL category subagents in PARALLEL (single message, multiple Agent calls).
 
-**Cost note:** Each triggered category spawns one drafting subagent (Phase 1)
-and one verification subagent (Phase 2). With all 6 categories triggering,
-this is 12 subagent calls total. This is rare (requires a very diverse
-conversation) but be aware of the cost implications.
+Background subagents run concurrently. Do NOT proceed to Phase 1.5 until every
+background subagent has returned a completion notification. For each completed
+subagent, verify it succeeded before reading its intent file. If a subagent
+failed, skip that category (log warning) and continue with remaining categories.
+
+**Cost note:** Each triggered category spawns one drafting subagent (Phase 1).
+Only `decision` and `constraint` spawn verification subagents (Phase 2).
+With all 6 categories triggering, this is 6 drafting + 2 verification = 8
+subagent calls maximum. This is rare (requires a very diverse conversation)
+but be aware of the cost implications.
 
 **Context file format** (`<staging_dir>/context-<category>.txt`):
 Each context file contains a header with the category name and score, optionally
@@ -120,113 +127,47 @@ staging directory write failure), skip that category with a warning.
 
 If a subagent fails or writes invalid JSON, skip that category (log warning) and continue.
 
-### Phase 1.5: Deterministic Execution (Main Agent)
+### Phase 1.5: Deterministic Execution (Single Script)
 
-After all Phase 1 subagents complete, the main agent performs candidate selection,
-CUD resolution, and draft assembly deterministically. No LLM judgment occurs here --
-all decisions follow mechanical rules.
-
-**Step 1: Collect and validate intent JSONs**
-
-Read all `<staging_dir>/intent-<cat>.json` files. For each intent:
-- If `action` is `"noop"`: log the `noop_reason` and skip the category.
-- If `action` is not `"noop"` (SAVE intent): validate required fields exist:
-  `category` (string), `new_info_summary` (string), `partial_content` (object with
-  `title`, `tags`, `confidence`, `change_summary`, `content`).
-- If validation fails: skip the category with a warning.
-
-**Step 2: Run candidate selection (parallel Bash calls)**
-
-For each validated SAVE intent, write `new_info_summary` to a temp file and run
-`memory_candidate.py`. These calls are independent -- run them in PARALLEL
-(single message, multiple Bash calls):
+After all Phase 1 subagents complete, run the orchestration script:
 
 ```bash
-# First, write the new-info summary (use Write tool):
-# Path: <staging_dir>/new-info-<cat>.txt
-# Content: the new_info_summary value from the intent JSON
-
-# Then run candidate.py:
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_candidate.py" \
-  --category <cat> \
-  --new-info-file <staging_dir>/new-info-<cat>.txt
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_orchestrate.py" \
+  --staging-dir <staging_dir>
 ```
 
-If `lifecycle_hints` is present in the intent, pass `lifecycle_hints[0]` as
-`--lifecycle-event`:
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_candidate.py" \
-  --category <cat> \
-  --new-info-file <staging_dir>/new-info-<cat>.txt \
-  --lifecycle-event <lifecycle_hints[0]>
-```
+This script performs Steps 1-6 automatically:
+1. Collects and validates intent JSONs
+2. Runs candidate selection (`memory_candidate.py`) per category
+3. Resolves CUD actions via the rules table
+4. Assembles drafts (`memory_draft.py`) per category
+5. Handles DELETE actions (writes retire JSONs)
+6. Outputs `<staging_dir>/orchestration-result.json` manifest
 
-If candidate.py fails for a category, skip that category (log error).
-
-**Step 3: CUD Resolution**
-
-For each category, combine L1 (candidate.py `structural_cud`) with L2 (intent's
-`intended_action`, defaulting to `"update"` if absent) and apply the CUD Verification
-Rules table (see below). Record the resolved action for each category.
-
-Special cases:
-- `pre_action="NOOP"`: NOOP (skip category).
-- `vetoes` non-empty: vetoes restrict specific actions, not the entire category.
-  A "Cannot DELETE" veto means DELETE is forbidden but UPDATE is still allowed.
-  Only skip the category if the resolved action is vetoed (e.g., resolved DELETE
-  but veto says "Cannot DELETE"). If `structural_cud="UPDATE"`, proceed with UPDATE
-  regardless of vetoes (the veto only blocks DELETE).
-- `intended_action` absent or unrecognized: use safety default UPDATE for L2.
-
-**Step 4: Execute drafts (parallel Bash calls)**
-
-For each category with a resolved CREATE or UPDATE action, write the intent's
-`partial_content` to an input file and run `memory_draft.py`. These calls are
-independent -- run them in PARALLEL:
-
-For **CREATE**:
-```bash
-# First, write partial_content (use Write tool):
-# Path: <staging_dir>/input-<cat>.json
-# Content: the partial_content object from the intent JSON
-
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_draft.py" \
-  --action create \
-  --category <cat> \
-  --input-file <staging_dir>/input-<cat>.json \
-  --root <staging_dir>
-```
-
-For **UPDATE** (add `--candidate-file` with the `candidate.path` from Step 2):
-```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_draft.py" \
-  --action update \
-  --category <cat> \
-  --input-file <staging_dir>/input-<cat>.json \
-  --candidate-file <candidate.path> \
-  --root <staging_dir>
-```
-
-Parse each `memory_draft.py` JSON output. Extract `draft_path`:
+The manifest JSON structure:
 ```json
-{"status": "ok", "action": "create", "draft_path": "<staging_dir>/draft-<cat>-<timestamp>.json"}
+{
+  "status": "actionable | all_noop",
+  "categories": {
+    "<category>": {
+      "action": "CREATE | UPDATE | DELETE | NOOP | SKIP",
+      "draft_path": "<path to draft file>",
+      "candidate_path": "<path to existing memory if UPDATE/DELETE>",
+      "reason": "<only present for NOOP/SKIP>"
+    }
+  }
+}
 ```
 
-If draft.py fails for a category, skip that category (log error).
-
-**Step 5: Handle DELETE actions**
-
-For each category with a resolved DELETE action, write the retire JSON via the
-**Write tool**:
-- Path: `<staging_dir>/draft-<category>-retire.json`
-- Content: `{"action": "retire", "target": "<candidate.path>", "reason": "<why>"}`
-
-**Step 6: Summary**
-
-If ALL categories resulted in NOOP, VETO, or error: do NOT proceed to Phase 2.
-Otherwise, proceed with all categories that have draft files.
+If `status` is `"all_noop"`: do NOT proceed to Phase 2. Stop.
+Otherwise: proceed with categories where `action` is CREATE, UPDATE, or DELETE.
 
 ### Phase 2: Content Verification
+
+**Skip check**: If `triage.parallel.verification_enabled` is `false` in config (default: `true`), skip Phase 2 entirely and proceed directly to Phase 3 with all Phase 1.5 drafts.
+
+**Category exemption**: Only `decision` and `constraint` categories require Phase 2 verification. All other categories (`session_summary`, `runbook`, `tech_debt`, `preference`) skip verification and proceed directly to Phase 3.
+
 For each draft from Phase 1.5, spawn a verification Task subagent with `verification_model` from config:
 - Read the draft JSON file and the original context file.
 - Focus on **content quality** (schema validation is handled by memory_write.py in Phase 3):
@@ -249,7 +190,7 @@ CUD resolution was performed in Phase 1.5. The main agent now builds the save co
 Collect Phase 1.5 resolved actions and Phase 2 verification results. Exclude any category where Phase 2 returned FAIL (BLOCK). For each remaining category, build the save command using the resolved action from Phase 1.5.
 
 **Draft path validation:** Before including any draft file path in commands, verify it
-starts with `<staging_dir>/draft-` (where `<staging_dir>` is the `/tmp/.claude-memory-staging-*` path) and contains no `..` path components.
+starts with `<staging_dir>/draft-` (where `<staging_dir>` is the resolved `/tmp/.claude-memory-staging-*` path) and contains no `..` path components.
 Reject any draft with a non-conforming path.
 
 Command templates:
@@ -263,9 +204,18 @@ If session_summary was created, include the enforce command:
 
 > Note: Enforcement also runs automatically after `memory_write.py --action create --category session_summary`. This explicit call is a safety belt.
 
+**Step 1.5: Write Save Result Input**
+
+Before spawning the subagent, write the save result input JSON to staging using the Write tool:
+- Path: `<staging_dir>/save-result-input.json`
+- Content: `{"saved_at": "<current UTC ISO 8601>", "categories": ["<list of saved categories>"], "titles": ["<list of saved titles>"], "errors": []}`
+
+This ensures no user-derived strings (titles) appear on the Bash command line.
+
 **Step 2: Spawn Save Subagent**
 
-Spawn ONE foreground Task subagent (model: haiku) with the pre-computed command list:
+Spawn ONE foreground Task subagent (model: haiku) with the pre-computed command list.
+The subagent MUST execute ALL commands in a single Bash call — no multi-call splitting.
 
 ```
 Task(
@@ -293,7 +243,7 @@ multiple Bash calls -- an interruption between calls would leave the
 sentinel stuck in 'saving' state permanently.
 
 Combined command sequence (single Bash call with status tracking):
-_ok=1 ; python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state saving ; <save command 1> || _ok=0 ; <save command 2> || _ok=0 ; ... ; <memory_enforce.py command> || _ok=0 ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action cleanup-staging --staging-dir <staging_dir>; fi ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result-direct --staging-dir <staging_dir> --categories \"<comma-separated saved categories>\" --titles \"<comma-separated saved titles>\"; fi ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state saved; else python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state failed; fi
+_ok=1 ; python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state saving ; <save command 1> || _ok=0 ; <save command 2> || _ok=0 ; ... ; <memory_enforce.py command> || _ok=0 ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action cleanup-staging --staging-dir <staging_dir>; fi ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result --staging-dir <staging_dir> --result-file <staging_dir>/save-result-input.json; fi ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state saved; else python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state failed; fi
 
 IMPORTANT: The `|| _ok=0` after EVERY command (save commands AND memory_enforce.py) captures individual failures while allowing remaining commands to execute. The `_ok` variable tracks overall success. The result file and cleanup ONLY run on full success — on failure, the sentinel transitions to "failed" which allows re-triage.
 
@@ -310,12 +260,14 @@ Return ONLY a single-line summary like: 'Saved: session_summary (update), constr
 )
 ```
 
+> **Final output rule**: After Phase 3 completes, output ONLY the single-line save summary (e.g., "Saved: session_summary (create), decision (update)"). No intermediate status, phase completion messages, or additional commentary.
+
 Result file fields:
 - `saved_at`: current UTC timestamp in ISO 8601
 - `categories`: list of categories that were saved (PASS only)
 - `titles`: list of titles corresponding to each saved memory
 - `errors`: list of `{"category": "<name>", "error": "<message>"}` objects for any failed saves (empty array if all succeeded)
-- `session_id`: session identifier from sentinel (auto-populated by `write-save-result-direct`, null if sentinel read fails)
+- `session_id`: session identifier from sentinel (auto-populated by `write-save-result` when missing from input, null if sentinel read fails)
 
 **Step 3: Error Handling**
 
@@ -361,7 +313,8 @@ If the Task subagent fails, times out, or returns errors:
 | VETO | * | OBEY VETO | Mechanical invariant |
 | NOOP | * | NOOP | No target |
 
-This is the implemented 2-layer system. See action-plans/_ref/MEMORY-CONSOLIDATION-PROPOSAL.md for the original 3-layer design.
+This table is implemented in `memory_orchestrate.py`. It is documented here for reference.
+See action-plans/_ref/MEMORY-CONSOLIDATION-PROPOSAL.md for the original 3-layer design.
 
 Key principles:
 1. Mechanical trumps LLM: Python vetoes are absolute.
@@ -464,6 +417,7 @@ Users can also manage sessions directly:
 - `max_memories_per_category` -- max files per folder (default: 100)
 - `triage.parallel.enabled` -- enable parallel subagent drafting (default: true)
 - `triage.parallel.category_models` -- per-category model for drafting (see default config for per-category defaults; fallback: haiku)
+- `triage.parallel.verification_enabled` -- enable/disable Phase 2 content verification (default: true)
 - `triage.parallel.verification_model` -- model for verification phase (default: sonnet)
 - `triage.parallel.default_model` -- fallback model if category not in map (default: haiku)
 - `delete.grace_period_days` -- days before retired records are purged (default: 30)

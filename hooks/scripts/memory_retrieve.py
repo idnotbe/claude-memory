@@ -43,11 +43,12 @@ try:
     from memory_staging_utils import get_staging_dir  # noqa: E402
 except ImportError:
     import hashlib as _hashlib
+    _resolved_tmp = os.path.realpath("/tmp")
     def get_staging_dir(cwd: str = "") -> str:
         if not cwd:
             cwd = os.getcwd()
-        _h = _hashlib.sha256(os.path.realpath(cwd).encode()).hexdigest()[:12]
-        return f"/tmp/.claude-memory-staging-{_h}"
+        _h = _hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(cwd)}".encode()).hexdigest()[:12]
+        return f"{_resolved_tmp}/.claude-memory-staging-{_h}"
 
 # Lazy import: logging module may not exist during partial deployments
 try:

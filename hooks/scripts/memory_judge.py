@@ -117,7 +117,8 @@ def extract_recent_context(transcript_path: str, max_turns: int = 5) -> str:
     # Matches memory_triage.py pattern (lines 964-968)
     resolved = os.path.realpath(transcript_path)
     home = os.path.expanduser("~")
-    if not (resolved.startswith("/tmp/") or resolved.startswith(home + "/")):
+    _resolved_tmp_prefix = os.path.realpath("/tmp") + "/"
+    if not (resolved.startswith(_resolved_tmp_prefix) or resolved.startswith(home + "/")):
         return ""
 
     messages: deque = deque(maxlen=max_turns * 2)

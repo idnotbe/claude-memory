@@ -240,7 +240,10 @@ class TestTriageDataIncludesDescription:
     """Tests that format_block_message() includes descriptions in triage_data."""
 
     def test_triage_data_includes_description(self):
-        """triage_data JSON should include description field per category."""
+        """triage_data JSON should include description field per category.
+
+        When triage_data_path is None, compact inline JSON appears in the message.
+        """
         results = [
             {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
             {"category": "RUNBOOK", "score": 0.55, "snippets": ["error fixed by"]},
@@ -257,11 +260,13 @@ class TestTriageDataIncludesDescription:
             category_descriptions=category_descriptions,
         )
 
-        # Parse the triage_data JSON from the message
+        # Triage data should be inline in message (compact JSON fallback)
         assert "<triage_data>" in message
+
+        # Parse the triage_data JSON from message
         start = message.index("<triage_data>") + len("<triage_data>")
         end = message.index("</triage_data>")
-        triage_json = json.loads(message[start:end])
+        triage_json = json.loads(message[start:end].strip())
 
         categories = triage_json["categories"]
         decision_cat = next(c for c in categories if c["category"] == "decision")
@@ -271,7 +276,10 @@ class TestTriageDataIncludesDescription:
         assert runbook_cat["description"] == "Step-by-step procedures for diagnosing and fixing issues"
 
     def test_triage_data_no_description_when_absent(self):
-        """triage_data should NOT include description when not provided."""
+        """triage_data should NOT include description when not provided.
+
+        When triage_data_path is None, compact inline JSON appears in the message.
+        """
         results = [
             {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
         ]
@@ -281,9 +289,11 @@ class TestTriageDataIncludesDescription:
         # Call without category_descriptions (backward compat)
         message = format_block_message(results, context_paths, parallel_config)
 
+        assert "<triage_data>" in message
+
         start = message.index("<triage_data>") + len("<triage_data>")
         end = message.index("</triage_data>")
-        triage_json = json.loads(message[start:end])
+        triage_json = json.loads(message[start:end].strip())
 
         decision_cat = triage_json["categories"][0]
         assert "description" not in decision_cat
@@ -304,9 +314,8 @@ class TestTriageDataIncludesDescription:
             category_descriptions=category_descriptions,
         )
 
-        # The human-readable part (before <triage_data>) should mention description
-        human_part = message[:message.index("<triage_data>")]
-        assert "Architectural and technical choices" in human_part
+        # The human-readable part should mention description
+        assert "Architectural and technical choices" in message
 
 
 # ---------------------------------------------------------------------------
@@ -1156,7 +1165,7 @@ class TestStagingPaths:
     def test_staging_dir_created_if_absent(self, tmp_path):
         """The /tmp/ staging directory should be created if it doesn't exist."""
         import hashlib
-        project_hash = hashlib.sha256(os.path.realpath(str(tmp_path)).encode()).hexdigest()[:12]
+        project_hash = hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(str(tmp_path))}".encode()).hexdigest()[:12]
         staging_dir = Path(f"/tmp/.claude-memory-staging-{project_hash}")
 
         text = "We decided to use PostgreSQL because it supports JSONB."
@@ -1613,7 +1622,7 @@ class TestFormatBlockMessageTriageDataPath:
         assert "memories before stopping" in message
 
     def test_format_block_message_without_triage_data_path(self):
-        """When triage_data_path is None, output inline <triage_data>."""
+        """When triage_data_path is None, compact inline triage data in message."""
         results = [
             {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
         ]
@@ -1624,18 +1633,19 @@ class TestFormatBlockMessageTriageDataPath:
             triage_data_path=None,
         )
 
+        # Message should contain inline triage data (compact JSON)
         assert "<triage_data>" in message
-        assert "</triage_data>" in message
         assert "<triage_data_file>" not in message
-        # Verify the inline JSON is valid
+
+        # Parse and verify inline triage data
         start = message.index("<triage_data>") + len("<triage_data>")
         end = message.index("</triage_data>")
-        triage_json = json.loads(message[start:end])
+        triage_json = json.loads(message[start:end].strip())
         assert "categories" in triage_json
         assert "parallel_config" in triage_json
 
-    def test_format_block_message_default_is_inline(self):
-        """Default (no triage_data_path kwarg) falls back to inline."""
+    def test_format_block_message_default_is_inline_fallback(self):
+        """Default (no triage_data_path kwarg) puts compact inline triage data in message."""
         results = [
             {"category": "DECISION", "score": 0.72, "snippets": ["decided"]},
         ]
@@ -1645,6 +1655,11 @@ class TestFormatBlockMessageTriageDataPath:
 
         assert "<triage_data>" in message
         assert "<triage_data_file>" not in message
+        # Verify the inline JSON is parseable
+        start = message.index("<triage_data>") + len("<triage_data>")
+        end = message.index("</triage_data>")
+        triage_json = json.loads(message[start:end].strip())
+        assert "categories" in triage_json
 
     def test_format_block_message_file_path_with_descriptions(self):
         """File-based output with descriptions: descriptions in human part only."""
@@ -1729,7 +1744,7 @@ class TestRunTriageWritesTriageDataFile:
 
         # Check that triage-data.json was written to /tmp/ staging dir
         import hashlib
-        project_hash = hashlib.sha256(os.path.realpath(str(proj)).encode()).hexdigest()[:12]
+        project_hash = hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(str(proj))}".encode()).hexdigest()[:12]
         triage_data_path = Path(f"/tmp/.claude-memory-staging-{project_hash}/triage-data.json")
         assert triage_data_path.exists(), f"triage-data.json should exist at {triage_data_path}"
 
@@ -1745,7 +1760,7 @@ class TestRunTriageWritesTriageDataFile:
         assert str(triage_data_path) in reason
 
     def test_triage_data_file_fallback_on_write_error(self, tmp_path):
-        """If triage-data.json write fails, falls back to inline <triage_data>."""
+        """If triage-data.json write fails, compact inline triage data in reason."""
         proj = tmp_path / "proj"
         claude_dir = proj / ".claude" / "memory"
         claude_dir.mkdir(parents=True)
@@ -1786,12 +1801,12 @@ class TestRunTriageWritesTriageDataFile:
         response = json.loads(stdout_text)
         assert response["decision"] == "block"
         reason = response["reason"]
-        # Should fall back to inline triage_data
+        # Should have inline triage_data in reason (compact JSON fallback)
         assert "<triage_data>" in reason
         assert "<triage_data_file>" not in reason
 
     def test_triage_data_file_fallback_on_replace_error(self, tmp_path):
-        """If os.replace() fails after write, falls back to inline <triage_data>."""
+        """If os.replace() fails after write, compact inline triage data in reason."""
         proj = tmp_path / "proj"
         claude_dir = proj / ".claude" / "memory"
         claude_dir.mkdir(parents=True)
@@ -1830,7 +1845,7 @@ class TestRunTriageWritesTriageDataFile:
         response = json.loads(stdout_text)
         assert response["decision"] == "block"
         reason = response["reason"]
-        # Should fall back to inline triage_data
+        # Should have inline triage_data in reason (compact JSON fallback)
         assert "<triage_data>" in reason
         assert "<triage_data_file>" not in reason
 
@@ -2601,7 +2616,7 @@ class TestStopHookRefireFix:
             'Execute these memory save commands in order.',
             'python3 memory_write.py --action create --category runbook --target "path" --input "draft"',
             'python3 memory_enforce.py --category session_summary',
-            'python3 memory_write.py --action write-save-result-direct --staging-dir /tmp/staging',
+            'python3 memory_write.py --action write-save-result --staging-dir /tmp/staging --result-file /tmp/staging/save-result-input.json',
             'python3 memory_write.py --action cleanup-staging --staging-dir /tmp/staging',
         ]
         score, snippets, primary_count, boosted_count = score_text_category(
@@ -2888,11 +2903,11 @@ class TestRuntimeErrorDegradation:
     """
 
     def test_write_context_files_degrades_on_runtime_error(self):
-        """write_context_files should fall back to per-file /tmp/ paths on RuntimeError.
+        """write_context_files should return empty dict on RuntimeError.
 
         When ensure_staging_dir() raises RuntimeError (attack detected),
-        write_context_files should set staging_dir="" and use individual
-        /tmp/ fallback paths per context file.
+        write_context_files should skip all context file writes and return {}.
+        No writes to predictable /tmp/ fallback paths (security hardening).
         """
         import memory_triage as mt
 
@@ -2908,16 +2923,13 @@ class TestRuntimeErrorDegradation:
         ):
             context_paths = mt.write_context_files(text, metrics, results)
 
-        # Should still produce context paths (fallback to per-file /tmp/ paths)
-        assert "decision" in context_paths
-        # Fallback paths should be /tmp/ individual files, not inside staging dir
-        decision_path = context_paths["decision"]
-        assert decision_path.startswith("/tmp/.memory-triage-context-"), (
-            f"Expected fallback /tmp/ path, got: {decision_path}"
+        # Should return empty dict: staging failure skips all writes
+        assert context_paths == {}, (
+            f"Expected empty dict on staging failure, got: {context_paths}"
         )
 
     def test_write_context_files_degrades_on_os_error(self):
-        """write_context_files should also handle OSError from ensure_staging_dir."""
+        """write_context_files should return empty dict on OSError from ensure_staging_dir."""
         import memory_triage as mt
 
         text = "Added a constraint about rate limiting."
@@ -2932,8 +2944,10 @@ class TestRuntimeErrorDegradation:
         ):
             context_paths = mt.write_context_files(text, metrics, results)
 
-        assert "constraint" in context_paths
-        assert context_paths["constraint"].startswith("/tmp/.memory-triage-context-")
+        # Should return empty dict: staging failure skips all writes
+        assert context_paths == {}, (
+            f"Expected empty dict on staging failure, got: {context_paths}"
+        )
 
     def test_main_triage_fails_open_on_runtime_error(self):
         """main() should return 0 (fail-open) when ensure_staging_dir raises RuntimeError.
@@ -2965,12 +2979,12 @@ class TestRuntimeErrorDegradation:
     def test_run_triage_triage_data_falls_back_to_inline_on_staging_error(self):
         """When ensure_staging_dir raises RuntimeError, triage-data falls back to inline.
 
-        The triage-data section (~line 1522) catches (OSError, RuntimeError)
-        and falls back to get_staging_dir(). If the subsequent file write
-        also fails (the staging dir may not actually exist), the code sets
-        triage_data_path=None, causing format_block_message to use inline
-        <triage_data> instead of <triage_data_file>. This test validates
-        the entire chain does not crash and produces valid output.
+        The triage-data section catches (OSError, RuntimeError) and sets
+        _staging_dir="". The triage-data.json write is skipped entirely
+        (guarded by if _staging_dir:), so triage_data_path stays None.
+        format_block_message then uses inline <triage_data> instead of
+        <triage_data_file>. This test validates the entire chain does not
+        crash and produces valid output via main().
         """
         import io
         import tempfile
@@ -3049,13 +3063,13 @@ class TestTriageFallbackPaths:
 
     def test_run_triage_fallback_when_ensure_staging_fails(self, tmp_path):
         """When ensure_staging_dir raises RuntimeError, _run_triage() still
-        outputs a valid block message with inline <triage_data> fallback.
+        outputs a valid block message with compact inline triage data.
 
-        The fallback chain:
-        1. ensure_staging_dir() raises RuntimeError -> falls back to get_staging_dir()
-        2. get_staging_dir() returns a path that may not exist on disk
-        3. triage-data.json write to nonexistent dir fails -> triage_data_path=None
-        4. format_block_message uses inline <triage_data> instead of <triage_data_file>
+        The hardened fallback chain:
+        1. ensure_staging_dir() raises RuntimeError -> _staging_dir = ""
+        2. staging_dir key is omitted from triage_data (not set to rejected path)
+        3. triage-data.json write is skipped entirely (guarded by if _staging_dir:)
+        4. format_block_message embeds compact inline JSON in the message
         """
         import memory_triage as mt
 
@@ -3079,18 +3093,14 @@ class TestTriageFallbackPaths:
         captured_out = io.StringIO()
         # ensure_staging_dir raises RuntimeError on every call (both in
         # write_context_files and in the triage-data section of _run_triage).
-        # The get_staging_dir fallback returns a path under /tmp/ that does
-        # NOT exist on disk, so the triage-data.json write also fails,
-        # triggering the inline fallback.
-        nonexistent_staging = "/tmp/.claude-memory-staging-doesnotexist999"
+        # No fallback to get_staging_dir() -- _staging_dir is set to "" and
+        # the triage-data.json write is skipped entirely.
         with mock.patch.object(mt, "read_stdin", return_value=hook_input), \
              mock.patch("sys.stdout", captured_out), \
              mock.patch.object(mt, "check_stop_flag", return_value=False), \
              mock.patch.object(mt, "run_triage", return_value=forced_results), \
              mock.patch.object(mt, "ensure_staging_dir",
-                               side_effect=RuntimeError("Staging dir is a symlink (test)")), \
-             mock.patch.object(mt, "get_staging_dir",
-                               return_value=nonexistent_staging):
+                               side_effect=RuntimeError("Staging dir is a symlink (test)")):
             exit_code = mt._run_triage()
 
         assert exit_code == 0
@@ -3102,31 +3112,35 @@ class TestTriageFallbackPaths:
         assert response["decision"] == "block"
         reason = response["reason"]
 
-        # Must use inline triage_data (file write failed to nonexistent dir)
+        # Triage data should be inline in reason (compact JSON fallback)
         assert "<triage_data>" in reason, (
-            "Expected inline <triage_data> fallback when staging dir unavailable"
+            "Inline <triage_data> should appear in reason as compact JSON fallback"
         )
         assert "<triage_data_file>" not in reason, (
-            "Should NOT have <triage_data_file> when staging dir write failed"
+            "Should NOT have <triage_data_file> when staging dir unavailable"
         )
 
-        # The inline triage data should be valid JSON
+        # Parse the inline triage data and verify it's valid JSON
         start = reason.index("<triage_data>") + len("<triage_data>")
         end = reason.index("</triage_data>")
-        triage_json = json.loads(reason[start:end])
+        triage_json = json.loads(reason[start:end].strip())
         assert "categories" in triage_json
         assert "parallel_config" in triage_json
+
+        # staging_dir key must NOT be present in triage data
+        assert "staging_dir" not in triage_json, (
+            "staging_dir key should be omitted when staging is unavailable"
+        )
 
         # Human-readable part should still list the triggered category
         assert "DECISION" in reason
         assert "memories before stopping" in reason
 
     def test_write_context_files_returns_empty_on_staging_failure(self):
-        """When ensure_staging_dir raises RuntimeError AND per-file fallback
-        writes also fail, write_context_files returns empty dict.
+        """When ensure_staging_dir raises RuntimeError, write_context_files
+        returns empty dict immediately without attempting any file writes.
 
-        This simulates a scenario where the /tmp/ filesystem is completely
-        unavailable (e.g., full, read-only, or permissions issue).
+        Security hardening: no fallback to predictable /tmp/ paths.
         """
         import memory_triage as mt
 
@@ -3137,36 +3151,24 @@ class TestTriageFallbackPaths:
              "snippets": ["decided to use PostgreSQL"]},
         ]
 
-        # Mock ensure_staging_dir to raise RuntimeError (staging_dir="")
-        # AND mock os.open to fail for all context file writes
-        original_os_open = os.open
-        def mock_os_open(path, flags, mode=0o777):
-            if isinstance(path, str) and ".memory-triage-context-" in path:
-                raise OSError("Simulated /tmp/ write failure")
-            return original_os_open(path, flags, mode)
-
         with mock.patch.object(
             mt, "ensure_staging_dir",
             side_effect=RuntimeError("Staging dir is a symlink (test)"),
-        ), mock.patch.object(
-            mt.os, "open",
-            side_effect=mock_os_open,
         ):
             context_paths = mt.write_context_files(text, metrics, results)
 
-        # Should return empty dict: staging failed AND per-file writes failed
+        # Should return empty dict immediately on staging failure
         assert context_paths == {}, (
-            f"Expected empty dict when all writes fail, got: {context_paths}"
+            f"Expected empty dict on staging failure, got: {context_paths}"
         )
 
     def test_triage_data_path_none_triggers_inline_fallback(self):
-        """When triage_data_path=None, format_block_message emits inline
-        <triage_data> JSON block instead of <triage_data_file> reference.
+        """When triage_data_path=None, format_block_message embeds compact
+        inline triage data in the message.
 
         This is the final step of the fallback chain: after triage-data.json
         write fails, format_block_message receives triage_data_path=None and
-        must embed the structured data inline so the SKILL.md orchestration
-        can still parse it.
+        embeds compact JSON inline in the message.
         """
         results = [
             {"category": "DECISION", "score": 0.72,
@@ -3177,26 +3179,22 @@ class TestTriageFallbackPaths:
         parallel_config = _deep_copy_parallel_defaults()
         cat_descs = {"decision": "Architectural choices", "constraint": "External limitations"}
 
-        # triage_data_path=None triggers inline fallback
         message = format_block_message(
             results, {}, parallel_config,
             category_descriptions=cat_descs,
             triage_data_path=None,
         )
 
-        # Must contain inline <triage_data> block
-        assert "<triage_data>" in message, "Missing inline <triage_data> tag"
-        assert "</triage_data>" in message, "Missing closing </triage_data> tag"
-
-        # Must NOT contain file reference
+        # Must contain inline <triage_data> block (compact JSON)
+        assert "<triage_data>" in message, "Inline <triage_data> should be in message"
         assert "<triage_data_file>" not in message, (
             "Should not have <triage_data_file> when triage_data_path is None"
         )
 
-        # Inline JSON must be valid and contain expected structure
+        # Parse inline triage data
         start = message.index("<triage_data>") + len("<triage_data>")
         end = message.index("</triage_data>")
-        triage_json = json.loads(message[start:end])
+        triage_json = json.loads(message[start:end].strip())
         assert "categories" in triage_json
         assert "parallel_config" in triage_json
 
@@ -3206,8 +3204,187 @@ class TestTriageFallbackPaths:
         assert "decision" in cat_names
         assert "constraint" in cat_names
 
-        # Category descriptions should appear in human-readable part
-        triage_tag_start = message.index("<triage_data>")
-        human_part = message[:triage_tag_start]
-        assert "Architectural choices" in human_part
-        assert "External limitations" in human_part
+        # Category descriptions should appear in human-readable part of message
+        assert "Architectural choices" in message
+        assert "External limitations" in message
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Staging Hardening: Triage Fallback Bypass Fix
+# ---------------------------------------------------------------------------
+
+
+class TestStagingHardeningPhase1:
+    """Tests for Phase 1 staging hardening: triage fallback bypass fix.
+
+    These tests verify that when ensure_staging_dir() fails (e.g., symlink
+    attack detected), the code does NOT fall back to using the rejected path
+    via get_staging_dir(). Instead, it omits the staging_dir key entirely
+    and skips all file writes to prevent writing to attacker-controlled paths.
+    """
+
+    def _make_blocking_transcript(self, tmp_path):
+        """Create a transcript that triggers DECISION category."""
+        messages = [
+            {"type": "user", "message": {"role": "user", "content":
+                "We decided to use PostgreSQL because of JSONB support. "
+                "We chose PostgreSQL over MySQL because of better JSON handling. "
+                "We selected this approach due to performance reasons."}},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Understood, recording the decision."}
+            ]}},
+        ]
+        transcript_path = str(tmp_path / "transcript.jsonl")
+        with open(transcript_path, "w") as f:
+            for msg in messages:
+                f.write(json.dumps(msg) + "\n")
+        return transcript_path
+
+    def test_triage_fallback_does_not_use_rejected_path(self, tmp_path):
+        """When ensure_staging_dir raises RuntimeError, the rejected path from
+        get_staging_dir() must NOT be used for any writes or stored in triage_data.
+
+        This is the core security fix: previously, the fallback called
+        get_staging_dir(cwd) which returned the SAME compromised path that
+        ensure_staging_dir() had just rejected, defeating the symlink defense.
+        """
+        import memory_triage as mt
+
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "memory-config.json").write_text(
+            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
+        )
+        transcript_path = self._make_blocking_transcript(tmp_path)
+
+        hook_input = json.dumps({
+            "transcript_path": transcript_path,
+            "cwd": str(proj),
+        })
+
+        forced_results = [
+            {"category": "DECISION", "score": 0.72, "snippets": ["decided to use PG"]},
+        ]
+
+        # Track all file write attempts via os.open
+        write_attempts = []
+        original_os_open = os.open
+        def tracking_os_open(path, flags, mode=0o777):
+            write_attempts.append(str(path))
+            return original_os_open(path, flags, mode)
+
+        # Get the path that get_staging_dir would return (the rejected path)
+        rejected_path = get_staging_dir(str(proj))
+
+        captured_out = io.StringIO()
+        with mock.patch.object(mt, "read_stdin", return_value=hook_input), \
+             mock.patch("sys.stdout", captured_out), \
+             mock.patch.object(mt, "check_stop_flag", return_value=False), \
+             mock.patch.object(mt, "run_triage", return_value=forced_results), \
+             mock.patch.object(mt, "ensure_staging_dir",
+                               side_effect=RuntimeError("Staging dir is a symlink (test)")), \
+             mock.patch.object(mt.os, "open", side_effect=tracking_os_open):
+            exit_code = mt._run_triage()
+
+        assert exit_code == 0
+
+        # Parse the output
+        stdout_text = captured_out.getvalue().strip()
+        assert stdout_text, "Expected blocking output"
+        response = json.loads(stdout_text)
+        assert response["decision"] == "block"
+        reason = response["reason"]
+
+        # CRITICAL: No triage-data.json write to the rejected staging path
+        triage_data_writes = [
+            p for p in write_attempts if "triage-data" in p
+        ]
+        for attempt in triage_data_writes:
+            assert not attempt.startswith(rejected_path), (
+                f"triage-data write attempted to rejected staging path: {attempt}"
+            )
+
+        # CRITICAL: No write to predictable /tmp/.memory-triage-context-* paths
+        context_writes = [
+            p for p in write_attempts if ".memory-triage-context-" in p
+        ]
+        assert context_writes == [], (
+            f"Write attempted to predictable fallback path: {context_writes}"
+        )
+
+        # No context files written to rejected staging path either
+        staging_context_writes = [
+            p for p in write_attempts
+            if p.startswith(rejected_path) and "context-" in p
+        ]
+        assert staging_context_writes == [], (
+            f"Context file write to rejected staging path: {staging_context_writes}"
+        )
+
+        # Reason should NOT contain triage_data_file (no file was written)
+        assert "<triage_data_file>" not in reason, (
+            "Should NOT have <triage_data_file> when staging dir unavailable"
+        )
+
+        # CRITICAL: staging_dir key must NOT appear in triage_data (inline)
+        assert "<triage_data>" in reason, (
+            "Expected inline <triage_data> in reason as compact JSON fallback"
+        )
+        start = reason.index("<triage_data>") + len("<triage_data>")
+        end = reason.index("</triage_data>")
+        triage_json = json.loads(reason[start:end].strip())
+        assert "staging_dir" not in triage_json, (
+            f"staging_dir key should be omitted, but found: {triage_json.get('staging_dir')}"
+        )
+
+    def test_context_files_skip_on_staging_failure(self):
+        """When ensure_staging_dir raises RuntimeError, write_context_files
+        must return empty dict {} immediately without any file write attempts.
+
+        Verifies no fallback to predictable /tmp/.memory-triage-context-*.txt
+        paths, which would be exploitable via symlink attacks.
+        """
+        import memory_triage as mt
+
+        text = (
+            "We decided to use PostgreSQL because of JSONB support. "
+            "This is an important architectural decision."
+        )
+        metrics = {"tool_uses": 5, "distinct_tools": 3, "exchanges": 10}
+        results = [
+            {"category": "DECISION", "score": 0.75,
+             "snippets": ["decided to use PostgreSQL"]},
+            {"category": "CONSTRAINT", "score": 0.60,
+             "snippets": ["rate limiting"]},
+        ]
+
+        # Track write attempts to verify no file I/O occurs
+        write_attempts = []
+        original_os_open = os.open
+        def tracking_os_open(path, flags, mode=0o777):
+            write_attempts.append(str(path))
+            return original_os_open(path, flags, mode)
+
+        with mock.patch.object(
+            mt, "ensure_staging_dir",
+            side_effect=RuntimeError("Staging dir is a symlink (test)"),
+        ), mock.patch.object(
+            mt.os, "open",
+            side_effect=tracking_os_open,
+        ):
+            context_paths = mt.write_context_files(text, metrics, results)
+
+        # Must return empty dict
+        assert context_paths == {}, (
+            f"Expected empty dict on staging failure, got: {context_paths}"
+        )
+
+        # Must not attempt any context file writes
+        context_writes = [
+            p for p in write_attempts
+            if "context-" in p or ".memory-triage-context-" in p
+        ]
+        assert context_writes == [], (
+            f"Should not attempt any context file writes, but got: {context_writes}"
+        )

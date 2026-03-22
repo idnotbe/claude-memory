@@ -50,6 +50,15 @@ except ImportError:
     print("ERROR: pydantic>=2.0 is required. Install: pip install 'pydantic>=2.0,<3.0'", file=sys.stderr)
     sys.exit(1)
 
+# Resolved /tmp/ prefix for cross-platform compatibility (macOS: /tmp -> /private/tmp).
+# Import from memory_staging_utils when available; fallback to local computation.
+try:
+    from memory_staging_utils import STAGING_DIR_PREFIX as _STAGING_PREFIX, RESOLVED_TMP_PREFIX as _RESOLVED_TMP_PREFIX
+except ImportError:
+    _RESOLVED_TMP = os.path.realpath("/tmp")
+    _STAGING_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
+    _RESOLVED_TMP_PREFIX = _RESOLVED_TMP + "/"
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -548,7 +557,7 @@ def cleanup_staging(staging_dir: str) -> dict:
 
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
-    is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
+    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX)
     is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
@@ -600,7 +609,7 @@ def cleanup_intents(staging_dir: str) -> dict:
 
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
-    is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
+    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX)
     is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
@@ -650,7 +659,7 @@ def write_save_result(staging_dir: str, result_json: str) -> dict:
 
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
-    is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
+    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX)
     is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
@@ -758,7 +767,7 @@ def update_sentinel_state(staging_dir: str, target_state: str) -> dict:
 
     # Path containment: accept /tmp/ staging and legacy .staging paths
     resolved_str = str(staging_path)
-    is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
+    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX)
     is_legacy_staging = _is_valid_legacy_staging(resolved_str)
     if not is_tmp_staging and not is_legacy_staging:
         return {
@@ -1596,9 +1605,9 @@ def _read_input(input_path: str) -> Optional[dict]:
     # or /tmp/.memory-write-pending*.json (manual save via /memory:save command)
     basename = os.path.basename(resolved)
     in_staging = (
-        resolved.startswith("/tmp/.claude-memory-staging-")
+        resolved.startswith(_STAGING_PREFIX)
         or _is_valid_legacy_staging(resolved, allow_child=True)
-        or (resolved.startswith("/tmp/") and basename.startswith(".memory-write-pending") and basename.endswith(".json"))
+        or (resolved.startswith(_RESOLVED_TMP_PREFIX) and basename.startswith(".memory-write-pending") and basename.endswith(".json"))
     )
     if not in_staging:
         print(
@@ -1799,7 +1808,7 @@ def main():
         choices=[
             "create", "update", "retire", "archive", "unarchive", "restore",
             "cleanup-staging", "cleanup-intents",
-            "write-save-result", "write-save-result-direct",
+            "write-save-result",
             "update-sentinel-state",
         ],
     )
@@ -1824,14 +1833,6 @@ def main():
     parser.add_argument(
         "--result-file",
         help="Path to JSON file for save result (alternative to --result-json, avoids Guardian scan of inline JSON)",
-    )
-    parser.add_argument(
-        "--categories",
-        help="Comma-separated category list (write-save-result-direct)",
-    )
-    parser.add_argument(
-        "--titles",
-        help="Comma-separated title list (write-save-result-direct)",
     )
     parser.add_argument(
         "--state",
@@ -1887,62 +1888,34 @@ def main():
         if not result_json:
             print("ERROR: --result-json or --result-file is required for write-save-result.")
             return 1
-        result = write_save_result(args.staging_dir, result_json)
-        print(json.dumps(result))
-        return 0 if result["status"] == "ok" else 1
-
-    if args.action == "write-save-result-direct":
-        if not args.staging_dir:
-            print("ERROR: --staging-dir is required for write-save-result-direct.")
-            return 1
-        if not args.categories:
-            print("ERROR: --categories is required for write-save-result-direct.")
-            return 1
-        if not args.titles:
-            print("ERROR: --titles is required for write-save-result-direct.")
-            return 1
-        # Note: comma-separated splitting means titles containing commas will be
-        # split incorrectly. This is acceptable because: (1) the main agent
-        # constructs these values and can avoid commas, (2) category names never
-        # contain commas, and (3) this is informational metadata only (saves
-        # already completed at this point).
-        categories = [c.strip() for c in args.categories.split(",") if c.strip()]
-        titles = [t.strip() for t in args.titles.split(",") if t.strip()]
-        if not categories:
-            print("ERROR: --categories must contain at least one non-empty value.")
-            return 1
-        if not titles:
-            print("ERROR: --titles must contain at least one non-empty value.")
-            return 1
-        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # Read session_id from sentinel file (best-effort, None on failure)
-        sentinel_session_id = None
+        # Auto-populate session_id from sentinel if not provided
         try:
-            sentinel_file = os.path.join(
-                str(Path(args.staging_dir).resolve()), ".triage-handled"
-            )
-            sfd = os.open(sentinel_file, os.O_RDONLY | os.O_NOFOLLOW)
-            try:
-                sraw = os.read(sfd, 4096).decode("utf-8", errors="replace")
-            finally:
-                os.close(sfd)
-            sdata = json.loads(sraw)
-            if isinstance(sdata, dict):
-                sid = sdata.get("session_id")
-                if isinstance(sid, str) and sid:
-                    sentinel_session_id = sid
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            pass  # Fail-open: session_id will be None
-
-        result_data = {
-            "saved_at": now_utc,
-            "categories": categories,
-            "titles": titles,
-            "errors": [],
-            "session_id": sentinel_session_id,
-        }
-        result_json = json.dumps(result_data, ensure_ascii=False)
+            data = json.loads(result_json)
+            if isinstance(data, dict) and ("session_id" not in data or data["session_id"] is None):
+                sentinel_session_id = None
+                try:
+                    sentinel_file = os.path.join(
+                        str(Path(args.staging_dir).resolve()), ".triage-handled"
+                    )
+                    sfd = os.open(sentinel_file, os.O_RDONLY | os.O_NOFOLLOW)
+                    try:
+                        sraw = os.read(sfd, 4096).decode("utf-8", errors="replace")
+                    finally:
+                        os.close(sfd)
+                    sdata = json.loads(sraw)
+                    if isinstance(sdata, dict):
+                        sid = sdata.get("session_id")
+                        if isinstance(sid, str) and sid:
+                            sentinel_session_id = sid
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+                if sentinel_session_id:
+                    data["session_id"] = sentinel_session_id
+                else:
+                    data["session_id"] = None
+                result_json = json.dumps(data, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            pass  # Let write_save_result handle invalid JSON
         result = write_save_result(args.staging_dir, result_json)
         print(json.dumps(result))
         return 0 if result["status"] == "ok" else 1

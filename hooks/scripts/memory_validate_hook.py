@@ -14,6 +14,9 @@ import os
 import sys
 import time
 
+# Resolved /tmp/ prefix for cross-platform compatibility (macOS: /tmp -> /private/tmp)
+_RESOLVED_TMP = os.path.realpath("/tmp")
+
 # Lazy logger import (fail-open: never block hook execution)
 _logger = None
 
@@ -190,7 +193,7 @@ def main():
     # Check both new /tmp/ staging path and legacy .claude/memory/.staging/ path.
     _stg = ".stagi" + "ng"
     staging_marker = MEMORY_DIR_SEGMENT + _stg + "/"
-    _TMP_STAGING_PREFIX = "/tmp/.claude-memory-staging-"
+    _TMP_STAGING_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
     normalized = resolved.replace(os.sep, "/")
     # Derive memory_root for logging
     _mem_root = ""

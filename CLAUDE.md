@@ -31,7 +31,7 @@ When the Stop hook triggers categories, it produces:
 2. **`triage-data.json`** file at `/tmp/.claude-memory-staging-<hash>/triage-data.json` (referenced via `<triage_data_file>` tag; falls back to inline `<triage_data>` JSON on write failure). Includes `staging_dir` field for downstream script path resolution.
 3. **Context files** at `/tmp/.claude-memory-staging-<hash>/context-<CATEGORY>.txt` with generous transcript excerpts
 
-The SKILL.md orchestration uses this to spawn per-category `memory-drafter` Agent subagents (`tools: Read, Write` only -- no Bash, structurally preventing Guardian conflicts) for parallel intent drafting. The main agent then performs deterministic execution (Phase 1.5): candidate selection, CUD resolution, and draft assembly via Bash. Verification subagents check draft quality, then a single foreground Task subagent (haiku) runs all memory_write.py commands, staging cleanup, and result file creation. See `skills/memory-management/SKILL.md` for the full 5-phase flow (Phase 0, 1, 1.5, 2, 3).
+The SKILL.md orchestration uses this to spawn per-category `memory-drafter` Agent subagents (`tools: Read, Write` only -- no Bash, structurally preventing Guardian conflicts) for parallel intent drafting. Phase 1.5 runs `memory_orchestrate.py` -- a single deterministic script that performs candidate selection, CUD resolution, and draft assembly (replaces multi-step LLM-driven execution). Verification subagents check draft quality, then a single foreground Task subagent (haiku) runs all memory_write.py commands, staging cleanup, and result file creation. See `skills/memory-management/SKILL.md` for the full 5-phase flow (Phase 0, 1, 1.5, 2, 3).
 
 ## Key Files
 
@@ -42,6 +42,7 @@ The SKILL.md orchestration uses this to spawn per-category `memory-drafter` Agen
 | hooks/scripts/memory_search_engine.py | Shared FTS5 engine, CLI search interface | stdlib + sqlite3 |
 | hooks/scripts/memory_index.py | Index rebuild, validate, query CLI | stdlib only |
 | hooks/scripts/memory_candidate.py | ACE candidate selection for update/retire | stdlib only |
+| hooks/scripts/memory_orchestrate.py | Phase 1.5 orchestration: deterministic CUD pipeline (single script) | stdlib only (calls candidate.py, draft.py as subprocesses) |
 | hooks/scripts/memory_draft.py | Draft assembler: partial input → complete schema-valid JSON | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_write.py | Schema-enforced CRUD + lifecycle (retire/archive/unarchive/restore) | pydantic v2 |
 | hooks/scripts/memory_enforce.py | Rolling window enforcement: scans category, retires oldest beyond limit | pydantic v2 (via memory_write imports) |
@@ -67,7 +68,7 @@ Config: .claude/memory/memory-config.json (per-project, runtime) | Defaults: ass
 
 Config keys fall into two categories:
 - **Script-read** (parsed by Python scripts): `triage.enabled`, `triage.max_messages`, `triage.thresholds.*`, `triage.parallel.*`, `retrieval.enabled`, `retrieval.max_inject`, `retrieval.judge.*` (enabled, model, timeout_per_call, candidate_pool_size, fallback_top_k, include_conversation_context, context_turns), `delete.grace_period_days`, `logging.enabled`, `logging.level`, `logging.retention_days`, `categories.*.description` (used by triage and retrieval scripts)
-- **Agent-interpreted** (read by LLM via SKILL.md instructions, not by Python): `memory_root`, `categories.*.enabled`, `categories.*.folder` (informational mapping), `categories.*.description` (category purpose text for triage context files and retrieval output), `categories.*.auto_capture`, `categories.*.retention_days`, `auto_commit`, `max_memories_per_category`, `retrieval.match_strategy`, `delete.archive_retired`
+- **Agent-interpreted** (read by LLM via SKILL.md instructions, not by Python): `memory_root`, `categories.*.enabled`, `categories.*.folder` (informational mapping), `categories.*.description` (category purpose text for triage context files and retrieval output), `categories.*.auto_capture`, `categories.*.retention_days`, `auto_commit`, `max_memories_per_category`, `retrieval.match_strategy`, `delete.archive_retired`, `triage.parallel.verification_enabled`
 
 ## Testing
 

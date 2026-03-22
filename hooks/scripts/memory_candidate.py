@@ -390,6 +390,7 @@ def main():
         hints = [f"Candidate path invalid; falling back to {pre_action}"]
 
     result = {
+        "category": category,
         "candidate": candidate_output,
         "lifecycle_event": lifecycle_event,
         "delete_allowed": delete_allowed,
@@ -399,7 +400,7 @@ def main():
         "hints": hints,
     }
 
-    print(json.dumps(result, indent=2))
+    print(json.dumps(result, separators=(",", ":")))
 
 
 if __name__ == "__main__":

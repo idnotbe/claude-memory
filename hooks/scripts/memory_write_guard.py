@@ -12,6 +12,10 @@ import os
 import re
 import sys
 
+# Resolved /tmp/ prefix for cross-platform compatibility (macOS: /tmp -> /private/tmp)
+_RESOLVED_TMP = os.path.realpath("/tmp")
+_RESOLVED_TMP_PREFIX = _RESOLVED_TMP + "/"
+
 # Build the path marker at runtime to avoid static pattern matching
 _DOT_CLAUDE = ".clau" + "de"
 _MEMORY = "mem" + "ory"
@@ -82,7 +86,7 @@ def main():
     # Accept /tmp/.memory-write-pending*.json, /tmp/.memory-draft-*.json,
     # and /tmp/.memory-triage-context-*.txt (parallel triage temp files)
     basename = os.path.basename(resolved)
-    if resolved.startswith("/tmp/"):
+    if resolved.startswith(_RESOLVED_TMP_PREFIX):
         if (basename.startswith(".memory-write-pending") and basename.endswith(".json")):
             sys.exit(0)
         if (basename.startswith(".memory-draft-") and basename.endswith(".json")):
@@ -94,7 +98,7 @@ def main():
     # These are temporary working files used by subagents during memory consolidation.
     # Moved from .claude/memory/.staging/ to /tmp/ to avoid Claude Code's
     # hardcoded .claude/ protected directory prompts.
-    _TMP_STAGING_PREFIX = "/tmp/.claude-memory-staging-"
+    _TMP_STAGING_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
 
     # S2 defense: Detect symlink-compromised staging paths.
     # If the unresolved file_path looks like staging but resolves elsewhere,

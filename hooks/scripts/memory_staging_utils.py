@@ -16,8 +16,13 @@ import hashlib
 import os
 import stat
 
-# Prefix for all staging directories — matches guard pattern checks
-STAGING_DIR_PREFIX = "/tmp/.claude-memory-staging-"
+# Prefix for all staging directories — matches guard pattern checks.
+# Use os.path.realpath("/tmp") to handle macOS where /tmp -> /private/tmp.
+# After Path.resolve() or os.path.realpath(), paths become /private/tmp/...
+# which would fail a startswith("/tmp/...") check.
+_RESOLVED_TMP = os.path.realpath("/tmp")
+STAGING_DIR_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
+RESOLVED_TMP_PREFIX = _RESOLVED_TMP + "/"
 
 
 def get_staging_dir(cwd: str = "") -> str:
@@ -34,7 +39,10 @@ def get_staging_dir(cwd: str = "") -> str:
     """
     if not cwd:
         cwd = os.getcwd()
-    project_hash = hashlib.sha256(os.path.realpath(cwd).encode()).hexdigest()[:12]
+    # Hash formula: UID:realpath(cwd) for per-user isolation.
+    # Changed from realpath(cwd)-only in v5.1.0.
+    # Orphaned dirs from old formula are harmless (cleaned by OS on reboot).
+    project_hash = hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(cwd)}".encode()).hexdigest()[:12]
     return f"{STAGING_DIR_PREFIX}{project_hash}"
 
 
@@ -91,7 +99,10 @@ def _validate_existing_staging(staging_dir: str) -> None:
         # unexploitable -- /tmp/ has sticky bit, legacy paths are in
         # the user's workspace. An attacker cannot delete+replace the
         # directory in this window without already having write access.
-        os.chmod(staging_dir, 0o700)
+        try:
+            os.chmod(staging_dir, 0o700, follow_symlinks=False)
+        except (NotImplementedError, OSError):
+            os.chmod(staging_dir, 0o700)
 
 
 def validate_staging_dir(staging_dir: str) -> None:

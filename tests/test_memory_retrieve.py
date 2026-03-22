@@ -20,7 +20,7 @@ import hashlib
 
 def _get_staging_dir(proj_path: str) -> Path:
     """Compute the /tmp/ staging directory for a project path (test helper)."""
-    project_hash = hashlib.sha256(os.path.realpath(proj_path).encode()).hexdigest()[:12]
+    project_hash = hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(proj_path)}".encode()).hexdigest()[:12]
     return Path(f"/tmp/.claude-memory-staging-{project_hash}")
 from memory_retrieve import (
     tokenize,

@@ -1,6 +1,6 @@
 ---
-status: not-started
-progress: "Not started"
+status: blocked
+progress: "Phase 1 + Phase 4 (4.1, 4.2) complete (34 tests). Phase 2-3 + Step 4.3 blocked on architecture-simplification.md (not-started)."
 ---
 
 # Observability and Logging — Action Plan
@@ -24,10 +24,10 @@ Current logging captures triage scores and guard decisions but misses critical o
 
 ## Phases
 
-### Phase 1: Triage Observability [ ]
-- [ ] **Step 1.1**: Add `fire_count` to triage log event. Increment a counter file (`.claude/memory/.staging/.triage-fire-count`) on each triage execution. Include count in `triage.score` log event.
-- [ ] **Step 1.2**: Add `session_id` to all triage log events (already available via `get_session_id()`).
-- [ ] **Step 1.3**: Log `triage.idempotency_skip` event when any guard (flag, sentinel, save-result) short-circuits triage. Include which guard triggered.
+### Phase 1: Triage Observability [v]
+- [v] **Step 1.1**: Add `fire_count` to triage log event. Counter file at `{staging_dir}/.triage-fire-count` (workspace-scoped via /tmp/). Included in `triage.score` and `triage.idempotency_skip` events. O_NONBLOCK + fstat defense.
+- [v] **Step 1.2**: `session_id` included in all 6 triage log events (5 skip + 1 score).
+- [v] **Step 1.3**: `triage.idempotency_skip` event emitted for all 5 guards: stop_flag, sentinel, save_result, lock_held, sentinel_recheck.
 
 ### Phase 2: Save Flow Timing [ ]
 - [ ] **Step 2.1**: Add start timestamp to triage-data.json (written by triage hook).
@@ -44,17 +44,17 @@ Current logging captures triage scores and guard decisions but misses critical o
   - Popup approximation (guardian deny/ask events if available)
 - [ ] **Step 3.2**: Add `--watch` mode for real-time log tailing with event filtering.
 
-### Phase 4: Tests [ ]
-- [ ] **Step 4.1**: Test triage fire count logging
-- [ ] **Step 4.2**: Test idempotency skip logging
-- [ ] **Step 4.3**: Test save timing in result file
-- [ ] Verification: 1 round (lower risk than code changes)
+### Phase 4: Tests [partial]
+- [v] **Step 4.1**: Test triage fire count logging (8 unit + 5 edge-case tests: workspace isolation, truncation, permissions, large values, non-UTF8)
+- [v] **Step 4.2**: Test idempotency skip logging (7 guard tests + 2 session_id bypass + 1 kwargs + 2 control-flow + 1 disabled + 2 score completeness + 3 fail-open = 18 additional tests)
+- [ ] **Step 4.3**: Test save timing in result file (blocked: depends on Phase 2)
+- [v] Verification: 2 independent rounds per phase with vibe-check + pal clink (codex 5.3 + gemini 3.1 pro). Total: 34 tests.
 
 ## Files Changed
 
-| File | Changes |
-|------|---------|
-| hooks/scripts/memory_triage.py | fire_count, session_id, idempotency_skip events |
-| hooks/scripts/memory_write.py | save.complete event with timing |
-| hooks/scripts/memory_logger.py | Ensure session_id propagation |
-| tests/ | New logging tests |
+| File | Changes | Status |
+|------|---------|--------|
+| hooks/scripts/memory_triage.py | `_increment_fire_count()`, 5 `triage.idempotency_skip` events, `fire_count` in `triage.score` | Done |
+| hooks/scripts/memory_write.py | save.complete event with timing | Deferred (Phase 2) |
+| hooks/scripts/memory_logger.py | No changes needed (session_id already supported) | N/A |
+| tests/test_triage_observability.py | 34 tests: fire_count (13), idempotency_skip (7), session_id bypass (2), score completeness (2), kwargs (1), control-flow (2), disabled (1), fail-open (3), edge cases (3) | Done |

@@ -85,6 +85,7 @@
         "tech_debt": "haiku",
         "preference": "haiku"
       },
+      "verification_enabled": true,
       "verification_model": "sonnet",
       "default_model": "haiku"
     }

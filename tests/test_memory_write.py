@@ -1429,14 +1429,15 @@ class TestCleanupStagingTmpPath:
 
 
 # ---------------------------------------------------------------
-# P2 Popup Fix: write-save-result-direct CLI action tests
+# write-save-result with --result-file and session_id auto-population
 # ---------------------------------------------------------------
 
-class TestWriteSaveResultDirect:
-    """Test the write-save-result-direct CLI action.
+class TestWriteSaveResultFile:
+    """Test the write-save-result CLI action with --result-file input.
 
-    This action replaced heredoc-based save result writing (P2 popup fix)
-    to avoid Guardian heredoc body detection.
+    Replaces the removed write-save-result-direct action. Titles and
+    categories are passed via a JSON file (not command-line arguments)
+    to prevent shell injection.
     """
 
     def _make_tmp_staging(self):
@@ -1445,17 +1446,21 @@ class TestWriteSaveResultDirect:
         staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
         return staging
 
-    def _run_direct(self, staging_dir, categories=None, titles=None):
-        """Run write-save-result-direct via subprocess."""
+    def _write_input_file(self, staging_dir, data):
+        """Write save-result-input.json to staging directory."""
+        input_file = staging_dir / "save-result-input.json"
+        input_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return input_file
+
+    def _run_result_file(self, staging_dir, input_file=None):
+        """Run write-save-result --result-file via subprocess."""
         cmd = [
             PYTHON, WRITE_SCRIPT,
-            "--action", "write-save-result-direct",
+            "--action", "write-save-result",
             "--staging-dir", str(staging_dir),
         ]
-        if categories is not None:
-            cmd.extend(["--categories", categories])
-        if titles is not None:
-            cmd.extend(["--titles", titles])
+        if input_file is not None:
+            cmd.extend(["--result-file", str(input_file)])
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=15,
         )
@@ -1465,85 +1470,26 @@ class TestWriteSaveResultDirect:
         """Basic success: creates last-save-result.json with correct fields."""
         staging = self._make_tmp_staging()
         try:
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                categories="session_summary,constraint",
-                titles="Session Feb 2026,Max payload size",
-            )
+            input_data = {
+                "saved_at": "2026-03-22T10:00:00Z",
+                "categories": ["session_summary", "constraint"],
+                "titles": ["Session Feb 2026", "Max payload size"],
+                "errors": [],
+            }
+            input_file = self._write_input_file(staging, input_data)
+            rc, stdout, stderr = self._run_result_file(staging, input_file)
             assert rc == 0, f"Failed: {stdout}\n{stderr}"
             output = json.loads(stdout)
             assert output["status"] == "ok"
 
-            # Verify the result file was created
             result_file = staging / "last-save-result.json"
             assert result_file.exists(), "last-save-result.json not created"
 
             data = json.loads(result_file.read_text())
             assert data["categories"] == ["session_summary", "constraint"]
             assert data["titles"] == ["Session Feb 2026", "Max payload size"]
-            assert "saved_at" in data
-            # ISO 8601 format check
-            assert data["saved_at"].endswith("Z")
-            assert "T" in data["saved_at"]
+            assert data["saved_at"] == "2026-03-22T10:00:00Z"
             assert data["errors"] == []
-        finally:
-            import shutil
-            shutil.rmtree(staging, ignore_errors=True)
-
-    def test_missing_categories_fails(self):
-        """Missing --categories should produce an error."""
-        staging = self._make_tmp_staging()
-        try:
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                titles="Some Title",
-            )
-            assert rc != 0
-            assert "categories" in (stdout + stderr).lower()
-        finally:
-            import shutil
-            shutil.rmtree(staging, ignore_errors=True)
-
-    def test_missing_titles_fails(self):
-        """Missing --titles should produce an error."""
-        staging = self._make_tmp_staging()
-        try:
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                categories="session_summary",
-            )
-            assert rc != 0
-            assert "titles" in (stdout + stderr).lower()
-        finally:
-            import shutil
-            shutil.rmtree(staging, ignore_errors=True)
-
-    def test_empty_categories_fails(self):
-        """Empty --categories (only whitespace/commas) should produce an error."""
-        staging = self._make_tmp_staging()
-        try:
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                categories=",,,",
-                titles="Some Title",
-            )
-            assert rc != 0
-            assert "non-empty" in (stdout + stderr).lower() or "categories" in (stdout + stderr).lower()
-        finally:
-            import shutil
-            shutil.rmtree(staging, ignore_errors=True)
-
-    def test_empty_titles_fails(self):
-        """Empty --titles (only whitespace/commas) should produce an error."""
-        staging = self._make_tmp_staging()
-        try:
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                categories="session_summary",
-                titles=", , ,",
-            )
-            assert rc != 0
-            assert "non-empty" in (stdout + stderr).lower() or "titles" in (stdout + stderr).lower()
         finally:
             import shutil
             shutil.rmtree(staging, ignore_errors=True)
@@ -1552,11 +1498,14 @@ class TestWriteSaveResultDirect:
         """Single category and title should work."""
         staging = self._make_tmp_staging()
         try:
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                categories="decision",
-                titles="Use JWT tokens",
-            )
+            input_data = {
+                "saved_at": "2026-03-22T10:00:00Z",
+                "categories": ["decision"],
+                "titles": ["Use JWT tokens"],
+                "errors": [],
+            }
+            input_file = self._write_input_file(staging, input_data)
+            rc, stdout, stderr = self._run_result_file(staging, input_file)
             assert rc == 0, f"Failed: {stdout}\n{stderr}"
             result_file = staging / "last-save-result.json"
             data = json.loads(result_file.read_text())
@@ -1566,48 +1515,76 @@ class TestWriteSaveResultDirect:
             import shutil
             shutil.rmtree(staging, ignore_errors=True)
 
+    def test_title_with_shell_metacharacters(self):
+        """Titles with shell metacharacters are handled safely via file input."""
+        staging = self._make_tmp_staging()
+        try:
+            dangerous_title = '"; rm -rf /; echo "'
+            input_data = {
+                "saved_at": "2026-03-22T10:00:00Z",
+                "categories": ["decision"],
+                "titles": [dangerous_title],
+                "errors": [],
+            }
+            input_file = self._write_input_file(staging, input_data)
+            rc, stdout, stderr = self._run_result_file(staging, input_file)
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            result_file = staging / "last-save-result.json"
+            data = json.loads(result_file.read_text())
+            assert data["titles"] == [dangerous_title], (
+                "Shell metacharacters in title should be preserved exactly"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_title_with_commas_preserved(self):
+        """Titles containing commas are preserved (no comma-splitting)."""
+        staging = self._make_tmp_staging()
+        try:
+            input_data = {
+                "saved_at": "2026-03-22T10:00:00Z",
+                "categories": ["session_summary"],
+                "titles": ["Session 1, Part 2"],
+                "errors": [],
+            }
+            input_file = self._write_input_file(staging, input_data)
+            rc, stdout, stderr = self._run_result_file(staging, input_file)
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            result_file = staging / "last-save-result.json"
+            data = json.loads(result_file.read_text())
+            assert data["titles"] == ["Session 1, Part 2"], (
+                "Commas in titles should be preserved (not split)"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_missing_result_file_fails(self):
+        """Missing --result-file (and --result-json) should produce an error."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_result_file(staging)
+            assert rc != 0
+            assert "result" in (stdout + stderr).lower()
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
     def test_missing_staging_dir_fails(self):
         """Missing --staging-dir should produce an error."""
         cmd = [
             PYTHON, WRITE_SCRIPT,
-            "--action", "write-save-result-direct",
-            "--categories", "session_summary",
-            "--titles", "Test",
+            "--action", "write-save-result",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         assert result.returncode != 0
         assert "staging-dir" in (result.stdout + result.stderr).lower()
 
-    def test_comma_in_title_splits(self):
-        """Titles containing commas are split (known limitation).
-
-        The write-save-result-direct action splits on commas, so a title
-        like 'Session 1, Part 2' becomes two entries. This is documented
-        as acceptable since the main agent constructs these values.
-        """
+    def test_session_id_auto_populated_from_sentinel(self):
+        """write-save-result auto-populates session_id from sentinel when missing."""
         staging = self._make_tmp_staging()
         try:
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                categories="session_summary",
-                titles="Session 1, Part 2",
-            )
-            assert rc == 0, f"Failed: {stdout}\n{stderr}"
-            result_file = staging / "last-save-result.json"
-            data = json.loads(result_file.read_text())
-            # Comma splits into two titles (documented behavior)
-            assert len(data["titles"]) == 2
-            assert data["titles"][0] == "Session 1"
-            assert data["titles"][1] == "Part 2"
-        finally:
-            import shutil
-            shutil.rmtree(staging, ignore_errors=True)
-
-    def test_session_id_from_sentinel(self):
-        """write-save-result-direct reads session_id from sentinel file."""
-        staging = self._make_tmp_staging()
-        try:
-            # Write a sentinel file with session_id
             sentinel_file = staging / ".triage-handled"
             sentinel_file.write_text(json.dumps({
                 "session_id": "test-session-xyz",
@@ -1616,35 +1593,70 @@ class TestWriteSaveResultDirect:
                 "pid": os.getpid(),
             }), encoding="utf-8")
 
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                categories="decision",
-                titles="Use PostgreSQL",
-            )
+            input_data = {
+                "saved_at": "2026-03-22T10:00:00Z",
+                "categories": ["decision"],
+                "titles": ["Use PostgreSQL"],
+                "errors": [],
+            }
+            input_file = self._write_input_file(staging, input_data)
+            rc, stdout, stderr = self._run_result_file(staging, input_file)
             assert rc == 0, f"Failed: {stdout}\n{stderr}"
             result_file = staging / "last-save-result.json"
             data = json.loads(result_file.read_text())
             assert data["session_id"] == "test-session-xyz", (
-                "session_id should be read from sentinel file"
+                "session_id should be auto-populated from sentinel file"
             )
         finally:
             import shutil
             shutil.rmtree(staging, ignore_errors=True)
 
     def test_session_id_none_without_sentinel(self):
-        """write-save-result-direct sets session_id to null when sentinel is absent."""
+        """write-save-result sets session_id to null when sentinel is absent."""
         staging = self._make_tmp_staging()
         try:
-            rc, stdout, stderr = self._run_direct(
-                staging,
-                categories="constraint",
-                titles="Max 100 connections",
-            )
+            input_data = {
+                "saved_at": "2026-03-22T10:00:00Z",
+                "categories": ["constraint"],
+                "titles": ["Max 100 connections"],
+                "errors": [],
+            }
+            input_file = self._write_input_file(staging, input_data)
+            rc, stdout, stderr = self._run_result_file(staging, input_file)
             assert rc == 0, f"Failed: {stdout}\n{stderr}"
             result_file = staging / "last-save-result.json"
             data = json.loads(result_file.read_text())
             assert data["session_id"] is None, (
                 "session_id should be None when sentinel file is absent"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_session_id_preserved_if_provided(self):
+        """write-save-result preserves session_id if already in input."""
+        staging = self._make_tmp_staging()
+        try:
+            sentinel_file = staging / ".triage-handled"
+            sentinel_file.write_text(json.dumps({
+                "session_id": "sentinel-session",
+                "state": "saving",
+            }), encoding="utf-8")
+
+            input_data = {
+                "saved_at": "2026-03-22T10:00:00Z",
+                "categories": ["decision"],
+                "titles": ["Use Redis"],
+                "errors": [],
+                "session_id": "provided-session",
+            }
+            input_file = self._write_input_file(staging, input_data)
+            rc, stdout, stderr = self._run_result_file(staging, input_file)
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            result_file = staging / "last-save-result.json"
+            data = json.loads(result_file.read_text())
+            assert data["session_id"] == "provided-session", (
+                "session_id should be preserved when already provided in input"
             )
         finally:
             import shutil

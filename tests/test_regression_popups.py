@@ -675,8 +675,8 @@ class TestNoHeredocInSavePrompt:
     """Verify SKILL.md Phase 3 save subagent prompt forbids heredoc (<<)
     and does not itself use heredoc in bash commands.
 
-    P2 popup fix added explicit heredoc warning and replaced heredoc-based
-    save result writing with write-save-result-direct action.
+    P2 popup fix added explicit heredoc warning. Shell injection fix
+    replaced write-save-result-direct with file-based write-save-result.
     """
 
     @pytest.fixture(scope="class")
@@ -736,10 +736,16 @@ class TestNoHeredocInSavePrompt:
                 f"Phase 3 bash command uses heredoc: {bash_line}"
             )
 
-    def test_uses_write_save_result_direct(self, phase3_section):
-        """Phase 3 should use write-save-result-direct (not heredoc)."""
-        assert "write-save-result-direct" in phase3_section, (
-            "Phase 3 section should use write-save-result-direct action"
+    def test_uses_write_save_result_with_result_file(self, phase3_section):
+        """Phase 3 should use write-save-result --result-file (not direct CLI args)."""
+        assert "write-save-result" in phase3_section, (
+            "Phase 3 section should use write-save-result action"
+        )
+        assert "--result-file" in phase3_section, (
+            "Phase 3 section should use --result-file for file-based input"
+        )
+        assert "write-save-result-direct" not in phase3_section, (
+            "Phase 3 section should NOT use removed write-save-result-direct action"
         )
 
 

@@ -8,6 +8,7 @@ Covers:
 """
 
 import hashlib
+import importlib
 import os
 import shutil
 import stat
@@ -22,7 +23,9 @@ SCRIPTS_DIR = str(Path(__file__).parent.parent / "hooks" / "scripts")
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
+import memory_staging_utils
 from memory_staging_utils import (
+    RESOLVED_TMP_PREFIX,
     STAGING_DIR_PREFIX,
     get_staging_dir,
     ensure_staging_dir,
@@ -74,7 +77,7 @@ class TestGetStagingDir:
     def test_matches_manual_computation(self, tmp_path):
         """Verify the hash matches direct SHA-256 computation."""
         real_path = os.path.realpath(str(tmp_path))
-        expected_hash = hashlib.sha256(real_path.encode()).hexdigest()[:12]
+        expected_hash = hashlib.sha256(f"{os.geteuid()}:{real_path}".encode()).hexdigest()[:12]
         expected = f"{STAGING_DIR_PREFIX}{expected_hash}"
         result = get_staging_dir(str(tmp_path))
         assert result == expected
@@ -97,6 +100,21 @@ class TestGetStagingDir:
         path_from_link = get_staging_dir(str(link_dir))
         assert path_from_real == path_from_link, (
             "Symlink and real dir should resolve to the same staging path"
+        )
+
+    def test_different_users_get_different_staging_dirs(self):
+        """Different UIDs should produce different staging directories.
+
+        The hash formula includes os.geteuid() to prevent cross-user
+        collisions on shared /tmp/. This is critical for multi-user
+        systems where two users might work on the same project path.
+        """
+        with mock.patch("memory_staging_utils.os.geteuid", return_value=1000):
+            path_user_1000 = memory_staging_utils.get_staging_dir("/test")
+        with mock.patch("memory_staging_utils.os.geteuid", return_value=1001):
+            path_user_1001 = memory_staging_utils.get_staging_dir("/test")
+        assert path_user_1000 != path_user_1001, (
+            "Different UIDs with same cwd should produce different staging dirs"
         )
 
 
@@ -252,8 +270,8 @@ class TestValidateStagingDirSecurity:
         finally:
             shutil.rmtree(staging_path, ignore_errors=True)
 
-    def test_regular_file_at_path_raises_runtime_error(self, tmp_path):
-        """Regular file (not dir) at staging path should raise RuntimeError.
+    def test_regular_file_at_path_raises_not_directory(self, tmp_path):
+        """Regular file (not dir) at staging path should raise RuntimeError with 'not a directory'.
 
         A pre-existing regular file at the staging path is rejected by the
         S_ISDIR check, preventing downstream failures from trying to write
@@ -269,6 +287,45 @@ class TestValidateStagingDirSecurity:
             with pytest.raises(RuntimeError, match="not a directory"):
                 validate_staging_dir(staging_path)
         finally:
+            if os.path.exists(staging_path):
+                os.unlink(staging_path)
+
+    def test_fifo_at_staging_path_raises(self, tmp_path):
+        """FIFO (named pipe) at staging path should raise RuntimeError.
+
+        An attacker could create a FIFO at the staging path before the plugin
+        runs. The S_ISDIR check must reject it.
+        """
+        staging_path = tempfile.mkdtemp(prefix=".claude-memory-staging-", dir="/tmp")
+        os.rmdir(staging_path)  # Remove dir so we can create a FIFO
+        try:
+            os.mkfifo(staging_path, 0o700)
+
+            with pytest.raises(RuntimeError, match="not a directory"):
+                validate_staging_dir(staging_path)
+        finally:
+            if os.path.exists(staging_path):
+                os.unlink(staging_path)
+
+    def test_socket_at_staging_path_raises(self, tmp_path):
+        """Unix socket at staging path should raise RuntimeError.
+
+        An attacker could create a Unix socket at the staging path before the
+        plugin runs. The S_ISDIR check must reject it.
+        """
+        import socket as _socket
+        staging_path = tempfile.mkdtemp(prefix=".claude-memory-staging-", dir="/tmp")
+        os.rmdir(staging_path)  # Remove dir so we can create a socket
+        sock = None
+        try:
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.bind(staging_path)
+
+            with pytest.raises(RuntimeError, match="not a directory"):
+                validate_staging_dir(staging_path)
+        finally:
+            if sock:
+                sock.close()
             if os.path.exists(staging_path):
                 os.unlink(staging_path)
 
@@ -408,3 +465,83 @@ class TestValidateStagingDirLegacyPath:
 
         with pytest.raises(RuntimeError, match="not a directory"):
             validate_staging_dir(staging_path)
+
+
+# ===================================================================
+# Phase 2: Cross-platform resolved /tmp/ prefix tests
+# ===================================================================
+
+class TestResolvedTmpPrefix:
+    """Tests for macOS /private/tmp cross-platform compatibility.
+
+    STAGING_DIR_PREFIX and RESOLVED_TMP_PREFIX use os.path.realpath("/tmp")
+    at module load time, which returns /tmp on Linux and /private/tmp on macOS.
+    """
+
+    def test_staging_prefix_is_resolved(self):
+        """STAGING_DIR_PREFIX must start with os.path.realpath('/tmp')."""
+        resolved_tmp = os.path.realpath("/tmp")
+        assert STAGING_DIR_PREFIX.startswith(resolved_tmp), (
+            f"STAGING_DIR_PREFIX {STAGING_DIR_PREFIX!r} does not start with "
+            f"os.path.realpath('/tmp') = {resolved_tmp!r}"
+        )
+
+    def test_resolved_tmp_prefix_is_resolved(self):
+        """RESOLVED_TMP_PREFIX must start with os.path.realpath('/tmp')."""
+        resolved_tmp = os.path.realpath("/tmp")
+        assert RESOLVED_TMP_PREFIX == resolved_tmp + "/", (
+            f"RESOLVED_TMP_PREFIX {RESOLVED_TMP_PREFIX!r} != "
+            f"os.path.realpath('/tmp') + '/' = {resolved_tmp + '/'!r}"
+        )
+
+    def test_resolved_path_matches_staging_prefix(self, tmp_path):
+        """A path created inside the staging dir, after resolve(), still matches STAGING_DIR_PREFIX."""
+        staging_dir = ensure_staging_dir(str(tmp_path))
+        test_file = os.path.join(staging_dir, "test-file.json")
+        # Simulate what Path.resolve() or os.path.realpath() does
+        resolved = os.path.realpath(test_file)
+        assert resolved.startswith(STAGING_DIR_PREFIX), (
+            f"Resolved path {resolved!r} does not start with "
+            f"STAGING_DIR_PREFIX {STAGING_DIR_PREFIX!r}"
+        )
+
+    def test_is_staging_path_after_resolve(self, tmp_path):
+        """is_staging_path works with resolved paths (cross-platform)."""
+        staging_dir = ensure_staging_dir(str(tmp_path))
+        test_file = os.path.join(staging_dir, "intent-session.json")
+        resolved = os.path.realpath(test_file)
+        assert is_staging_path(resolved), (
+            f"is_staging_path({resolved!r}) returned False after resolve"
+        )
+
+    def test_macos_private_tmp_simulation(self):
+        """Simulate macOS /private/tmp via monkeypatch + importlib.reload.
+
+        On macOS, os.path.realpath("/tmp") returns "/private/tmp".
+        STAGING_DIR_PREFIX is evaluated at import time, so monkeypatching
+        os.path.realpath and reloading the module should change the prefix.
+        """
+        original_realpath = os.path.realpath
+
+        def mock_realpath(path, *args, **kwargs):
+            if path == "/tmp":
+                return "/private/tmp"
+            return original_realpath(path, *args, **kwargs)
+
+        try:
+            with mock.patch("os.path.realpath", side_effect=mock_realpath):
+                importlib.reload(memory_staging_utils)
+                assert memory_staging_utils.STAGING_DIR_PREFIX == "/private/tmp/.claude-memory-staging-", (
+                    f"After reload with macOS mock, STAGING_DIR_PREFIX should be "
+                    f"'/private/tmp/.claude-memory-staging-', got "
+                    f"{memory_staging_utils.STAGING_DIR_PREFIX!r}"
+                )
+                assert memory_staging_utils.RESOLVED_TMP_PREFIX == "/private/tmp/", (
+                    f"After reload with macOS mock, RESOLVED_TMP_PREFIX should be "
+                    f"'/private/tmp/', got "
+                    f"{memory_staging_utils.RESOLVED_TMP_PREFIX!r}"
+                )
+        finally:
+            # Restore original module state -- MUST be outside mock.patch context
+            # so the reload sees the real os.path.realpath, not the mock.
+            importlib.reload(memory_staging_utils)
