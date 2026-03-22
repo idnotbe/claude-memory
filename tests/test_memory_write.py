@@ -70,6 +70,7 @@ from memory_write import (
     word_difference_ratio,
     check_merge_protections,
     format_validation_error,
+    cleanup_intents,
     TAG_CAP,
     CHANGES_CAP,
 )
@@ -1018,3 +1019,566 @@ class TestOCCWarning:
         assert rc == 0, f"Failed: {stdout}\n{stderr}"
         assert "WARNING" in stderr
         assert "OCC protection disabled" in stderr
+
+
+# ---------------------------------------------------------------
+# P1 Popup Fix: cleanup_intents() unit tests
+# ---------------------------------------------------------------
+
+class TestCleanupIntents:
+    """Test cleanup_intents() -- removes stale intent-*.json from staging.
+
+    This function replaced inline python3 -c commands (P1 popup fix)
+    to avoid Guardian interpreter payload detection.
+    """
+
+    def _make_staging(self, tmp_path, prefix="new"):
+        """Create a staging directory with test files.
+
+        Args:
+            prefix: "new" for /tmp/-style, "legacy" for memory/.staging style
+        """
+        if prefix == "new":
+            staging = tmp_path / "tmp" / ".claude-memory-staging-abc123"
+            # cleanup_intents uses resolve() and checks startswith("/tmp/...")
+            # In tests we can't use actual /tmp, so use legacy instead
+            staging = tmp_path / "memory" / ".staging"
+        else:
+            staging = tmp_path / "memory" / ".staging"
+        staging.mkdir(parents=True, exist_ok=True)
+        return staging
+
+    def test_deletes_intent_files(self, tmp_path):
+        """Intent files should be deleted."""
+        staging = self._make_staging(tmp_path, prefix="legacy")
+        (staging / "intent-session_summary.json").write_text('{"action": "create"}')
+        (staging / "intent-decision.json").write_text('{"action": "update"}')
+
+        result = cleanup_intents(str(staging))
+        assert result["status"] == "ok"
+        assert len(result["deleted"]) == 2
+        assert "intent-session_summary.json" in result["deleted"]
+        assert "intent-decision.json" in result["deleted"]
+        # Files should be gone
+        assert not (staging / "intent-session_summary.json").exists()
+        assert not (staging / "intent-decision.json").exists()
+
+    def test_preserves_non_intent_files(self, tmp_path):
+        """Non-intent files (context, triage-data) should be preserved."""
+        staging = self._make_staging(tmp_path, prefix="legacy")
+        (staging / "intent-session.json").write_text('{}')
+        (staging / "context-session.txt").write_text("transcript excerpt")
+        (staging / "triage-data.json").write_text('{"categories": []}')
+        (staging / "last-save-result.json").write_text('{}')
+
+        result = cleanup_intents(str(staging))
+        assert result["status"] == "ok"
+        assert len(result["deleted"]) == 1
+        # Non-intent files preserved
+        assert (staging / "context-session.txt").exists()
+        assert (staging / "triage-data.json").exists()
+        assert (staging / "last-save-result.json").exists()
+
+    def test_symlink_rejected(self, tmp_path):
+        """Symlinks to intent files should be rejected, not followed."""
+        staging = self._make_staging(tmp_path, prefix="legacy")
+        # Create a real file outside staging
+        outside = tmp_path / "outside-secret.json"
+        outside.write_text('{"secret": true}')
+        # Create a symlink masquerading as an intent file
+        symlink = staging / "intent-evil.json"
+        symlink.symlink_to(outside)
+
+        result = cleanup_intents(str(staging))
+        assert result["status"] == "ok"
+        # Symlink should be in errors, not deleted
+        assert any(e["error"] == "symlink rejected" for e in result["errors"])
+        assert "intent-evil.json" not in result["deleted"]
+        # Original file should still exist (not deleted via symlink)
+        assert outside.exists()
+
+    def test_path_traversal_rejected(self, tmp_path):
+        """Symlink pointing outside staging via path traversal is rejected."""
+        staging = self._make_staging(tmp_path, prefix="legacy")
+        # Create target outside staging
+        outside = tmp_path / "intent-outside.json"
+        outside.write_text('{"traversal": true}')
+        # Symlink from inside staging to outside
+        link = staging / "intent-traversal.json"
+        link.symlink_to(outside)
+
+        result = cleanup_intents(str(staging))
+        assert result["status"] == "ok"
+        # Should be in errors (symlink rejected)
+        assert any(e["error"] == "symlink rejected" for e in result["errors"])
+        assert "intent-traversal.json" not in result["deleted"]
+        assert outside.exists()
+
+    def test_nonexistent_dir_returns_ok(self, tmp_path):
+        """Non-existent staging dir should return ok with empty lists."""
+        result = cleanup_intents(str(tmp_path / "nonexistent"))
+        assert result["status"] == "ok"
+        assert result["deleted"] == []
+        assert result["errors"] == []
+
+    def test_invalid_staging_path_returns_error(self, tmp_path):
+        """A path that is not a valid staging dir should return error."""
+        invalid = tmp_path / "not-staging"
+        invalid.mkdir()
+        result = cleanup_intents(str(invalid))
+        assert result["status"] == "error"
+        assert "not a valid staging directory" in result["message"]
+
+    def test_empty_staging_dir(self, tmp_path):
+        """Empty staging dir should return ok with empty lists."""
+        staging = self._make_staging(tmp_path, prefix="legacy")
+        result = cleanup_intents(str(staging))
+        assert result["status"] == "ok"
+        assert result["deleted"] == []
+        assert result["errors"] == []
+
+    def test_tmp_staging_path_accepted(self, tmp_path):
+        """A /tmp/.claude-memory-staging-* path should be accepted."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        try:
+            (staging / "intent-test.json").write_text('{}')
+            result = cleanup_intents(str(staging))
+            assert result["status"] == "ok"
+            assert "intent-test.json" in result["deleted"]
+        finally:
+            # Cleanup
+            for f in staging.iterdir():
+                f.unlink()
+            staging.rmdir()
+
+
+# ---------------------------------------------------------------
+# P2 Popup Fix: write-save-result-direct CLI action tests
+# ---------------------------------------------------------------
+
+class TestWriteSaveResultDirect:
+    """Test the write-save-result-direct CLI action.
+
+    This action replaced heredoc-based save result writing (P2 popup fix)
+    to avoid Guardian heredoc body detection.
+    """
+
+    def _make_tmp_staging(self):
+        """Create a valid /tmp/ staging directory for testing."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        return staging
+
+    def _run_direct(self, staging_dir, categories=None, titles=None):
+        """Run write-save-result-direct via subprocess."""
+        cmd = [
+            PYTHON, WRITE_SCRIPT,
+            "--action", "write-save-result-direct",
+            "--staging-dir", str(staging_dir),
+        ]
+        if categories is not None:
+            cmd.extend(["--categories", categories])
+        if titles is not None:
+            cmd.extend(["--titles", titles])
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_happy_path(self):
+        """Basic success: creates last-save-result.json with correct fields."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                categories="session_summary,constraint",
+                titles="Session Feb 2026,Max payload size",
+            )
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            output = json.loads(stdout)
+            assert output["status"] == "ok"
+
+            # Verify the result file was created
+            result_file = staging / "last-save-result.json"
+            assert result_file.exists(), "last-save-result.json not created"
+
+            data = json.loads(result_file.read_text())
+            assert data["categories"] == ["session_summary", "constraint"]
+            assert data["titles"] == ["Session Feb 2026", "Max payload size"]
+            assert "saved_at" in data
+            # ISO 8601 format check
+            assert data["saved_at"].endswith("Z")
+            assert "T" in data["saved_at"]
+            assert data["errors"] == []
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_missing_categories_fails(self):
+        """Missing --categories should produce an error."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                titles="Some Title",
+            )
+            assert rc != 0
+            assert "categories" in (stdout + stderr).lower()
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_missing_titles_fails(self):
+        """Missing --titles should produce an error."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                categories="session_summary",
+            )
+            assert rc != 0
+            assert "titles" in (stdout + stderr).lower()
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_empty_categories_fails(self):
+        """Empty --categories (only whitespace/commas) should produce an error."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                categories=",,,",
+                titles="Some Title",
+            )
+            assert rc != 0
+            assert "non-empty" in (stdout + stderr).lower() or "categories" in (stdout + stderr).lower()
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_empty_titles_fails(self):
+        """Empty --titles (only whitespace/commas) should produce an error."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                categories="session_summary",
+                titles=", , ,",
+            )
+            assert rc != 0
+            assert "non-empty" in (stdout + stderr).lower() or "titles" in (stdout + stderr).lower()
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_single_category_and_title(self):
+        """Single category and title should work."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                categories="decision",
+                titles="Use JWT tokens",
+            )
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            result_file = staging / "last-save-result.json"
+            data = json.loads(result_file.read_text())
+            assert data["categories"] == ["decision"]
+            assert data["titles"] == ["Use JWT tokens"]
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_missing_staging_dir_fails(self):
+        """Missing --staging-dir should produce an error."""
+        cmd = [
+            PYTHON, WRITE_SCRIPT,
+            "--action", "write-save-result-direct",
+            "--categories", "session_summary",
+            "--titles", "Test",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        assert result.returncode != 0
+        assert "staging-dir" in (result.stdout + result.stderr).lower()
+
+    def test_comma_in_title_splits(self):
+        """Titles containing commas are split (known limitation).
+
+        The write-save-result-direct action splits on commas, so a title
+        like 'Session 1, Part 2' becomes two entries. This is documented
+        as acceptable since the main agent constructs these values.
+        """
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                categories="session_summary",
+                titles="Session 1, Part 2",
+            )
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            result_file = staging / "last-save-result.json"
+            data = json.loads(result_file.read_text())
+            # Comma splits into two titles (documented behavior)
+            assert len(data["titles"]) == 2
+            assert data["titles"][0] == "Session 1"
+            assert data["titles"][1] == "Part 2"
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_session_id_from_sentinel(self):
+        """write-save-result-direct reads session_id from sentinel file."""
+        staging = self._make_tmp_staging()
+        try:
+            # Write a sentinel file with session_id
+            sentinel_file = staging / ".triage-handled"
+            sentinel_file.write_text(json.dumps({
+                "session_id": "test-session-xyz",
+                "state": "saving",
+                "timestamp": 1711100000,
+                "pid": os.getpid(),
+            }), encoding="utf-8")
+
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                categories="decision",
+                titles="Use PostgreSQL",
+            )
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            result_file = staging / "last-save-result.json"
+            data = json.loads(result_file.read_text())
+            assert data["session_id"] == "test-session-xyz", (
+                "session_id should be read from sentinel file"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_session_id_none_without_sentinel(self):
+        """write-save-result-direct sets session_id to null when sentinel is absent."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_direct(
+                staging,
+                categories="constraint",
+                titles="Max 100 connections",
+            )
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            result_file = staging / "last-save-result.json"
+            data = json.loads(result_file.read_text())
+            assert data["session_id"] is None, (
+                "session_id should be None when sentinel file is absent"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+class TestUpdateSentinelState:
+    """Test the update-sentinel-state CLI action.
+
+    Tests sentinel state transitions (pending->saving, saving->saved,
+    saving->failed, pending->failed) and invalid transitions.
+    """
+
+    def _make_tmp_staging(self):
+        """Create a valid /tmp/ staging directory for testing."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        return staging
+
+    def _write_sentinel(self, staging_dir, session_id, state):
+        """Write a sentinel file to the staging directory."""
+        sentinel_file = staging_dir / ".triage-handled"
+        sentinel_file.write_text(json.dumps({
+            "session_id": session_id,
+            "state": state,
+            "timestamp": 1711100000,
+            "pid": os.getpid(),
+        }), encoding="utf-8")
+
+    def _run_update(self, staging_dir, state):
+        """Run update-sentinel-state via subprocess."""
+        cmd = [
+            PYTHON, WRITE_SCRIPT,
+            "--action", "update-sentinel-state",
+            "--staging-dir", str(staging_dir),
+            "--state", state,
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_pending_to_saving(self):
+        """Valid transition: pending -> saving."""
+        staging = self._make_tmp_staging()
+        try:
+            self._write_sentinel(staging, "sess-1", "pending")
+            rc, stdout, stderr = self._run_update(staging, "saving")
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            output = json.loads(stdout)
+            assert output["status"] == "ok"
+            assert output["previous_state"] == "pending"
+            assert output["new_state"] == "saving"
+
+            # Verify sentinel file was updated
+            sentinel = json.loads((staging / ".triage-handled").read_text())
+            assert sentinel["state"] == "saving"
+            assert sentinel["session_id"] == "sess-1"
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_saving_to_saved(self):
+        """Valid transition: saving -> saved."""
+        staging = self._make_tmp_staging()
+        try:
+            self._write_sentinel(staging, "sess-2", "saving")
+            rc, stdout, stderr = self._run_update(staging, "saved")
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            output = json.loads(stdout)
+            assert output["status"] == "ok"
+            assert output["previous_state"] == "saving"
+            assert output["new_state"] == "saved"
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_saving_to_failed(self):
+        """Valid transition: saving -> failed."""
+        staging = self._make_tmp_staging()
+        try:
+            self._write_sentinel(staging, "sess-3", "saving")
+            rc, stdout, stderr = self._run_update(staging, "failed")
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            output = json.loads(stdout)
+            assert output["status"] == "ok"
+            assert output["previous_state"] == "saving"
+            assert output["new_state"] == "failed"
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_pending_to_failed(self):
+        """Valid transition: pending -> failed."""
+        staging = self._make_tmp_staging()
+        try:
+            self._write_sentinel(staging, "sess-4", "pending")
+            rc, stdout, stderr = self._run_update(staging, "failed")
+            assert rc == 0, f"Failed: {stdout}\n{stderr}"
+            output = json.loads(stdout)
+            assert output["status"] == "ok"
+            assert output["previous_state"] == "pending"
+            assert output["new_state"] == "failed"
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_invalid_transition_pending_to_saved(self):
+        """Invalid transition: pending -> saved (must go through saving)."""
+        staging = self._make_tmp_staging()
+        try:
+            self._write_sentinel(staging, "sess-5", "pending")
+            rc, stdout, stderr = self._run_update(staging, "saved")
+            assert rc == 0, "Should exit 0 (fail-open)"
+            output = json.loads(stdout)
+            assert output["status"] == "error"
+            assert "Invalid transition" in output["message"]
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_invalid_transition_saved_to_saving(self):
+        """Invalid transition: saved -> saving (terminal state)."""
+        staging = self._make_tmp_staging()
+        try:
+            self._write_sentinel(staging, "sess-6", "saved")
+            rc, stdout, stderr = self._run_update(staging, "saving")
+            assert rc == 0, "Should exit 0 (fail-open)"
+            output = json.loads(stdout)
+            assert output["status"] == "error"
+            assert "Invalid transition" in output["message"]
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_missing_sentinel_file(self):
+        """Missing sentinel file -> error but exit 0 (fail-open)."""
+        staging = self._make_tmp_staging()
+        try:
+            rc, stdout, stderr = self._run_update(staging, "saving")
+            assert rc == 0, "Should exit 0 (fail-open)"
+            output = json.loads(stdout)
+            assert output["status"] == "error"
+            assert "Cannot read sentinel" in output["message"]
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_missing_staging_dir_fails_open(self):
+        """Missing --staging-dir -> exit 0 (fail-open)."""
+        cmd = [
+            PYTHON, WRITE_SCRIPT,
+            "--action", "update-sentinel-state",
+            "--state", "saving",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, "Should exit 0 (fail-open)"
+        output = json.loads(result.stdout)
+        assert output["status"] == "error"
+
+    def test_missing_state_fails_open(self):
+        """Missing --state -> exit 0 (fail-open)."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        try:
+            cmd = [
+                PYTHON, WRITE_SCRIPT,
+                "--action", "update-sentinel-state",
+                "--staging-dir", str(staging),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            assert result.returncode == 0, "Should exit 0 (fail-open)"
+            output = json.loads(result.stdout)
+            assert output["status"] == "error"
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_session_id_preserved(self):
+        """Session ID is preserved through state transition."""
+        staging = self._make_tmp_staging()
+        try:
+            self._write_sentinel(staging, "my-unique-session", "pending")
+            rc, stdout, stderr = self._run_update(staging, "saving")
+            assert rc == 0
+            output = json.loads(stdout)
+            assert output["session_id"] == "my-unique-session"
+
+            # Verify in file
+            sentinel = json.loads((staging / ".triage-handled").read_text())
+            assert sentinel["session_id"] == "my-unique-session"
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_timestamp_updated(self):
+        """Timestamp is updated on state transition."""
+        staging = self._make_tmp_staging()
+        try:
+            self._write_sentinel(staging, "sess-ts", "pending")
+            old_sentinel = json.loads((staging / ".triage-handled").read_text())
+            old_ts = old_sentinel["timestamp"]
+
+            rc, stdout, stderr = self._run_update(staging, "saving")
+            assert rc == 0
+            new_sentinel = json.loads((staging / ".triage-handled").read_text())
+            assert new_sentinel["timestamp"] >= old_ts, (
+                "Timestamp should be updated on state transition"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)

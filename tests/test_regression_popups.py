@@ -597,3 +597,202 @@ class TestGuardianPatternSync:
                 f"  Pattern: {normalized}\n"
                 f"  Guardian may have changed. Update GUARDIAN_ASK_PATTERNS."
             )
+
+
+# ===================================================================
+# Test Class 6: P4 — Zero python3 -c commands in SKILL.md
+# ===================================================================
+
+class TestZeroPython3CInSkill:
+    """Verify SKILL.md has ZERO python3 -c commands.
+
+    P1 popup fix replaced all python3 -c inline code with dedicated
+    script actions (cleanup-intents). This test enforces zero tolerance
+    for regressions.
+    """
+
+    def test_no_python3_c_in_any_bash_block(self):
+        """No bash block in SKILL.md should contain python3 -c."""
+        blocks = extract_bash_blocks(SKILL_MD)
+        violations = []
+        for code, line_no in blocks:
+            if "python3 -c" in code:
+                violations.append(
+                    f"  Line ~{line_no}: {code.strip()[:120]}"
+                )
+        assert not violations, (
+            f"SKILL.md contains {len(violations)} bash block(s) with "
+            f"'python3 -c'. P1 popup fix requires ALL inline python to "
+            f"be replaced with dedicated script actions.\n"
+            + "\n".join(violations)
+        )
+
+    def test_no_python3_c_in_non_bash_code_blocks(self):
+        """No non-bash code block in SKILL.md should contain python3 -c.
+
+        Prose/documentation mentions (like Rule 0 saying 'Do NOT use
+        python3 -c') are allowed. Only executable code blocks matter,
+        and those are already covered by test_no_python3_c_in_any_bash_block.
+
+        This test catches python3 -c in non-bash code blocks (e.g., plain
+        ``` blocks that might be copy-pasted as commands).
+        """
+        text = SKILL_MD.read_text(encoding="utf-8")
+        # Find all code blocks (any language)
+        in_block = False
+        is_bash_block = False
+        violations = []
+        block_start = 0
+
+        for i, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not in_block and stripped.startswith("```"):
+                in_block = True
+                block_start = i
+                # Check if it's a bash block (already covered by other test)
+                is_bash_block = any(
+                    lang in stripped.lower()
+                    for lang in ("bash", "sh", "shell", "console", "terminal", "zsh")
+                )
+            elif in_block and stripped == "```":
+                in_block = False
+                is_bash_block = False
+            elif in_block and not is_bash_block:
+                if re.search(r'python3\s+-c\b', line):
+                    violations.append((i, line.strip()))
+
+        assert not violations, (
+            f"SKILL.md has 'python3 -c' in non-bash code block(s) at "
+            f"line(s): " + ", ".join(f"{ln}" for ln, _ in violations)
+        )
+
+
+# ===================================================================
+# Test Class 7: P4 — Phase 3 save subagent prompt heredoc guard
+# ===================================================================
+
+class TestNoHeredocInSavePrompt:
+    """Verify SKILL.md Phase 3 save subagent prompt forbids heredoc (<<)
+    and does not itself use heredoc in bash commands.
+
+    P2 popup fix added explicit heredoc warning and replaced heredoc-based
+    save result writing with write-save-result-direct action.
+    """
+
+    @pytest.fixture(scope="class")
+    def phase3_section(self) -> str:
+        """Extract the Phase 3 save subagent section from SKILL.md."""
+        text = SKILL_MD.read_text(encoding="utf-8")
+        # Find "### Phase 3: Save" section
+        phase3_start = text.find("### Phase 3: Save")
+        assert phase3_start != -1, "Phase 3 section not found in SKILL.md"
+        # Find next ### heading or end of file
+        next_heading = text.find("\n### ", phase3_start + 1)
+        if next_heading == -1:
+            # Try ## heading
+            next_heading = text.find("\n## ", phase3_start + 1)
+        if next_heading == -1:
+            next_heading = len(text)
+        return text[phase3_start:next_heading]
+
+    def test_heredoc_warning_present(self, phase3_section):
+        """Phase 3 section must contain the heredoc warning text."""
+        assert "heredoc" in phase3_section.lower(), (
+            "Phase 3 section missing heredoc warning"
+        )
+        assert "<<" in phase3_section, (
+            "Phase 3 section should mention << to warn against it"
+        )
+        # The actual warning text
+        assert "CRITICAL" in phase3_section or "NEVER" in phase3_section, (
+            "Phase 3 section should have a strong warning about heredoc"
+        )
+
+    def test_no_heredoc_in_phase3_bash_commands(self, phase3_section):
+        """No bash command in Phase 3 should use heredoc (<<) for
+        file writes. The warning text mentioning << is OK since it's
+        prose, not a command."""
+        # Extract bash blocks from the section
+        # We need to find actual command lines (not the warning prose)
+        # Parse the save subagent prompt's Commands section
+        lines = phase3_section.splitlines()
+        in_bash = False
+        bash_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```bash") or stripped.startswith("```sh"):
+                in_bash = True
+                continue
+            if stripped == "```" and in_bash:
+                in_bash = False
+                continue
+            if in_bash:
+                bash_lines.append(stripped)
+
+        # Check none of the actual bash commands use heredoc
+        heredoc_pattern = re.compile(r'<<\s*[\'"]?\w+')
+        for bash_line in bash_lines:
+            assert not heredoc_pattern.search(bash_line), (
+                f"Phase 3 bash command uses heredoc: {bash_line}"
+            )
+
+    def test_uses_write_save_result_direct(self, phase3_section):
+        """Phase 3 should use write-save-result-direct (not heredoc)."""
+        assert "write-save-result-direct" in phase3_section, (
+            "Phase 3 section should use write-save-result-direct action"
+        )
+
+
+# ===================================================================
+# Test Class 8: P4 — No Write tool to .claude/memory/.staging/
+# ===================================================================
+
+class TestStagingPathOutsideClaudeDir:
+    """Verify SKILL.md never instructs Write tool for .claude/memory/.staging/.
+
+    P3 popup fix moved staging from .claude/memory/.staging/ to
+    /tmp/.claude-memory-staging-<hash>/. This test ensures no
+    Write tool instructions target the old path.
+    """
+
+    def test_no_write_to_old_staging(self):
+        """SKILL.md should not instruct Write tool for old staging path."""
+        text = SKILL_MD.read_text(encoding="utf-8")
+        # Check for literal .claude/memory/.staging/ references
+        old_staging_pattern = re.compile(r'\.claude/memory/\.staging/')
+        matches = []
+        for i, line in enumerate(text.splitlines(), start=1):
+            if old_staging_pattern.search(line):
+                matches.append((i, line.strip()))
+        assert not matches, (
+            f"SKILL.md references old staging path .claude/memory/.staging/ "
+            f"at line(s): "
+            + ", ".join(f"{ln}" for ln, _ in matches)
+            + "\nAll staging should use /tmp/.claude-memory-staging-<hash>/"
+        )
+
+    def test_staging_uses_tmp_prefix(self):
+        """SKILL.md staging references should use /tmp/ prefix."""
+        text = SKILL_MD.read_text(encoding="utf-8")
+        # Should reference /tmp/.claude-memory-staging
+        assert "/tmp/.claude-memory-staging" in text, (
+            "SKILL.md should reference /tmp/.claude-memory-staging prefix"
+        )
+
+    def test_no_write_tool_to_claude_staging(self):
+        """No Write tool call in SKILL.md should target .claude/.staging."""
+        text = SKILL_MD.read_text(encoding="utf-8")
+        # Write tool calls look like: Write( or file_path: ".../.staging/..."
+        # Look for file_path with .claude and .staging
+        write_staging_pattern = re.compile(
+            r'file_path.*\.claude.*\.staging|'
+            r'Write\(.*\.claude.*\.staging',
+            re.DOTALL,
+        )
+        # Check line by line to avoid DOTALL matching across sections
+        for i, line in enumerate(text.splitlines(), start=1):
+            if re.search(r'file_path.*\.claude.*\.staging', line):
+                pytest.fail(
+                    f"SKILL.md line {i} has Write tool targeting old "
+                    f"staging path: {line.strip()}"
+                )

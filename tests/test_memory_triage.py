@@ -2166,3 +2166,575 @@ class TestConstraintThresholdFix:
             f"CONSTRAINT threshold should be 0.45; "
             f"got {DEFAULT_THRESHOLDS['CONSTRAINT']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Stop Hook Re-fire Fix -- regression tests
+# ---------------------------------------------------------------------------
+
+
+# Additional imports for the stop-hook refire tests
+from memory_triage import (
+    read_sentinel,
+    write_sentinel,
+    check_sentinel_session,
+    _check_save_result_guard,
+    _acquire_triage_lock,
+    _release_triage_lock,
+    _sentinel_path,
+    _LOCK_ACQUIRED,
+    _LOCK_HELD,
+    _LOCK_ERROR,
+    STOP_FLAG_TTL,
+)
+
+
+class TestStopHookRefireFix:
+    """Regression tests for the stop-hook re-fire fix.
+
+    Validates:
+    - Sentinel survives cleanup_staging() (removed from _STAGING_CLEANUP_PATTERNS)
+    - FLAG_TTL_SECONDS >= 1800 (covers 10-28 min save flow)
+    - Save-result guard blocks re-triage for same session
+    - RUNBOOK threshold >= 0.5 (reduces SKILL.md contamination)
+    - Session-scoped sentinel idempotency (state + session_id + TTL)
+    - Atomic lock acquire/release cycle
+    - Sentinel read/write roundtrip
+    - RUNBOOK negative patterns suppress doc scaffolding
+    """
+
+    # -- Test 1: Sentinel survives cleanup ----------------------------------
+
+    def test_sentinel_survives_cleanup(self):
+        """'.triage-handled' must NOT be in _STAGING_CLEANUP_PATTERNS.
+
+        Root cause RC-1: cleanup_staging() was deleting the sentinel file,
+        causing the stop hook to re-fire on the next stop attempt.
+        """
+        from memory_write import _STAGING_CLEANUP_PATTERNS
+
+        # The sentinel filename must not appear in any cleanup pattern
+        for pattern in _STAGING_CLEANUP_PATTERNS:
+            assert ".triage-handled" not in pattern, (
+                f"'.triage-handled' found in cleanup pattern '{pattern}' -- "
+                f"sentinel would be deleted, causing re-fire"
+            )
+
+    # -- Test 2: FLAG_TTL covers save flow ----------------------------------
+
+    def test_flag_ttl_covers_save_flow(self):
+        """FLAG_TTL_SECONDS must be >= 1800 (30 min) to cover save flow.
+
+        Root cause RC-2: the old 300s (5 min) TTL expired before the save
+        flow completed (10-28 min with subagents), causing sentinel to
+        expire mid-save and allowing re-fire.
+        """
+        assert FLAG_TTL_SECONDS >= 1800, (
+            f"FLAG_TTL_SECONDS is {FLAG_TTL_SECONDS}, must be >= 1800 "
+            f"to cover the 10-28 min save flow"
+        )
+
+    # -- Test 3: Save-result guard ------------------------------------------
+
+    def test_save_result_guard_blocks_same_session(self, tmp_path):
+        """Fresh last-save-result.json with matching session_id -> blocks re-triage.
+
+        Uses production-realistic payload (saved_at, categories, titles, errors, session_id).
+        Primary path: session_id in result file (sentinel not required).
+        """
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        session_id = "test-session-abc"
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write production-realistic last-save-result.json with session_id
+        result_file = staging_dir / "last-save-result.json"
+        result_file.write_text(json.dumps({
+            "saved_at": "2026-03-22T10:00:00Z",
+            "categories": ["decision", "constraint"],
+            "titles": ["Use JWT tokens", "Max 50 items per page"],
+            "errors": [],
+            "session_id": session_id,
+        }), encoding="utf-8")
+
+        assert _check_save_result_guard(str(proj), session_id) is True, (
+            "Save-result guard should block re-triage when fresh result "
+            "contains matching session_id"
+        )
+
+    def test_save_result_guard_allows_different_session(self, tmp_path):
+        """Fresh last-save-result.json with different session_id -> allows triage.
+
+        Uses production-realistic payload. No sentinel needed.
+        """
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write production-realistic last-save-result.json with old session_id
+        result_file = staging_dir / "last-save-result.json"
+        result_file.write_text(json.dumps({
+            "saved_at": "2026-03-22T10:00:00Z",
+            "categories": ["session_summary"],
+            "titles": ["Session 2026-03-22"],
+            "errors": [],
+            "session_id": "old-session-xyz",
+        }), encoding="utf-8")
+
+        # Query with a DIFFERENT session_id
+        assert _check_save_result_guard(str(proj), "new-session-abc") is False, (
+            "Save-result guard should allow triage when session_id does not match"
+        )
+
+    def test_save_result_guard_allows_stale_result(self, tmp_path):
+        """Stale last-save-result.json (beyond TTL) -> allows triage."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        session_id = "test-session"
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write production-realistic last-save-result.json and backdate its mtime
+        result_file = staging_dir / "last-save-result.json"
+        result_file.write_text(json.dumps({
+            "saved_at": "2026-03-22T08:00:00Z",
+            "categories": ["preference"],
+            "titles": ["Use dark theme"],
+            "errors": [],
+            "session_id": session_id,
+        }), encoding="utf-8")
+        # Set mtime to well beyond TTL
+        stale_time = time.time() - FLAG_TTL_SECONDS - 100
+        os.utime(str(result_file), (stale_time, stale_time))
+
+        assert _check_save_result_guard(str(proj), session_id) is False, (
+            "Save-result guard should allow triage when result file is stale"
+        )
+
+    def test_save_result_guard_works_without_sentinel(self, tmp_path):
+        """Guard works with session_id in result even when sentinel file is absent.
+
+        This verifies the guard is truly independent of the sentinel file.
+        """
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        session_id = "independent-session"
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        # Ensure NO sentinel file exists
+        sentinel_path = staging_dir / ".triage-handled"
+        if sentinel_path.exists():
+            sentinel_path.unlink()
+
+        # Write production-realistic result with session_id
+        result_file = staging_dir / "last-save-result.json"
+        result_file.write_text(json.dumps({
+            "saved_at": "2026-03-22T10:00:00Z",
+            "categories": ["runbook"],
+            "titles": ["Fix DNS timeout"],
+            "errors": [],
+            "session_id": session_id,
+        }), encoding="utf-8")
+
+        assert _check_save_result_guard(str(proj), session_id) is True, (
+            "Save-result guard should block re-triage using session_id from "
+            "result file alone, without requiring sentinel file"
+        )
+
+    def test_save_result_guard_fallback_to_sentinel(self, tmp_path):
+        """Guard falls back to sentinel when result lacks session_id (backwards compat).
+
+        Pre-session_id result files should still work via sentinel cross-reference.
+        """
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        session_id = "legacy-session"
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write sentinel with matching session_id
+        sentinel_file = staging_dir / ".triage-handled"
+        sentinel_file.write_text(json.dumps({
+            "session_id": session_id,
+            "state": "saved",
+            "timestamp": time.time(),
+            "pid": os.getpid(),
+        }), encoding="utf-8")
+
+        # Write legacy result without session_id
+        result_file = staging_dir / "last-save-result.json"
+        result_file.write_text(json.dumps({
+            "saved_at": "2026-03-22T10:00:00Z",
+            "categories": ["decision"],
+            "titles": ["Choose PostgreSQL"],
+            "errors": [],
+        }), encoding="utf-8")
+
+        assert _check_save_result_guard(str(proj), session_id) is True, (
+            "Save-result guard should fall back to sentinel cross-reference "
+            "when result file lacks session_id"
+        )
+
+    # -- Test 4: RUNBOOK threshold ------------------------------------------
+
+    def test_runbook_threshold(self):
+        """RUNBOOK threshold must be >= 0.5 to reduce SKILL.md false positives.
+
+        Root cause RC-4: SKILL.md keyword contamination (error handling,
+        retry logic headings) caused false RUNBOOK triggers at 0.4 threshold.
+        """
+        assert DEFAULT_THRESHOLDS["RUNBOOK"] >= 0.5, (
+            f"RUNBOOK threshold is {DEFAULT_THRESHOLDS['RUNBOOK']}, "
+            f"must be >= 0.5 to reduce SKILL.md contamination"
+        )
+
+    # -- Test 5: Session-scoped sentinel ------------------------------------
+
+    def test_session_scoped_sentinel_blocks_same_session(self, tmp_path):
+        """Sentinel with same session_id + blocking state -> blocks triage."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        sentinel_file = staging_dir / ".triage-handled"
+        sentinel_file.write_text(json.dumps({
+            "session_id": "test-session",
+            "state": "saved",
+            "timestamp": time.time(),
+            "pid": os.getpid(),
+        }), encoding="utf-8")
+
+        assert check_sentinel_session(str(proj), "test-session") is True, (
+            "Sentinel with same session_id and blocking state should block triage"
+        )
+
+    def test_session_scoped_sentinel_allows_different_session(self, tmp_path):
+        """Sentinel with different session_id -> allows triage."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        sentinel_file = staging_dir / ".triage-handled"
+        sentinel_file.write_text(json.dumps({
+            "session_id": "test-session",
+            "state": "saved",
+            "timestamp": time.time(),
+            "pid": os.getpid(),
+        }), encoding="utf-8")
+
+        assert check_sentinel_session(str(proj), "different-session") is False, (
+            "Sentinel with different session_id should allow triage"
+        )
+
+    def test_session_scoped_sentinel_allows_failed_state(self, tmp_path):
+        """Sentinel with state='failed' -> allows re-triage."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        sentinel_file = staging_dir / ".triage-handled"
+        sentinel_file.write_text(json.dumps({
+            "session_id": "test-session",
+            "state": "failed",
+            "timestamp": time.time(),
+            "pid": os.getpid(),
+        }), encoding="utf-8")
+
+        assert check_sentinel_session(str(proj), "test-session") is False, (
+            "Sentinel with state='failed' should allow re-triage"
+        )
+
+    def test_session_scoped_sentinel_allows_expired(self, tmp_path):
+        """Sentinel with expired timestamp -> allows re-triage."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        sentinel_file = staging_dir / ".triage-handled"
+        sentinel_file.write_text(json.dumps({
+            "session_id": "test-session",
+            "state": "saved",
+            "timestamp": time.time() - FLAG_TTL_SECONDS - 100,
+            "pid": os.getpid(),
+        }), encoding="utf-8")
+
+        assert check_sentinel_session(str(proj), "test-session") is False, (
+            "Sentinel with expired timestamp should allow re-triage "
+            "(TTL safety net)"
+        )
+
+    # -- Additional: Atomic lock acquire/release ----------------------------
+
+    def test_atomic_lock_acquire_release(self, tmp_path):
+        """Lock acquire/release cycle works correctly.
+
+        Lock now lives in the staging dir (consistent with sentinel),
+        not in cwd/.claude/.
+        """
+        proj = tmp_path / "proj"
+        proj.mkdir(parents=True)
+
+        lock_path, status = _acquire_triage_lock(str(proj), "test-session")
+        assert status == _LOCK_ACQUIRED, f"Expected ACQUIRED, got {status}"
+        assert os.path.exists(lock_path), "Lock file should exist after acquire"
+
+        # Verify lock is in staging dir, not cwd/.claude/
+        staging_dir = get_staging_dir(str(proj))
+        assert lock_path.startswith(staging_dir), (
+            f"Lock path should be in staging dir ({staging_dir}), "
+            f"got {lock_path}"
+        )
+        assert lock_path == os.path.join(staging_dir, ".stop_hook_lock")
+
+        # Read lock content to verify it's valid JSON
+        with open(lock_path, "r") as f:
+            lock_data = json.loads(f.read())
+        assert lock_data["session_id"] == "test-session"
+        assert lock_data["pid"] == os.getpid()
+
+        # Release should remove the file
+        _release_triage_lock(lock_path)
+        assert not os.path.exists(lock_path), "Lock file should not exist after release"
+
+    def test_atomic_lock_held_blocks_second_acquire(self, tmp_path):
+        """Second acquire attempt while lock is held returns HELD status."""
+        proj = tmp_path / "proj"
+        proj.mkdir(parents=True)
+
+        lock_path1, status1 = _acquire_triage_lock(str(proj), "session-1")
+        assert status1 == _LOCK_ACQUIRED
+
+        # Second acquire should get HELD
+        lock_path2, status2 = _acquire_triage_lock(str(proj), "session-2")
+        assert status2 == _LOCK_HELD, f"Expected HELD, got {status2}"
+
+        # Cleanup
+        _release_triage_lock(lock_path1)
+
+    # -- Additional: Sentinel read/write roundtrip --------------------------
+
+    def test_sentinel_read_write_roundtrip(self, tmp_path):
+        """read_sentinel returns what write_sentinel wrote."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+
+        success = write_sentinel(str(proj), "roundtrip-session", "pending")
+        assert success is True, "write_sentinel should succeed"
+
+        data = read_sentinel(str(proj))
+        assert data is not None, "read_sentinel should return data after write"
+        assert data["session_id"] == "roundtrip-session"
+        assert data["state"] == "pending"
+        assert "timestamp" in data
+        assert data["pid"] == os.getpid()
+
+    def test_read_sentinel_returns_none_when_missing(self, tmp_path):
+        """read_sentinel returns None when no sentinel file exists."""
+        proj = tmp_path / "proj"
+        proj.mkdir(parents=True)
+        data = read_sentinel(str(proj))
+        assert data is None, "read_sentinel should return None when file is missing"
+
+    # -- Additional: RUNBOOK negative patterns ------------------------------
+
+    def test_negative_patterns_suppress_doc_headings(self):
+        """RUNBOOK negative patterns suppress markdown heading scaffolding."""
+        doc_lines = [
+            "## Error Handling",
+            "- If a subagent fails, retry once",
+            "## Retry Logic",
+            "## Fallback Strategy",
+            "- If subagent fails with timeout, skip",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            doc_lines, "RUNBOOK"
+        )
+        assert score == 0.0, (
+            f"Doc scaffolding lines should be suppressed by negative patterns; "
+            f"got score {score}"
+        )
+
+    def test_negative_patterns_allow_real_troubleshooting(self):
+        """RUNBOOK negative patterns do NOT suppress real troubleshooting text."""
+        real_lines = [
+            "On error, restart the worker process.",
+            "The fix was to increase the timeout to 30 seconds.",
+            "We diagnosed the root cause by checking the logs.",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            real_lines, "RUNBOOK"
+        )
+        assert score > 0.0, (
+            f"Real troubleshooting text should NOT be suppressed; "
+            f"got score {score}"
+        )
+
+    def test_negative_patterns_suppress_phase3_save_commands(self):
+        """RUNBOOK negatives suppress SKILL.md Phase 3 save command templates."""
+        phase3_lines = [
+            'Execute these memory save commands in order.',
+            'python3 memory_write.py --action create --category runbook --target "path" --input "draft"',
+            'python3 memory_enforce.py --category session_summary',
+            'python3 memory_write.py --action write-save-result-direct --staging-dir /tmp/staging',
+            'python3 memory_write.py --action cleanup-staging --staging-dir /tmp/staging',
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            phase3_lines, "RUNBOOK"
+        )
+        assert score == 0.0, (
+            f"Phase 3 save command lines should be suppressed; "
+            f"got score {score}, snippets={snippets}"
+        )
+
+    def test_negative_patterns_suppress_phase3_boilerplate(self):
+        """RUNBOOK negatives suppress Phase 3 subagent prompt boilerplate."""
+        boilerplate_lines = [
+            "CRITICAL: Using heredoc (<<) or cat with redirect will trigger a permission popup",
+            "Minimal Console Output",
+            "Combine ALL numbered commands into a SINGLE Bash tool call",
+            "NEVER use Bash for file writes",
+            "If ALL commands succeeded (no errors), run cleanup",
+            "If ANY command failed, do NOT delete staging files (preserve for retry).",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            boilerplate_lines, "RUNBOOK"
+        )
+        assert score == 0.0, (
+            f"Phase 3 boilerplate lines should be suppressed; "
+            f"got score {score}, snippets={snippets}"
+        )
+
+    def test_negative_patterns_suppress_phase3_headings(self):
+        """RUNBOOK negatives suppress Phase 3 step headings."""
+        heading_lines = [
+            "### Write Pipeline Protections",
+            "## Step 1: Build Command List",
+            "## Step 3: Error Handling",
+            "- If Task subagent fails, times out, or returns errors:",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            heading_lines, "RUNBOOK"
+        )
+        assert score == 0.0, (
+            f"Phase 3 heading lines should be suppressed; "
+            f"got score {score}, snippets={snippets}"
+        )
+
+    def test_negative_patterns_dont_suppress_real_error_fix(self):
+        """Real error resolution text must still trigger RUNBOOK."""
+        real_lines = [
+            "We hit an error when the response was None.",
+            "The root cause was a missing null check.",
+            "Fixed by adding a guard clause before the API call.",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            real_lines, "RUNBOOK"
+        )
+        assert score > 0.0, (
+            f"Real error fix text should NOT be suppressed; "
+            f"got score {score}"
+        )
+        assert primary_count + boosted_count >= 1, (
+            f"Expected at least 1 match for real error text"
+        )
+
+    def test_negative_patterns_mixed_skillmd_and_real(self):
+        """Mixed SKILL.md + real troubleshooting: only real lines should score."""
+        mixed_lines = [
+            "Execute these memory save commands in order.",   # suppressed
+            "CRITICAL: Using heredoc will trigger a permission popup",  # suppressed
+            "The server crashed with an OOM error.",          # real
+            "python3 memory_write.py --action create --category runbook",  # suppressed
+            "We fixed it by increasing the memory limit.",     # real
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            mixed_lines, "RUNBOOK"
+        )
+        assert score > 0.0, (
+            f"Mixed lines should still score from real content; "
+            f"got score {score}"
+        )
+
+    def test_lock_path_in_staging_dir(self, tmp_path):
+        """Lock path must be in staging dir, not in cwd/.claude/."""
+        proj = tmp_path / "proj"
+        proj.mkdir(parents=True)
+
+        lock_path, status = _acquire_triage_lock(str(proj), "test-session")
+        assert status == _LOCK_ACQUIRED
+
+        # Must NOT be in cwd/.claude/
+        old_lock_path = os.path.join(str(proj), ".claude", ".stop_hook_lock")
+        assert lock_path != old_lock_path, (
+            "Lock path should no longer be in cwd/.claude/"
+        )
+
+        # Must be in staging dir
+        staging_dir = get_staging_dir(str(proj))
+        expected = os.path.join(staging_dir, ".stop_hook_lock")
+        assert lock_path == expected, (
+            f"Lock path should be {expected}, got {lock_path}"
+        )
+
+        # Cleanup
+        _release_triage_lock(lock_path)
+
+    # -- V-R2 Fix Tests: STOP_FLAG_TTL separation ----------------------------
+
+    def test_stop_flag_ttl_is_separate(self):
+        """STOP_FLAG_TTL must be shorter than FLAG_TTL_SECONDS (cross-session bleed prevention)."""
+        assert STOP_FLAG_TTL < FLAG_TTL_SECONDS, (
+            f"STOP_FLAG_TTL ({STOP_FLAG_TTL}) must be < FLAG_TTL_SECONDS ({FLAG_TTL_SECONDS})"
+        )
+        assert STOP_FLAG_TTL == 300, (
+            f"STOP_FLAG_TTL should be 300, got {STOP_FLAG_TTL}"
+        )
+
+    def test_check_stop_flag_uses_stop_flag_ttl(self, tmp_path):
+        """check_stop_flag should expire flags after STOP_FLAG_TTL (300s), not FLAG_TTL_SECONDS (1800s)."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude"
+        claude_dir.mkdir(parents=True)
+        flag = claude_dir / ".stop_hook_active"
+        flag.write_text(str(time.time()), encoding="utf-8")
+        # Make flag 400s old (> STOP_FLAG_TTL=300 but < FLAG_TTL_SECONDS=1800)
+        stale_time = time.time() - 400
+        os.utime(str(flag), (stale_time, stale_time))
+        # Should return False: expired per STOP_FLAG_TTL
+        assert check_stop_flag(str(proj)) is False
+
+    def test_check_stop_flag_fresh_within_stop_flag_ttl(self, tmp_path):
+        """check_stop_flag should return True for flags within STOP_FLAG_TTL."""
+        proj = tmp_path / "proj"
+        claude_dir = proj / ".claude"
+        claude_dir.mkdir(parents=True)
+        flag = claude_dir / ".stop_hook_active"
+        flag.write_text(str(time.time()), encoding="utf-8")
+        # Flag is fresh (just created), should return True
+        assert check_stop_flag(str(proj)) is True
