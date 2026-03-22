@@ -540,10 +540,14 @@ def cleanup_staging(staging_dir: str) -> dict:
 
     for pattern in _STAGING_CLEANUP_PATTERNS:
         for f in staging_path.glob(pattern):
+            # Reject symlinks first (prevents resolve() RuntimeError on loops)
+            if f.is_symlink():
+                skipped += 1
+                continue
             # Extra containment: resolved path must be within staging_dir
             try:
                 f.resolve().relative_to(staging_path)
-            except ValueError:
+            except (ValueError, RuntimeError):
                 skipped += 1
                 continue
             try:

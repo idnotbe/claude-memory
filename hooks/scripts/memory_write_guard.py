@@ -95,6 +95,28 @@ def main():
     # Moved from .claude/memory/.staging/ to /tmp/ to avoid Claude Code's
     # hardcoded .claude/ protected directory prompts.
     _TMP_STAGING_PREFIX = "/tmp/.claude-memory-staging-"
+
+    # S2 defense: Detect symlink-compromised staging paths.
+    # If the unresolved file_path looks like staging but resolves elsewhere,
+    # the staging directory is likely a symlink — deny to prevent deceptive prompts.
+    normalized_input = file_path.replace(os.sep, "/")
+    if normalized_input.startswith(_TMP_STAGING_PREFIX) and not resolved.startswith(_TMP_STAGING_PREFIX):
+        _log("guard.write_deny_staging_symlink", {
+            "input_path": os.path.basename(file_path),
+            "resolved_prefix": resolved[:50],
+            "decision": "deny",
+        }, level="warning")
+        json.dump({
+            "hookSpecificOutput": {
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Staging directory appears to be a symlink — resolved path "
+                    "does not match expected /tmp/ staging prefix. Aborting."
+                ),
+            }
+        }, sys.stdout)
+        sys.exit(0)
+
     if resolved.startswith(_TMP_STAGING_PREFIX):
         basename = os.path.basename(resolved)
 

@@ -249,8 +249,21 @@ def write_draft(data: dict, category: str, root: str) -> str:
     draft_path = os.path.join(staging_dir, filename)
 
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    with open(draft_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    # Use O_NOFOLLOW to prevent symlink attacks on staging files
+    fd = os.open(
+        draft_path,
+        os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
 
     return draft_path
 
