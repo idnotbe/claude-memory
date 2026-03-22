@@ -1154,6 +1154,124 @@ class TestCleanupIntents:
 
 
 # ---------------------------------------------------------------
+# V-R2 GAP 4: cleanup_intents with real /tmp/ staging paths
+# ---------------------------------------------------------------
+
+class TestCleanupIntentsTmpPath:
+    """Test cleanup_intents with actual /tmp/ staging paths (V-R2 GAP 4).
+
+    The original test suite used only legacy .staging paths because
+    cleanup_intents checks startswith('/tmp/.claude-memory-staging-')
+    on resolved paths, which tmp_path cannot satisfy. These tests use
+    real /tmp/ tempfile directories to exercise the /tmp/ code path.
+    """
+
+    def test_multiple_intents_in_tmp(self):
+        """cleanup_intents should delete multiple intent files from /tmp/ staging."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        try:
+            # Create several intent files
+            (staging / "intent-session_summary.json").write_text('{"action": "create"}')
+            (staging / "intent-decision.json").write_text('{"action": "update"}')
+            (staging / "intent-constraint.json").write_text('{"action": "create"}')
+            # Non-intent files should be preserved
+            (staging / "context-session_summary.txt").write_text("transcript excerpt")
+            (staging / "triage-data.json").write_text('{"categories": []}')
+
+            result = cleanup_intents(str(staging))
+
+            assert result["status"] == "ok"
+            assert len(result["deleted"]) == 3
+            assert set(result["deleted"]) == {
+                "intent-session_summary.json",
+                "intent-decision.json",
+                "intent-constraint.json",
+            }
+            # Non-intent files preserved
+            assert (staging / "context-session_summary.txt").exists()
+            assert (staging / "triage-data.json").exists()
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_symlink_rejected_in_tmp_staging(self):
+        """Symlinks to intent files in /tmp/ staging should be rejected."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        outside = None
+        try:
+            # Create a real file outside staging (NamedTemporaryFile for safe creation)
+            outside_fd = tempfile.NamedTemporaryFile(
+                suffix=".json", dir="/tmp", delete=False
+            )
+            outside = Path(outside_fd.name)
+            outside_fd.write(b'{"secret": true}')
+            outside_fd.close()
+
+            # Create a symlink masquerading as an intent file
+            (staging / "intent-evil.json").symlink_to(outside)
+            # Create a valid intent file too
+            (staging / "intent-valid.json").write_text('{}')
+
+            result = cleanup_intents(str(staging))
+
+            assert result["status"] == "ok"
+            # Valid file should be deleted
+            assert "intent-valid.json" in result["deleted"]
+            # Symlink should be rejected
+            assert "intent-evil.json" not in result["deleted"]
+            assert any(e["error"] == "symlink rejected" for e in result["errors"])
+            # Original file outside staging should still exist
+            assert outside.exists()
+        finally:
+            import shutil
+            if outside and outside.exists():
+                outside.unlink()
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_empty_tmp_staging(self):
+        """Empty /tmp/ staging dir should return ok with empty lists."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        try:
+            result = cleanup_intents(str(staging))
+            assert result["status"] == "ok"
+            assert result["deleted"] == []
+            assert result["errors"] == []
+        finally:
+            staging.rmdir()
+
+    def test_path_containment_in_tmp(self):
+        """Path traversal via symlink in /tmp/ staging should be rejected."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        outside = None
+        try:
+            # Create a file outside staging (NamedTemporaryFile for safe creation)
+            outside_fd = tempfile.NamedTemporaryFile(
+                suffix=".json", dir="/tmp", delete=False
+            )
+            outside = Path(outside_fd.name)
+            outside_fd.write(b'{"traversal": true}')
+            outside_fd.close()
+            # Symlink from inside staging pointing outside
+            (staging / "intent-traversal.json").symlink_to(outside)
+
+            result = cleanup_intents(str(staging))
+
+            assert result["status"] == "ok"
+            assert "intent-traversal.json" not in result["deleted"]
+            assert any(e["error"] == "symlink rejected" for e in result["errors"])
+            assert outside.exists()
+        finally:
+            import shutil
+            if outside and outside.exists():
+                outside.unlink()
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+# ---------------------------------------------------------------
 # P2 Popup Fix: write-save-result-direct CLI action tests
 # ---------------------------------------------------------------
 
@@ -1579,6 +1697,21 @@ class TestUpdateSentinelState:
             assert new_sentinel["timestamp"] >= old_ts, (
                 "Timestamp should be updated on state transition"
             )
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_malformed_json_sentinel_fails_open(self):
+        """Malformed JSON in sentinel -> error but exit 0 (fail-open)."""
+        staging = self._make_tmp_staging()
+        try:
+            sentinel_file = staging / ".triage-handled"
+            sentinel_file.write_text("not valid json {{{", encoding="utf-8")
+            rc, stdout, stderr = self._run_update(staging, "saving")
+            assert rc == 0, "Should exit 0 (fail-open)"
+            output = json.loads(stdout)
+            assert output["status"] == "error"
+            assert "Cannot read sentinel" in output["message"]
         finally:
             import shutil
             shutil.rmtree(staging, ignore_errors=True)
