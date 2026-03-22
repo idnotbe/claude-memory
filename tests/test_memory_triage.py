@@ -44,6 +44,7 @@ from memory_triage import (
     FLAG_TTL_SECONDS,
     _deep_copy_parallel_defaults,
 )
+from memory_staging_utils import get_staging_dir
 
 
 # ---------------------------------------------------------------------------
@@ -1118,10 +1119,10 @@ class TestEdgeCases:
 
 
 class TestStagingPaths:
-    """Tests for R2: context files written to .claude/memory/.staging/ when cwd is provided."""
+    """Tests for R2: context files written to /tmp/.claude-memory-staging-<hash>/ when cwd is provided."""
 
     def test_context_files_use_staging_dir_when_cwd_provided(self, tmp_path):
-        """When cwd is provided, context files should go to {cwd}/.claude/memory/.staging/."""
+        """When cwd is provided, context files should go to /tmp/.claude-memory-staging-<hash>/."""
         text = "We decided to use PostgreSQL because of JSONB support."
         metrics = {"tool_uses": 0, "distinct_tools": 0, "exchanges": 2}
         results = [
@@ -1135,8 +1136,7 @@ class TestStagingPaths:
 
         assert "decision" in context_paths
         path = context_paths["decision"]
-        expected_dir = str(tmp_path / ".claude" / "memory" / ".staging")
-        assert path.startswith(expected_dir), f"Path {path} should start with {expected_dir}"
+        assert path.startswith("/tmp/.claude-memory-staging-"), f"Path {path} should start with /tmp/.claude-memory-staging-"
         assert path.endswith("context-decision.txt")
         assert os.path.isfile(path)
 
@@ -1154,9 +1154,10 @@ class TestStagingPaths:
         assert context_paths["decision"].startswith("/tmp/")
 
     def test_staging_dir_created_if_absent(self, tmp_path):
-        """The .staging/ directory should be created if it doesn't exist."""
-        staging_dir = tmp_path / ".claude" / "memory" / ".staging"
-        assert not staging_dir.exists()
+        """The /tmp/ staging directory should be created if it doesn't exist."""
+        import hashlib
+        project_hash = hashlib.sha256(os.path.realpath(str(tmp_path)).encode()).hexdigest()[:12]
+        staging_dir = Path(f"/tmp/.claude-memory-staging-{project_hash}")
 
         text = "We decided to use PostgreSQL because it supports JSONB."
         metrics = {"tool_uses": 0, "distinct_tools": 0, "exchanges": 2}
@@ -1183,9 +1184,8 @@ class TestStagingPaths:
             cwd=str(tmp_path),
         )
 
-        staging_dir = str(tmp_path / ".claude" / "memory" / ".staging")
         for cat, path in context_paths.items():
-            assert path.startswith(staging_dir), f"Category {cat} path {path} not in staging"
+            assert path.startswith("/tmp/.claude-memory-staging-"), f"Category {cat} path {path} not in staging"
             assert os.path.isfile(path)
 
     def test_staging_content_matches_tmp_content(self, tmp_path):
@@ -1241,24 +1241,31 @@ class TestSentinelIdempotency:
         return _write_transcript(tmp_path, messages)
 
     def test_sentinel_allows_stop_when_fresh(self, tmp_path):
-        """If sentinel exists and is fresh (< 300s), triage should allow stop."""
+        """If sentinel exists with same session_id and blocking state, triage should allow stop."""
         proj = tmp_path / "proj"
-        staging_dir = proj / ".claude" / "memory" / ".staging"
-        staging_dir.mkdir(parents=True)
+        # Create config directory
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "memory-config.json").write_text(
+            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
+        )
+        # Create sentinel in staging dir
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
         sentinel = staging_dir / ".triage-handled"
-        sentinel.write_text(str(time.time()), encoding="utf-8")
+        # Session-scoped sentinel: JSON with session_id matching transcript stem
+        sentinel.write_text(json.dumps({
+            "session_id": "transcript",
+            "state": "pending",
+            "timestamp": time.time(),
+            "pid": os.getpid(),
+        }), encoding="utf-8")
 
         transcript_path = self._make_blocking_transcript(tmp_path)
         hook_input = json.dumps({
             "transcript_path": transcript_path,
             "cwd": str(proj),
         })
-
-        # Write config
-        claude_dir = proj / ".claude" / "memory"
-        (claude_dir / "memory-config.json").write_text(
-            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
-        )
 
         captured_out = io.StringIO()
         with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
@@ -1270,27 +1277,32 @@ class TestSentinelIdempotency:
         # No blocking output - sentinel caused early return
         assert captured_out.getvalue().strip() == ""
 
-    def test_sentinel_ignored_when_stale(self, tmp_path):
-        """If sentinel exists but is stale (> 300s), triage should proceed normally."""
+    def test_sentinel_ignored_when_different_session(self, tmp_path):
+        """If sentinel exists but for a different session, triage should proceed normally."""
         proj = tmp_path / "proj"
-        staging_dir = proj / ".claude" / "memory" / ".staging"
-        staging_dir.mkdir(parents=True)
+        # Create config directory
+        claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "memory-config.json").write_text(
+            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
+        )
+        # Create sentinel in staging dir
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
         sentinel = staging_dir / ".triage-handled"
-        # Write sentinel with old timestamp and set mtime to 10 minutes ago
-        sentinel.write_text(str(time.time() - 600), encoding="utf-8")
-        old_time = time.time() - 600
-        os.utime(str(sentinel), (old_time, old_time))
+        # Write sentinel with a DIFFERENT session_id than the transcript
+        sentinel.write_text(json.dumps({
+            "session_id": "old-session-abc123",
+            "state": "saved",
+            "timestamp": time.time(),
+            "pid": os.getpid(),
+        }), encoding="utf-8")
 
         transcript_path = self._make_blocking_transcript(tmp_path)
         hook_input = json.dumps({
             "transcript_path": transcript_path,
             "cwd": str(proj),
         })
-
-        claude_dir = proj / ".claude" / "memory"
-        (claude_dir / "memory-config.json").write_text(
-            json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
-        )
 
         captured_out = io.StringIO()
         with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
@@ -1306,7 +1318,7 @@ class TestSentinelIdempotency:
             assert response["decision"] == "block"
 
     def test_sentinel_created_when_blocking(self, tmp_path):
-        """When triage blocks, sentinel file should be created."""
+        """When triage blocks, sentinel file should be created with session state."""
         proj = tmp_path / "proj"
         claude_dir = proj / ".claude" / "memory"
         claude_dir.mkdir(parents=True)
@@ -1326,14 +1338,16 @@ class TestSentinelIdempotency:
              mock.patch("memory_triage.check_stop_flag", return_value=False):
             _run_triage()
 
-        sentinel = proj / ".claude" / "memory" / ".staging" / ".triage-handled"
+        sentinel = Path(get_staging_dir(str(proj))) / ".triage-handled"
         stdout_text = captured_out.getvalue().strip()
         if stdout_text:
-            # If triage blocked, sentinel should exist
-            assert sentinel.exists(), "Sentinel should be created when triage blocks"
+            # If triage blocked, sentinel should exist as JSON
+            assert sentinel.exists(), f"Sentinel should be created when triage blocks at {sentinel}"
             content = sentinel.read_text(encoding="utf-8")
-            # Content should be a timestamp
-            float(content)  # Should not raise
+            data = json.loads(content)
+            assert "session_id" in data, "Sentinel should contain session_id"
+            assert data["state"] == "pending", "Sentinel state should be 'pending'"
+            assert "timestamp" in data, "Sentinel should contain timestamp"
 
     def test_sentinel_missing_dir_handled_gracefully(self, tmp_path):
         """When .staging/ doesn't exist, sentinel check should not crash."""
@@ -1385,7 +1399,7 @@ class TestSentinelIdempotency:
              mock.patch("memory_triage.check_stop_flag", return_value=False):
             _run_triage()
 
-        sentinel = proj / ".claude" / "memory" / ".staging" / ".triage-handled"
+        sentinel = Path(get_staging_dir(str(proj))) / ".triage-handled"
         assert not sentinel.exists(), (
             "Sentinel should not be created when triage allows the stop"
         )
@@ -1430,27 +1444,33 @@ class TestSentinelIdempotency:
         )
 
     def test_sentinel_uses_flag_ttl_constant(self, tmp_path):
-        """Sentinel TTL should use the FLAG_TTL_SECONDS constant (300s)."""
-        # Verify the constant value matches expected
-        assert FLAG_TTL_SECONDS == 300, (
-            f"FLAG_TTL_SECONDS should be 300, got {FLAG_TTL_SECONDS}"
+        """FLAG_TTL_SECONDS should be 1800 (30 min) to cover save flow duration."""
+        # Verify the constant value matches expected (raised from 300 to 1800)
+        assert FLAG_TTL_SECONDS == 1800, (
+            f"FLAG_TTL_SECONDS should be 1800, got {FLAG_TTL_SECONDS}"
         )
 
         proj = tmp_path / "proj"
-        staging_dir = proj / ".claude" / "memory" / ".staging"
-        staging_dir.mkdir(parents=True)
-        sentinel = staging_dir / ".triage-handled"
-
-        # Sentinel at exactly TTL - 1 second should still be fresh
-        sentinel.write_text(str(time.time()), encoding="utf-8")
-        just_under_ttl = time.time() - (FLAG_TTL_SECONDS - 1)
-        os.utime(str(sentinel), (just_under_ttl, just_under_ttl))
-
-        transcript_path = self._make_blocking_transcript(tmp_path)
+        # Create config directory
         claude_dir = proj / ".claude" / "memory"
+        claude_dir.mkdir(parents=True)
         (claude_dir / "memory-config.json").write_text(
             json.dumps({"triage": {"enabled": True}}), encoding="utf-8"
         )
+        # Create sentinel in staging dir
+        staging_dir = Path(get_staging_dir(str(proj)))
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        sentinel = staging_dir / ".triage-handled"
+
+        # Session-scoped sentinel with matching session_id should block
+        sentinel.write_text(json.dumps({
+            "session_id": "transcript",
+            "state": "pending",
+            "timestamp": time.time(),
+            "pid": os.getpid(),
+        }), encoding="utf-8")
+
+        transcript_path = self._make_blocking_transcript(tmp_path)
         hook_input = json.dumps({
             "transcript_path": transcript_path,
             "cwd": str(proj),
@@ -1707,14 +1727,17 @@ class TestRunTriageWritesTriageDataFile:
         response = json.loads(stdout_text)
         assert response["decision"] == "block"
 
-        # Check that triage-data.json was written
-        triage_data_path = proj / ".claude" / "memory" / ".staging" / "triage-data.json"
-        assert triage_data_path.exists(), "triage-data.json should exist"
+        # Check that triage-data.json was written to /tmp/ staging dir
+        import hashlib
+        project_hash = hashlib.sha256(os.path.realpath(str(proj)).encode()).hexdigest()[:12]
+        triage_data_path = Path(f"/tmp/.claude-memory-staging-{project_hash}/triage-data.json")
+        assert triage_data_path.exists(), f"triage-data.json should exist at {triage_data_path}"
 
         # Verify it's valid JSON with expected structure
         triage_data = json.loads(triage_data_path.read_text(encoding="utf-8"))
         assert "categories" in triage_data
         assert "parallel_config" in triage_data
+        assert "staging_dir" in triage_data
 
         # Verify the reason references the file
         reason = response["reason"]
@@ -2123,10 +2146,10 @@ class TestConstraintThresholdFix:
     # -- Regression Tests --------------------------------------------------
 
     def test_other_categories_unaffected(self):
-        """DEFAULT_THRESHOLDS for non-CONSTRAINT categories are unchanged."""
+        """DEFAULT_THRESHOLDS for non-CONSTRAINT categories are at expected values."""
         expected = {
             "DECISION": 0.4,
-            "RUNBOOK": 0.4,
+            "RUNBOOK": 0.5,  # Raised from 0.4 to reduce SKILL.md false positives
             "TECH_DEBT": 0.4,
             "PREFERENCE": 0.4,
             "SESSION_SUMMARY": 0.6,

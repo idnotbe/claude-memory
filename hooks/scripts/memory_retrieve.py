@@ -38,6 +38,17 @@ from memory_search_engine import (  # noqa: E402
     tokenize,
 )
 
+# Lazy import: staging utilities
+try:
+    from memory_staging_utils import get_staging_dir  # noqa: E402
+except ImportError:
+    import hashlib as _hashlib
+    def get_staging_dir(cwd: str = "") -> str:
+        if not cwd:
+            cwd = os.getcwd()
+        _h = _hashlib.sha256(os.path.realpath(cwd).encode()).hexdigest()[:12]
+        return f"/tmp/.claude-memory-staging-{_h}"
+
 # Lazy import: logging module may not exist during partial deployments
 try:
     from memory_logger import emit_event, emit_error, get_session_id, parse_logging_config
@@ -432,10 +443,11 @@ def main():
                        memory_root=str(memory_root))
             # Fail-open: proceed with empty config (logging disabled by default)
 
-    # --- Block 1: Save confirmation from previous session (project-local path) ---
+    # --- Block 1: Save confirmation from previous session ---
     _just_saved = False  # Flag for Block 2 orphan suppression
+    _staging_path = Path(get_staging_dir(cwd))
     try:
-        _save_result_path = memory_root / ".staging" / "last-save-result.json"
+        _save_result_path = _staging_path / "last-save-result.json"
         if _save_result_path.exists():
             _just_saved = True
             try:
@@ -474,9 +486,8 @@ def main():
 
     # --- Block 2: Orphan crash detection ---
     try:
-        _staging_dir = memory_root / ".staging"
-        _triage_data_path = _staging_dir / "triage-data.json"
-        _triage_pending_path = _staging_dir / ".triage-pending.json"
+        _triage_data_path = _staging_path / "triage-data.json"
+        _triage_pending_path = _staging_path / ".triage-pending.json"
         if (_triage_data_path.exists()
                 and not _just_saved
                 and not _triage_pending_path.exists()):
@@ -489,7 +500,7 @@ def main():
 
     # --- Block 3: Pending save notification ---
     try:
-        _pending_path = memory_root / ".staging" / ".triage-pending.json"
+        _pending_path = _staging_path / ".triage-pending.json"
         if _pending_path.exists():
             _pending_data = json.loads(_pending_path.read_text(encoding="utf-8"))
             if not isinstance(_pending_data, dict):

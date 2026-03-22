@@ -66,22 +66,26 @@ REQUIRED_INPUT_FIELDS = ("title", "tags", "content", "change_summary")
 def validate_input_path(path: str) -> str | None:
     """Validate input file path is in an allowed directory.
 
-    Allowed: .claude/memory/.staging/ or /tmp/
-    The /tmp/ allowance is broader than memory_write.py (which only allows
-    .staging/) -- this is intentional per spec since memory_draft.py reads
-    partial input written by the LLM via the Write tool, which may use /tmp/.
+    Allowed: /tmp/.claude-memory-staging-*/, .claude/memory/.staging/, or /tmp/
+    The /tmp/ allowance is broader than memory_write.py -- this is intentional
+    per spec since memory_draft.py reads partial input written by the LLM via
+    the Write tool, which may use /tmp/.
     """
     resolved = os.path.realpath(path)
 
     if ".." in path:
         return f"Input path must not contain '..' components: {path}"
 
-    in_staging = "/.claude/memory/.staging/" in resolved
+    in_staging = (
+        resolved.startswith("/tmp/.claude-memory-staging-")
+        or "/.claude/memory/.staging/" in resolved
+    )
     in_tmp = resolved.startswith("/tmp/")
 
     if not in_staging and not in_tmp:
         return (
-            f"Input file must be in .claude/memory/.staging/ or /tmp/. "
+            f"Input file must be in /tmp/.claude-memory-staging-*/, "
+            f".claude/memory/.staging/, or /tmp/. "
             f"Got: {path} (resolved: {resolved})"
         )
     return None
@@ -228,9 +232,16 @@ def assemble_update(input_data: dict, existing: dict, category: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def write_draft(data: dict, category: str, root: str) -> str:
-    """Write the assembled draft to .staging/ and return the path."""
-    staging_dir = os.path.join(root, ".staging")
-    os.makedirs(staging_dir, exist_ok=True)
+    """Write the assembled draft to staging directory and return the path.
+
+    If root looks like a /tmp/.claude-memory-staging-* path, write directly there.
+    Otherwise, use root/.staging/ (legacy behavior).
+    """
+    if root.startswith("/tmp/.claude-memory-staging-"):
+        staging_dir = root
+    else:
+        staging_dir = os.path.join(root, ".staging")
+    os.makedirs(staging_dir, mode=0o700, exist_ok=True)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     pid = os.getpid()

@@ -38,17 +38,19 @@ def _log(event_type, data, level="info"):
         pass
 
 
-# Detect bash writes targeting .staging/ directory
+# Detect bash writes targeting staging directory.
+# Matches both the new /tmp/.claude-memory-staging-* path and legacy .claude/memory/.staging/
+_STAGING_PATH_PATTERN = r'(?:\.claude/memory/\.staging/|/tmp/\.claude-memory-staging-[a-f0-9]+/)'
 _STAGING_WRITE_PATTERN = re.compile(
-    r'(?:cat|echo|printf)\s+[^|&;\n>\s]*>\s*[^\s]*\.claude/memory/\.staging/'
-    r'|'
-    r'\btee\s+.*\.claude/memory/\.staging/'
-    r'|'
-    r'(?:cp|mv|install|dd)\s+.*\.claude/memory/\.staging/'
-    r'|'
-    r'\b(?:ln|link)\s+.*\.claude/memory/\.staging/'
-    r'|'
-    r'[&]?>{1,2}\s*[^\s]*\.claude/memory/\.staging/',
+    r'(?:cat|echo|printf)\s+[^|&;\n>\s]*>\s*[^\s]*' + _STAGING_PATH_PATTERN
+    + r'|'
+    r'\btee\s+.*' + _STAGING_PATH_PATTERN
+    + r'|'
+    r'(?:cp|mv|install|dd)\s+.*' + _STAGING_PATH_PATTERN
+    + r'|'
+    r'\b(?:ln|link)\s+.*' + _STAGING_PATH_PATTERN
+    + r'|'
+    r'[&]?>{1,2}\s*[^\s]*' + _STAGING_PATH_PATTERN,
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -66,9 +68,9 @@ def main():
 
     if _STAGING_WRITE_PATTERN.search(command):
         reason = (
-            "Bash writes to .claude/memory/.staging/ are blocked to prevent "
+            "Bash writes to memory staging directories are blocked to prevent "
             "guardian false positives. Use the Write tool instead: "
-            "Write(file_path='.claude/memory/.staging/<filename>', content='<json>')"
+            "Write(file_path='<staging_dir>/<filename>', content='<json>')"
         )
         _log("guard.staging_deny", {
             "command_preview": command[:100], "decision": "deny",

@@ -33,6 +33,8 @@ Each category has a configurable `description` field in `memory-config.json` (un
 
 ## Memory Consolidation
 
+**Staging directory**: Memory staging files are stored in `/tmp/.claude-memory-staging-<hash>/` where `<hash>` is a deterministic SHA-256 prefix derived from the project path. This avoids Claude Code's hardcoded `.claude/` protected directory prompts. The `triage-data.json` file includes a `staging_dir` field with the exact path. All staging file references below use `<staging_dir>` as shorthand.
+
 When a triage hook fires with a save instruction:
 
 ### Pre-Phase: Staging Cleanup
@@ -42,12 +44,12 @@ Only run this check when **no** `<triage_data>` or `<triage_data_file>` tag is p
 current hook output (i.e., manual `/memory:save` invocation or recovery). If triage output IS
 present, skip directly to Phase 0 -- the current triage data is fresh.
 
-1. Check if ANY of these exist:
-   - `.claude/memory/.staging/.triage-pending.json`
-   - `.claude/memory/.staging/triage-data.json` WITHOUT a corresponding `.claude/memory/.staging/last-save-result.json`
+1. Determine the staging directory: Read the `staging_dir` field from `triage-data.json` if available, or compute it as `/tmp/.claude-memory-staging-<hash>/` (where `<hash>` is derived from the project path by `memory_triage.py`). Check if ANY of these exist:
+   - `<staging_dir>/.triage-pending.json`
+   - `<staging_dir>/triage-data.json` WITHOUT a corresponding `<staging_dir>/last-save-result.json`
 2. If found, clean up ALL staging files before proceeding:
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action cleanup-staging --staging-dir .claude/memory/.staging
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action cleanup-staging --staging-dir <staging_dir>
    ```
 3. Proceed with normal fresh triage below.
 
@@ -58,12 +60,14 @@ present, skip directly to Phase 0 -- the current triage data is fresh.
 **Step 0: Clean stale intent files.** Before processing triage data, remove leftover intent files from previous sessions to prevent stale data contamination. Only delete `intent-*.json` files (NOT `context-*.txt` or `triage-data.json` — those were just written by the triage hook for this session):
 ```bash
 python3 -c "import glob,os
-for f in glob.glob('.claude/memory/.staging/intent-*.json'): os.remove(f)
+staging_dir = '<staging_dir>'
+for f in glob.glob(os.path.join(staging_dir, 'intent-*.json')): os.remove(f)
 print('ok')"
 ```
+(Replace `<staging_dir>` with the actual staging directory path from the triage data.)
 
-1. First try: Extract the file path from within `<triage_data_file>...</triage_data_file>` tags in the stop hook output. If present, read the JSON file at that path.
-2. Fallback: Extract inline `<triage_data>` JSON block (backwards compatibility).
+1. First try: Extract the file path from within `<triage_data_file>...</triage_data_file>` tags in the stop hook output. If present, read the JSON file at that path. The JSON includes a `staging_dir` field — use this for all subsequent staging file paths.
+2. Fallback: Extract inline `<triage_data>` JSON block (backwards compatibility). If it lacks `staging_dir`, compute it from the project path.
 
 Read `memory-config.json` for `triage.parallel.category_models`.
 
@@ -80,7 +84,7 @@ For EACH triggered category, spawn an Agent subagent using the `memory-drafter` 
 Agent(
   subagent_type: "memory-drafter",
   model: config.category_models[category.lower()] or default_model,
-  prompt: "Category: <cat>\nContext file: .claude/memory/.staging/context-<cat>.txt\nOutput: .claude/memory/.staging/intent-<cat>.json"
+  prompt: "Category: <cat>\nContext file: <staging_dir>/context-<cat>.txt\nOutput: <staging_dir>/intent-<cat>.json"
 )
 ```
 
@@ -99,7 +103,7 @@ and one verification subagent (Phase 2). With all 6 categories triggering,
 this is 12 subagent calls total. This is rare (requires a very diverse
 conversation) but be aware of the cost implications.
 
-**Context file format** (`.claude/memory/.staging/context-<category>.txt`):
+**Context file format** (`<staging_dir>/context-<category>.txt`):
 Each context file contains a header with the category name and score, optionally
 followed by a `Description:` line (from `categories.<name>.description` in config),
 then a `<transcript_data>` block wrapping relevant transcript excerpts. For text-based
@@ -127,7 +131,7 @@ all decisions follow mechanical rules.
 
 **Step 1: Collect and validate intent JSONs**
 
-Read all `.claude/memory/.staging/intent-<cat>.json` files. For each intent:
+Read all `<staging_dir>/intent-<cat>.json` files. For each intent:
 - If `action` is `"noop"`: log the `noop_reason` and skip the category.
 - If `action` is not `"noop"` (SAVE intent): validate required fields exist:
   `category` (string), `new_info_summary` (string), `partial_content` (object with
@@ -142,13 +146,13 @@ For each validated SAVE intent, write `new_info_summary` to a temp file and run
 
 ```bash
 # First, write the new-info summary (use Write tool):
-# Path: .claude/memory/.staging/new-info-<cat>.txt
+# Path: <staging_dir>/new-info-<cat>.txt
 # Content: the new_info_summary value from the intent JSON
 
 # Then run candidate.py:
 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_candidate.py" \
   --category <cat> \
-  --new-info-file .claude/memory/.staging/new-info-<cat>.txt
+  --new-info-file <staging_dir>/new-info-<cat>.txt
 ```
 
 If `lifecycle_hints` is present in the intent, pass `lifecycle_hints[0]` as
@@ -156,7 +160,7 @@ If `lifecycle_hints` is present in the intent, pass `lifecycle_hints[0]` as
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_candidate.py" \
   --category <cat> \
-  --new-info-file .claude/memory/.staging/new-info-<cat>.txt \
+  --new-info-file <staging_dir>/new-info-<cat>.txt \
   --lifecycle-event <lifecycle_hints[0]>
 ```
 
@@ -186,13 +190,14 @@ independent -- run them in PARALLEL:
 For **CREATE**:
 ```bash
 # First, write partial_content (use Write tool):
-# Path: .claude/memory/.staging/input-<cat>.json
+# Path: <staging_dir>/input-<cat>.json
 # Content: the partial_content object from the intent JSON
 
 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_draft.py" \
   --action create \
   --category <cat> \
-  --input-file .claude/memory/.staging/input-<cat>.json
+  --input-file <staging_dir>/input-<cat>.json \
+  --root <staging_dir>
 ```
 
 For **UPDATE** (add `--candidate-file` with the `candidate.path` from Step 2):
@@ -200,13 +205,14 @@ For **UPDATE** (add `--candidate-file` with the `candidate.path` from Step 2):
 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_draft.py" \
   --action update \
   --category <cat> \
-  --input-file .claude/memory/.staging/input-<cat>.json \
-  --candidate-file <candidate.path>
+  --input-file <staging_dir>/input-<cat>.json \
+  --candidate-file <candidate.path> \
+  --root <staging_dir>
 ```
 
 Parse each `memory_draft.py` JSON output. Extract `draft_path`:
 ```json
-{"status": "ok", "action": "create", "draft_path": ".claude/memory/.staging/draft-<cat>-<timestamp>.json"}
+{"status": "ok", "action": "create", "draft_path": "<staging_dir>/draft-<cat>-<timestamp>.json"}
 ```
 
 If draft.py fails for a category, skip that category (log error).
@@ -215,7 +221,7 @@ If draft.py fails for a category, skip that category (log error).
 
 For each category with a resolved DELETE action, write the retire JSON via the
 **Write tool**:
-- Path: `.claude/memory/.staging/draft-<category>-retire.json`
+- Path: `<staging_dir>/draft-<category>-retire.json`
 - Content: `{"action": "retire", "target": "<candidate.path>", "reason": "<why>"}`
 
 **Step 6: Summary**
@@ -246,7 +252,7 @@ CUD resolution was performed in Phase 1.5. The main agent now builds the save co
 Collect Phase 1.5 resolved actions and Phase 2 verification results. Exclude any category where Phase 2 returned FAIL (BLOCK). For each remaining category, build the save command using the resolved action from Phase 1.5.
 
 **Draft path validation:** Before including any draft file path in commands, verify it
-starts with `.claude/memory/.staging/draft-` and contains no `..` path components.
+starts with `<staging_dir>/draft-` (where `<staging_dir>` is the `/tmp/.claude-memory-staging-*` path) and contains no `..` path components.
 Reject any draft with a non-conforming path.
 
 Command templates:
@@ -287,15 +293,15 @@ Commands:
 N. <memory_enforce.py command, if applicable>
 
 If ALL commands succeeded (no errors), run cleanup:
-python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action cleanup-staging --staging-dir .claude/memory/.staging
+python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action cleanup-staging --staging-dir <staging_dir>
 If ANY command failed, do NOT delete staging files (preserve for retry).
 
 Then write the result file (atomic, regardless of success/failure).
-First, write the result JSON to a temp file using the Write tool (NOT Bash — avoids Guardian scan of inline JSON with .claude paths):
-Write(file_path='.claude/memory/.staging/last-save-result-input.json', content='{\"saved_at\": \"<ISO 8601 UTC>\", \"categories\": [\"<saved categories>\"], \"titles\": [\"<saved titles>\"], \"errors\": []}')
+First, write the result JSON to a temp file using the Write tool:
+Write(file_path='<staging_dir>/last-save-result-input.json', content='{\"saved_at\": \"<ISO 8601 UTC>\", \"categories\": [\"<saved categories>\"], \"titles\": [\"<saved titles>\"], \"errors\": []}')
 
 Then run the save-result command referencing the file:
-python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result --staging-dir .claude/memory/.staging --result-file .claude/memory/.staging/last-save-result-input.json
+python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result --staging-dir <staging_dir> --result-file <staging_dir>/last-save-result-input.json
 
 Return ONLY a single-line summary like: 'Saved: session_summary (update), constraint (create)' — no extra text."
 )
@@ -310,10 +316,10 @@ Result file fields:
 **Step 3: Error Handling**
 
 If the Task subagent fails, times out, or returns errors:
-1. Write a pending sentinel using the Write tool (NOT Bash — staging guard blocks Bash writes to `.staging/`):
+1. Write a pending sentinel using the Write tool (NOT Bash — staging guard blocks Bash writes to staging):
    ```
    Write(
-     file_path: ".claude/memory/.staging/.triage-pending.json",
+     file_path: "<staging_dir>/.triage-pending.json",
      content: '{"timestamp": "<ISO 8601 UTC>", "categories": ["<failed categories>"], "reason": "subagent_error"}'
    )
    ```

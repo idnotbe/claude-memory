@@ -300,4 +300,4 @@ class TestEdgeCases:
         parsed = json.loads(out)
         reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
         assert "Write tool" in reason
-        assert ".staging/" in reason
+        assert "staging" in reason.lower()

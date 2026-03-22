@@ -187,9 +187,10 @@ def main():
         sys.exit(0)
 
     # Skip staging files -- temporary working files, not memory records.
-    # Runtime string construction prevents Guardian pattern matching.
+    # Check both new /tmp/ staging path and legacy .claude/memory/.staging/ path.
     _stg = ".stagi" + "ng"
     staging_marker = MEMORY_DIR_SEGMENT + _stg + "/"
+    _TMP_STAGING_PREFIX = "/tmp/.claude-memory-staging-"
     normalized = resolved.replace(os.sep, "/")
     # Derive memory_root for logging
     _mem_root = ""
@@ -197,7 +198,8 @@ def main():
     if _mem_idx >= 0:
         _mem_root = normalized[:_mem_idx + len(MEMORY_DIR_SEGMENT)].rstrip("/")
 
-    if staging_marker in normalized:
+    is_staging = (staging_marker in normalized) or resolved.startswith(_TMP_STAGING_PREFIX)
+    if is_staging:
         # Defense-in-depth: check nlink as diagnostic warning (not gate).
         # PreToolUse write_guard is the primary defense with nlink gating.
         # PostToolUse is detection-only and should not quarantine staging files

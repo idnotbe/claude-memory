@@ -15,6 +15,13 @@ RETRIEVE_SCRIPT = str(SCRIPTS_DIR / "memory_retrieve.py")
 PYTHON = sys.executable
 
 sys.path.insert(0, str(SCRIPTS_DIR))
+
+import hashlib
+
+def _get_staging_dir(proj_path: str) -> Path:
+    """Compute the /tmp/ staging directory for a project path (test helper)."""
+    project_hash = hashlib.sha256(os.path.realpath(proj_path).encode()).hexdigest()[:12]
+    return Path(f"/tmp/.claude-memory-staging-{project_hash}")
 from memory_retrieve import (
     tokenize,
     parse_index_line,
@@ -1061,7 +1068,7 @@ class TestSaveConfirmation:
     def test_same_project_detailed_confirmation(self, tmp_path):
         """Recent save shows detailed confirmation."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1084,7 +1091,7 @@ class TestSaveConfirmation:
     def test_save_result_deleted_after_display(self, tmp_path):
         """Save result file is deleted after being shown (one-shot)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1104,7 +1111,7 @@ class TestSaveConfirmation:
     def test_old_save_result_ignored(self, tmp_path):
         """Save result older than 24 hours is ignored (still deleted)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         old_time = datetime.now(timezone.utc) - timedelta(hours=25)
         save_result = {
@@ -1128,7 +1135,7 @@ class TestSaveConfirmation:
     def test_corrupt_save_result_ignored(self, tmp_path):
         """Corrupt save result file is silently ignored (fail-open)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         (staging / "last-save-result.json").write_text("{bad json")
         hook_input = {
@@ -1143,7 +1150,7 @@ class TestSaveConfirmation:
     def test_save_result_with_errors(self, tmp_path):
         """Save result with errors shows error info."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1175,7 +1182,7 @@ class TestSaveConfirmation:
     def test_fires_for_short_prompts(self, tmp_path):
         """Save confirmation fires even for short prompts (before the short prompt check)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         save_result = {
             "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1225,7 +1232,7 @@ class TestOrphanCrashDetection:
         """Old triage-data.json without save result or pending triggers orphan alert."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
         # No last-save-result.json in staging (orphan condition)
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
         triage_path.write_text(json.dumps({"categories": ["decision"]}))
@@ -1245,7 +1252,7 @@ class TestOrphanCrashDetection:
     def test_no_orphan_when_save_result_exists(self, tmp_path):
         """No orphan alert when last-save-result.json exists (_just_saved flag suppresses)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         # Create save result (Block 1 sets _just_saved=True, suppressing Block 2)
         save_result = {
@@ -1279,7 +1286,7 @@ class TestOrphanCrashDetection:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         (fake_home / ".claude").mkdir()
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
         triage_path.write_text(json.dumps({"categories": ["decision"]}))
@@ -1302,7 +1309,7 @@ class TestOrphanCrashDetection:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         (fake_home / ".claude").mkdir()
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
         triage_path.write_text(json.dumps({"categories": ["decision"]}))
@@ -1337,7 +1344,7 @@ class TestOrphanCrashDetection:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         (fake_home / ".claude").mkdir()
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
         triage_path.write_text(json.dumps({"categories": ["decision"]}))
@@ -1383,7 +1390,7 @@ class TestPendingSaveNotification:
     def test_pending_notification_shown(self, tmp_path):
         """Pending file with categories shows notification."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         pending_data = {"categories": ["decision", "preference", "tech_debt"]}
         (staging / ".triage-pending.json").write_text(json.dumps(pending_data))
@@ -1400,7 +1407,7 @@ class TestPendingSaveNotification:
     def test_pending_single_category_singular(self, tmp_path):
         """Single pending category uses singular 'category'."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         (staging / ".triage-pending.json").write_text(json.dumps({"categories": ["decision"]}))
         hook_input = {
@@ -1426,7 +1433,7 @@ class TestPendingSaveNotification:
     def test_pending_file_not_deleted(self, tmp_path):
         """Pending file is NOT deleted by retrieval hook (that's /memory:save's job)."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         pending_path = staging / ".triage-pending.json"
         pending_path.write_text(json.dumps({"categories": ["decision"]}))
@@ -1440,7 +1447,7 @@ class TestPendingSaveNotification:
     def test_pending_corrupt_json_ignored(self, tmp_path):
         """Corrupt pending file is silently ignored."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         (staging / ".triage-pending.json").write_text("{bad json")
         hook_input = {
@@ -1454,7 +1461,7 @@ class TestPendingSaveNotification:
     def test_pending_fires_for_short_prompts(self, tmp_path):
         """Pending notification fires even for short prompts."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         (staging / ".triage-pending.json").write_text(json.dumps({"categories": ["decision"]}))
         hook_input = {
@@ -1468,7 +1475,7 @@ class TestPendingSaveNotification:
     def test_pending_empty_categories_no_notification(self, tmp_path):
         """Pending file with empty categories list produces no notification."""
         proj = self._setup_memory_project(tmp_path, [make_decision_memory()])
-        staging = proj / ".claude" / "memory" / ".staging"
+        staging = _get_staging_dir(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         (staging / ".triage-pending.json").write_text(json.dumps({"categories": []}))
         hook_input = {

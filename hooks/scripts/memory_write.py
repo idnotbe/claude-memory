@@ -503,7 +503,9 @@ _STAGING_CLEANUP_PATTERNS = [
     "input-*.json",
     "intent-*.json",
     "new-info-*.txt",
-    ".triage-handled",
+    # NOTE: .triage-handled intentionally excluded — sentinel must survive
+    # cleanup to prevent stop-hook re-fire loops. Session-scoped: overwritten
+    # by new sessions, expired via FLAG_TTL_SECONDS safety net.
     ".triage-pending.json",
 ]
 
@@ -511,20 +513,25 @@ _STAGING_CLEANUP_PATTERNS = [
 def cleanup_staging(staging_dir: str) -> dict:
     """Remove transient staging files after a successful save.
 
-    Path containment: staging_dir must resolve to a path ending in
-    memory/.staging. Individual files are checked to be within the
-    resolved staging directory before deletion.
+    Path containment: staging_dir must resolve to a /tmp/.claude-memory-staging-*
+    path (or legacy memory/.staging). Individual files are checked to be within
+    the resolved staging directory before deletion.
     """
     staging_path = Path(staging_dir).resolve()
 
     if not staging_path.is_dir():
         return {"status": "ok", "deleted": [], "errors": [], "skipped": 0}
 
+    # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
+    resolved_str = str(staging_path)
+    is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
     parts = staging_path.parts
-    if len(parts) < 2 or parts[-1] != ".staging" or parts[-2] != "memory":
+    is_legacy_staging = (len(parts) >= 2 and parts[-1] == ".staging" and parts[-2] == "memory")
+
+    if not is_tmp_staging and not is_legacy_staging:
         return {
             "status": "error",
-            "message": f"Path does not end with memory/.staging: {staging_dir}",
+            "message": f"Path is not a valid staging directory: {staging_dir}",
         }
 
     deleted: list[str] = []
@@ -563,11 +570,16 @@ def write_save_result(staging_dir: str, result_json: str) -> dict:
     """
     staging_path = Path(staging_dir).resolve()
 
+    # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
+    resolved_str = str(staging_path)
+    is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
     parts = staging_path.parts
-    if len(parts) < 2 or parts[-1] != ".staging" or parts[-2] != "memory":
+    is_legacy_staging = (len(parts) >= 2 and parts[-1] == ".staging" and parts[-2] == "memory")
+
+    if not is_tmp_staging and not is_legacy_staging:
         return {
             "status": "error",
-            "message": f"Path does not end with memory/.staging: {staging_dir}",
+            "message": f"Path is not a valid staging directory: {staging_dir}",
         }
 
     if len(result_json) > _SAVE_RESULT_MAX_SIZE:
@@ -1367,11 +1379,12 @@ def do_restore(args, memory_root: Path, index_path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 def _read_input(input_path: str) -> Optional[dict]:
-    """Read JSON from input file in .claude/memory/.staging/.
+    """Read JSON from input file in staging directory or /tmp/.
 
-    Validates that the input path is within the project's
-    .claude/memory/.staging/ directory and contains no path traversal
-    components (defense-in-depth against subagent manipulation).
+    Validates that the input path is within the project's staging
+    directory (/tmp/.claude-memory-staging-* or legacy .claude/memory/.staging/)
+    and contains no path traversal components (defense-in-depth against
+    subagent manipulation).
     """
     resolved = os.path.realpath(input_path)
     if ".." in input_path:
@@ -1381,13 +1394,20 @@ def _read_input(input_path: str) -> Optional[dict]:
             f"fix: Input path must not contain '..' components."
         )
         return None
-    # Only accept input from project-local .staging/ directory
-    in_staging = "/.claude/memory/.staging/" in resolved
+    # Accept input from /tmp/.claude-memory-staging-*, legacy .claude/memory/.staging/,
+    # or /tmp/.memory-write-pending*.json (manual save via /memory:save command)
+    basename = os.path.basename(resolved)
+    in_staging = (
+        resolved.startswith("/tmp/.claude-memory-staging-")
+        or "/.claude/memory/.staging/" in resolved
+        or (resolved.startswith("/tmp/") and basename.startswith(".memory-write-pending") and basename.endswith(".json"))
+    )
     if not in_staging:
         print(
             f"SECURITY_ERROR\npath: {input_path}\n"
             f"resolved: {resolved}\n"
-            f"fix: Input file must be in .claude/memory/.staging/ "
+            f"fix: Input file must be in /tmp/.claude-memory-staging-*/, "
+            f".claude/memory/.staging/, or /tmp/.memory-write-pending*.json "
             f"with no '..' components."
         )
         return None
