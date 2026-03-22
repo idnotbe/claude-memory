@@ -611,7 +611,7 @@ def cleanup_intents(staging_dir: str) -> dict:
     return {"status": "ok", "deleted": deleted, "errors": errors}
 
 
-_SAVE_RESULT_ALLOWED_KEYS = {"saved_at", "categories", "titles", "errors"}
+_SAVE_RESULT_ALLOWED_KEYS = {"saved_at", "categories", "titles", "errors", "session_id"}
 _SAVE_RESULT_MAX_SIZE = 10240  # 10KB
 _SAVE_RESULT_MAX_ITEMS = 10
 _SAVE_RESULT_MAX_TITLE_LEN = 120
@@ -683,11 +683,114 @@ def write_save_result(staging_dir: str, result_json: str) -> dict:
         if isinstance(err_msg, str) and len(err_msg) > _SAVE_RESULT_MAX_ERROR_LEN:
             return {"status": "error", "message": f"Error message exceeds {_SAVE_RESULT_MAX_ERROR_LEN} chars"}
 
-    os.makedirs(str(staging_path), exist_ok=True)
+    # session_id: must be a string or None/absent
+    sid = data.get("session_id")
+    if sid is not None and not isinstance(sid, str):
+        return {"status": "error", "message": "session_id must be a string or null"}
+
+    # Validate staging directory (symlink/ownership defense for /tmp/ paths)
+    try:
+        from memory_staging_utils import validate_staging_dir
+        validate_staging_dir(str(staging_path))
+    except ImportError:
+        os.makedirs(str(staging_path), exist_ok=True)
     target = str(staging_path / "last-save-result.json")
     atomic_write_text(target, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
     return {"status": "ok", "path": target}
+
+
+# ---------------------------------------------------------------------------
+# Sentinel state advancement
+# ---------------------------------------------------------------------------
+
+# Valid sentinel state transitions (from -> set of allowed to states)
+_SENTINEL_TRANSITIONS: dict[str, set[str]] = {
+    "pending": {"saving", "failed"},
+    "saving": {"saved", "failed"},
+}
+
+_SENTINEL_VALID_STATES = frozenset({"saving", "saved", "failed"})
+
+
+def update_sentinel_state(staging_dir: str, target_state: str) -> dict:
+    """Atomically advance the sentinel (.triage-handled) to a new state.
+
+    Reads the current sentinel, validates the state transition, and writes
+    the updated state + timestamp. Uses O_NOFOLLOW for symlink safety.
+
+    Allowed transitions: pending->saving, saving->saved, saving->failed,
+    pending->failed.
+
+    Fail-open: returns {"status": "ok"} on any error (exits 0 in CLI).
+    """
+    if target_state not in _SENTINEL_VALID_STATES:
+        return {
+            "status": "error",
+            "message": f"Invalid target state: {target_state}. "
+                       f"Must be one of: {sorted(_SENTINEL_VALID_STATES)}",
+        }
+
+    staging_path = Path(staging_dir).resolve()
+    sentinel_path = str(staging_path / ".triage-handled")
+
+    # Read current sentinel
+    try:
+        fd = os.open(sentinel_path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            raw = os.read(fd, 4096).decode("utf-8", errors="replace")
+        finally:
+            os.close(fd)
+        current = json.loads(raw)
+        if not isinstance(current, dict):
+            return {"status": "error", "message": "Sentinel is not a JSON object"}
+    except (OSError, json.JSONDecodeError) as e:
+        return {
+            "status": "error",
+            "message": f"Cannot read sentinel: {e}",
+        }
+
+    current_state = current.get("state", "")
+    allowed = _SENTINEL_TRANSITIONS.get(current_state, set())
+    if target_state not in allowed:
+        return {
+            "status": "error",
+            "message": f"Invalid transition: {current_state} -> {target_state}. "
+                       f"Allowed from '{current_state}': {sorted(allowed) if allowed else 'none'}",
+        }
+
+    # Update state and timestamp
+    current["state"] = target_state
+    current["timestamp"] = time.time()
+
+    # Atomic write via tmp + rename (O_NOFOLLOW on tmp file)
+    content = json.dumps(current) + "\n"
+    tmp_path = f"{sentinel_path}.{os.getpid()}.tmp"
+    try:
+        wfd = os.open(
+            tmp_path,
+            os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            os.write(wfd, content.encode("utf-8"))
+        finally:
+            os.close(wfd)
+        os.replace(tmp_path, sentinel_path)
+    except OSError as e:
+        # Clean up stale tmp on failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return {"status": "error", "message": f"Cannot write sentinel: {e}"}
+
+    return {
+        "status": "ok",
+        "previous_state": current_state,
+        "new_state": target_state,
+        "session_id": current.get("session_id", ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1658,6 +1761,7 @@ def main():
             "create", "update", "retire", "archive", "unarchive", "restore",
             "cleanup-staging", "cleanup-intents",
             "write-save-result", "write-save-result-direct",
+            "update-sentinel-state",
         ],
     )
     parser.add_argument("--category", choices=list(CATEGORY_FOLDERS.keys()))
@@ -1690,6 +1794,10 @@ def main():
         "--titles",
         help="Comma-separated title list (write-save-result-direct)",
     )
+    parser.add_argument(
+        "--state",
+        help="Target state for update-sentinel-state (saving, saved, failed)",
+    )
 
     args = parser.parse_args()
 
@@ -1709,6 +1817,21 @@ def main():
         result = cleanup_intents(args.staging_dir)
         print(json.dumps(result))
         return 0 if result["status"] == "ok" else 1
+
+    if args.action == "update-sentinel-state":
+        if not args.staging_dir:
+            print(json.dumps({"status": "error", "message": "--staging-dir is required"}))
+            return 0  # fail-open
+        if not args.state:
+            print(json.dumps({"status": "error", "message": "--state is required"}))
+            return 0  # fail-open
+        try:
+            result = update_sentinel_state(args.staging_dir, args.state)
+            print(json.dumps(result))
+        except Exception as e:
+            # Fail-open: sentinel state advancement is best-effort
+            print(json.dumps({"status": "error", "message": f"Unexpected error: {e}"}))
+        return 0  # always exit 0 (fail-open)
 
     if args.action == "write-save-result":
         if not args.staging_dir:
@@ -1753,11 +1876,32 @@ def main():
             print("ERROR: --titles must contain at least one non-empty value.")
             return 1
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Read session_id from sentinel file (best-effort, None on failure)
+        sentinel_session_id = None
+        try:
+            sentinel_file = os.path.join(
+                str(Path(args.staging_dir).resolve()), ".triage-handled"
+            )
+            sfd = os.open(sentinel_file, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                sraw = os.read(sfd, 4096).decode("utf-8", errors="replace")
+            finally:
+                os.close(sfd)
+            sdata = json.loads(sraw)
+            if isinstance(sdata, dict):
+                sid = sdata.get("session_id")
+                if isinstance(sid, str) and sid:
+                    sentinel_session_id = sid
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            pass  # Fail-open: session_id will be None
+
         result_data = {
             "saved_at": now_utc,
             "categories": categories,
             "titles": titles,
             "errors": [],
+            "session_id": sentinel_session_id,
         }
         result_json = json.dumps(result_data, ensure_ascii=False)
         result = write_save_result(args.staging_dir, result_json)

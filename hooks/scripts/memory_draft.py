@@ -50,6 +50,12 @@ from memory_write import (  # noqa: E402
     ChangeEntry,
     ValidationError,
 )
+from memory_staging_utils import validate_staging_dir  # noqa: E402
+
+
+def _ensure_staging_dir_safe(staging_dir: str) -> None:
+    """Validate and create staging dir using shared security logic."""
+    validate_staging_dir(staging_dir)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -241,7 +247,7 @@ def write_draft(data: dict, category: str, root: str) -> str:
         staging_dir = root
     else:
         staging_dir = os.path.join(root, ".staging")
-    os.makedirs(staging_dir, mode=0o700, exist_ok=True)
+    _ensure_staging_dir_safe(staging_dir)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     pid = os.getpid()

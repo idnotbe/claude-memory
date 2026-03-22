@@ -21,6 +21,7 @@ import math
 import os
 import re
 import select
+import stat as stat_mod
 import sys
 import time
 from pathlib import Path
@@ -32,6 +33,7 @@ try:
 except ImportError:
     # Fallback: compute inline if module not available during partial deploys
     import hashlib as _hashlib
+    import stat as _stat
     def get_staging_dir(cwd: str = "") -> str:
         if not cwd:
             cwd = os.getcwd()
@@ -39,7 +41,16 @@ except ImportError:
         return f"/tmp/.claude-memory-staging-{_h}"
     def ensure_staging_dir(cwd: str = "") -> str:
         d = get_staging_dir(cwd)
-        os.makedirs(d, mode=0o700, exist_ok=True)
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            _st = os.lstat(d)
+            if _stat.S_ISLNK(_st.st_mode):
+                raise RuntimeError(f"Staging dir is a symlink: {d}")
+            if _st.st_uid != os.geteuid():
+                raise RuntimeError(f"Staging dir owned by uid {_st.st_uid}: {d}")
+            if _stat.S_IMODE(_st.st_mode) & 0o077:
+                os.chmod(d, 0o700)
         return d
 
 # Lazy import: logging module may not exist during partial deployments
@@ -63,6 +74,10 @@ DEFAULT_MAX_MESSAGES = 50
 
 # Flag TTL in seconds (prevents stale flags from giving a "free pass")
 FLAG_TTL_SECONDS = 1800  # 30 minutes (save flow takes 10-28 min with subagents)
+
+# Separate TTL for the stop_hook_active flag (user re-stopping).
+# Deliberately shorter than FLAG_TTL_SECONDS to prevent cross-session bleed.
+STOP_FLAG_TTL = 300  # 5 minutes
 
 # Co-occurrence sliding window: check N lines before/after a primary match
 CO_OCCURRENCE_WINDOW = 4
@@ -141,13 +156,44 @@ CATEGORY_PATTERNS: dict[str, dict] = {
         ],
         # Negative patterns: skip lines matching instructional/SKILL.md headings
         # to reduce false positives from transcript contamination.
-        # Anchored to doc scaffolding (markdown headings, conditional instructions)
+        # Anchored to doc scaffolding (markdown headings, conditional instructions,
+        # Phase 3 save pipeline templates, and procedural instructions)
         # to avoid suppressing real troubleshooting text.
         "negative": [
+            # Group 1: Markdown headings for error/retry sections
             re.compile(
                 r"(?:^#+\s*Error\s+Handling\b|"
-                r"^[-*]\s*If\s+(?:a\s+)?subagent\s+fails|"
-                r"^#+\s*(?:Retry|Fallback)\s+(?:Logic|Strategy)\b)",
+                r"^#+\s*(?:Retry|Fallback)\s+(?:Logic|Strategy)\b|"
+                r"^#+\s*(?:Write\s+Pipeline\s+Protections|Step\s+\d+:))",
+                re.IGNORECASE,
+            ),
+            # Group 2: Conditional instructions referencing subagent failures
+            re.compile(
+                r"^[-*]\s*If\s+(?:a\s+)?(?:subagent|Task\s+subagent)\s+fails",
+                re.IGNORECASE,
+            ),
+            # Group 3: Phase 3 save command templates and pipeline keywords
+            re.compile(
+                r"(?:Execute\s+(?:these\s+)?memory\s+save\s+commands|"
+                r"write-save-result(?:-direct)?|"
+                r"cleanup-staging|"
+                r"memory_write\.py.*--action\s+\w+|"
+                r"memory_enforce\.py\b)",
+                re.IGNORECASE,
+            ),
+            # Group 4: Phase 3 subagent prompt boilerplate
+            re.compile(
+                r"(?:CRITICAL:\s*Using\s+heredoc|"
+                r"Minimal\s+Console\s+Output|"
+                r"Combine\s+ALL\s+numbered\s+commands|"
+                r"NEVER\s+use\s+Bash\s+for\s+file\s+writes)",
+                re.IGNORECASE,
+            ),
+            # Group 5: General instructional/procedural patterns
+            re.compile(
+                r"(?:^Run\s+the\s+following\b|"
+                r"If\s+ALL\s+commands\s+succeeded|"
+                r"If\s+ANY\s+command\s+failed)",
                 re.IGNORECASE,
             ),
         ],
@@ -566,17 +612,28 @@ def check_stop_flag(cwd: str) -> bool:
         mtime = flag_path.stat().st_mtime
         age = time.time() - mtime
         flag_path.unlink(missing_ok=True)
-        return age < FLAG_TTL_SECONDS
+        return age < STOP_FLAG_TTL
     except OSError:
         return False
 
 
 def set_stop_flag(cwd: str) -> None:
-    """Create the stop_hook_active flag file."""
-    flag_path = Path(cwd) / ".claude" / ".stop_hook_active"
+    """Create the stop_hook_active flag file.
+
+    Uses O_NOFOLLOW for symlink safety.
+    """
+    flag_path = os.path.join(cwd, ".claude", ".stop_hook_active")
     try:
-        flag_path.parent.mkdir(parents=True, exist_ok=True)
-        flag_path.write_text(str(time.time()), encoding="utf-8")
+        os.makedirs(os.path.dirname(flag_path), exist_ok=True)
+        fd = os.open(
+            flag_path,
+            os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            os.write(fd, str(time.time()).encode("utf-8"))
+        finally:
+            os.close(fd)
     except OSError:
         pass  # Non-critical: worst case is user gets blocked twice
 
@@ -611,8 +668,12 @@ def read_sentinel(cwd: str) -> Optional[dict]:
     """
     path = _sentinel_path(cwd)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
+            # Reject non-regular files (FIFOs, devices) to prevent DoS
+            st = os.fstat(fd)
+            if not stat_mod.S_ISREG(st.st_mode):
+                return None  # finally handles close
             raw = os.read(fd, 4096).decode("utf-8", errors="replace")
         finally:
             os.close(fd)
@@ -641,7 +702,9 @@ def write_sentinel(cwd: str, session_id: str, state: str) -> bool:
     tmp_path = f"{path}.{os.getpid()}.tmp"
     try:
         staging_dir = os.path.dirname(path)
-        os.makedirs(staging_dir, mode=0o700, exist_ok=True)
+        # Use ensure_staging_dir for /tmp/ paths (symlink/ownership defense)
+        # For legacy paths, ensure_staging_dir also handles correctly
+        ensure_staging_dir(cwd)
         fd = os.open(
             tmp_path,
             os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
@@ -653,7 +716,7 @@ def write_sentinel(cwd: str, session_id: str, state: str) -> bool:
             os.close(fd)
         os.replace(tmp_path, path)
         return True
-    except OSError:
+    except (OSError, RuntimeError):
         # Clean up stale tmp on failure
         try:
             os.unlink(tmp_path)
@@ -689,7 +752,7 @@ def check_sentinel_session(cwd: str, current_session_id: str) -> bool:
         if age >= FLAG_TTL_SECONDS:
             return False  # Expired, allow re-triage
     except (TypeError, ValueError):
-        pass  # Invalid timestamp, treat as no TTL constraint
+        return False  # Invalid timestamp: fail-open, allow re-triage
 
     # Same session + within TTL: block only if state is in blocking set
     if sentinel_state in _SENTINEL_BLOCK_STATES:
@@ -703,13 +766,13 @@ def _check_save_result_guard(cwd: str, current_session_id: str) -> bool:
     """Defense-in-depth: check last-save-result.json as additional guard.
 
     Returns True if triage should be SKIPPED (fresh result exists AND
-    sentinel confirms same session).
+    session_id in result matches current session).
     Returns False if triage should PROCEED.
 
-    Works semi-independently from the sentinel: if the save-result file
-    is fresh AND the sentinel exists with a matching session_id (any
-    blocking state), we skip. This catches cases where the sentinel
-    was somehow corrupted but the save-result proves a save happened.
+    Fully independent from sentinel: reads session_id directly from
+    the save-result JSON (embedded by write-save-result-direct). Falls
+    back to sentinel cross-reference if session_id is absent in result
+    (backwards compatibility with pre-session_id result files).
     """
     # Try both staging locations (cwd-local and /tmp/-based)
     result_candidates = [
@@ -729,10 +792,27 @@ def _check_save_result_guard(cwd: str, current_session_id: str) -> bool:
             if age >= FLAG_TTL_SECONDS:
                 continue  # Stale result, try next
 
-            # Fresh result found: cross-check with sentinel session_id
+            # Fresh result found: read and check session_id
+            try:
+                rfd = os.open(result_path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    raw = os.read(rfd, 16384).decode("utf-8", errors="replace")
+                finally:
+                    os.close(rfd)
+                result_data = json.loads(raw)
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                result_data = {}
+
+            # Primary path: session_id in result file (independent of sentinel)
+            result_session = result_data.get("session_id") if isinstance(result_data, dict) else None
+            if isinstance(result_session, str) and result_session:
+                if result_session == current_session_id:
+                    return True
+                return False  # Different session
+
+            # Fallback: cross-check with sentinel (backwards compatibility)
             sentinel = read_sentinel(cwd)
             if sentinel and sentinel.get("session_id") == current_session_id:
-                # Any blocking state confirms this session already handled
                 if sentinel.get("state", "") in _SENTINEL_BLOCK_STATES:
                     return True
 
@@ -761,7 +841,11 @@ def _acquire_triage_lock(cwd: str, session_id: str) -> tuple[str, str]:
       _LOCK_HELD: Lock held by another concurrent triage. Caller should return 0.
       _LOCK_ERROR: OS error. Caller may proceed without lock (fail-open).
     """
-    lock_path = os.path.join(cwd, ".claude", ".stop_hook_lock")
+    try:
+        staging_dir = ensure_staging_dir(cwd)
+    except (OSError, RuntimeError):
+        return "", _LOCK_ERROR  # Fail-open: staging dir unavailable
+    lock_path = os.path.join(staging_dir, ".stop_hook_lock")
     lock_content = json.dumps({
         "session_id": session_id,
         "pid": os.getpid(),
@@ -769,7 +853,6 @@ def _acquire_triage_lock(cwd: str, session_id: str) -> tuple[str, str]:
     }).encode("utf-8")
 
     try:
-        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
         try:
             os.write(fd, lock_content)
@@ -1044,7 +1127,7 @@ def write_context_files(
     staging_dir = ""
     try:
         staging_dir = ensure_staging_dir(cwd or "")
-    except OSError:
+    except (OSError, RuntimeError):
         staging_dir = ""  # Fall back to per-file /tmp/ paths
 
     for r in results:
@@ -1320,9 +1403,11 @@ def _run_triage() -> int:
     if not isinstance(hook_input, dict):
         return 0
 
-    # 2. Extract fields
+    # 2. Extract fields (validate cwd to prevent path traversal)
     transcript_path: Optional[str] = hook_input.get("transcript_path")
-    cwd: str = hook_input.get("cwd", os.getcwd())
+    cwd: str = os.path.realpath(hook_input.get("cwd", os.getcwd()))
+    if not os.path.isdir(cwd):
+        return 0
 
     # 3. Load configuration
     config = load_config(cwd)
@@ -1433,7 +1518,10 @@ def _run_triage() -> int:
             )
             # Include staging_dir in triage data so SKILL.md orchestration
             # knows where to find/write staging files
-            _staging_dir = ensure_staging_dir(cwd)
+            try:
+                _staging_dir = ensure_staging_dir(cwd)
+            except (OSError, RuntimeError):
+                _staging_dir = get_staging_dir(cwd)
             triage_data["staging_dir"] = _staging_dir
             triage_data_path = os.path.join(_staging_dir, "triage-data.json")
             tmp_path = None

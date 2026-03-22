@@ -56,24 +56,40 @@ def ensure_staging_dir(cwd: str = "") -> str:
         RuntimeError: If the directory is a symlink or owned by another user.
     """
     staging_dir = get_staging_dir(cwd)
-    try:
-        os.mkdir(staging_dir, 0o700)
-    except FileExistsError:
-        # Validate existing directory: reject symlinks and foreign ownership
-        st = os.lstat(staging_dir)
-        if stat.S_ISLNK(st.st_mode):
-            raise RuntimeError(
-                f"Staging dir is a symlink (possible attack): {staging_dir}"
-            )
-        if st.st_uid != os.geteuid():
-            raise RuntimeError(
-                f"Staging dir owned by uid {st.st_uid}, "
-                f"expected {os.geteuid()}: {staging_dir}"
-            )
-        # Tighten permissions if too open (other users have access)
-        if stat.S_IMODE(st.st_mode) & 0o077:
-            os.chmod(staging_dir, 0o700)
+    validate_staging_dir(staging_dir)
     return staging_dir
+
+
+def validate_staging_dir(staging_dir: str) -> None:
+    """Ensure a staging directory exists with safe ownership/permissions.
+
+    For /tmp/ staging paths: uses mkdir + lstat validation (symlink/ownership).
+    For legacy paths (not in /tmp/): uses makedirs with exist_ok (user-owned).
+
+    Args:
+        staging_dir: Absolute path to the staging directory.
+
+    Raises:
+        RuntimeError: If the /tmp/ directory is a symlink or foreign-owned.
+    """
+    if staging_dir.startswith(STAGING_DIR_PREFIX):
+        try:
+            os.mkdir(staging_dir, 0o700)
+        except FileExistsError:
+            st = os.lstat(staging_dir)
+            if stat.S_ISLNK(st.st_mode):
+                raise RuntimeError(
+                    f"Staging dir is a symlink (possible attack): {staging_dir}"
+                )
+            if st.st_uid != os.geteuid():
+                raise RuntimeError(
+                    f"Staging dir owned by uid {st.st_uid}, "
+                    f"expected {os.geteuid()}: {staging_dir}"
+                )
+            if stat.S_IMODE(st.st_mode) & 0o077:
+                os.chmod(staging_dir, 0o700)
+    else:
+        os.makedirs(staging_dir, mode=0o700, exist_ok=True)
 
 
 def is_staging_path(path: str) -> bool:
