@@ -57,9 +57,7 @@ present, skip directly to Phase 0 -- the current triage data is fresh.
 
 **Step 0: Clean stale intent files.** Before processing triage data, remove leftover intent files from previous sessions to prevent stale data contamination. Only delete `intent-*.json` files (NOT `context-*.txt` or `triage-data.json` — those were just written by the triage hook for this session):
 ```bash
-python3 -c "import glob,os
-for f in glob.glob('.claude/memory/.staging/intent-*.json'): os.remove(f)
-print('ok')"
+python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action cleanup-intents --staging-dir .claude/memory/.staging
 ```
 
 1. First try: Extract the file path from within `<triage_data_file>...</triage_data_file>` tags in the stop hook output. If present, read the JSON file at that path.
@@ -272,7 +270,11 @@ Task(
 
 **IMPORTANT: Minimal Console Output**
 Combine ALL numbered commands into a SINGLE Bash tool call using `;`
-separators. This minimizes console noise. Do NOT use heredoc (<<).
+separators. This minimizes console noise.
+
+CRITICAL: Using heredoc (<<) or cat with redirect will trigger a permission
+popup and block the save. You MUST use the Write tool for file content and
+python3 scripts for commands. NEVER use Bash for file writes.
 
 Example: `cmd1 ; cmd2 ; cmd3`
 
@@ -290,12 +292,8 @@ If ALL commands succeeded (no errors), run cleanup:
 python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action cleanup-staging --staging-dir .claude/memory/.staging
 If ANY command failed, do NOT delete staging files (preserve for retry).
 
-Then write the result file (atomic, regardless of success/failure).
-First, write the result JSON to a temp file using the Write tool (NOT Bash — avoids Guardian scan of inline JSON with .claude paths):
-Write(file_path='.claude/memory/.staging/last-save-result-input.json', content='{\"saved_at\": \"<ISO 8601 UTC>\", \"categories\": [\"<saved categories>\"], \"titles\": [\"<saved titles>\"], \"errors\": []}')
-
-Then run the save-result command referencing the file:
-python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result --staging-dir .claude/memory/.staging --result-file .claude/memory/.staging/last-save-result-input.json
+Then write the result file (atomic, regardless of success/failure):
+python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result-direct --staging-dir .claude/memory/.staging --categories \"<comma-separated saved categories>\" --titles \"<comma-separated saved titles>\"
 
 Return ONLY a single-line summary like: 'Saved: session_summary (update), constraint (create)' — no extra text."
 )
@@ -430,7 +428,7 @@ Users can also manage sessions directly:
 
 ## Rules
 
-0. **Guardian compatibility**: Never combine heredoc (`<<`), Python interpreter, and `.claude` path in a single Bash command. All staging file content must be written via Write tool (not Bash). Bash is only for running python3 scripts. Do NOT use `python3 -c` with inline code referencing `.claude` paths. Do NOT use `find -delete` or `rm` with `.claude` paths (use Python glob+os.remove instead). Do NOT pass inline JSON containing `.claude` paths on the Bash command line (use `--result-file` with a staging temp file instead).
+0. **Guardian compatibility**: Never combine heredoc (`<<`), Python interpreter, and `.claude` path in a single Bash command. All staging file content must be written via Write tool (not Bash). Bash is only for running python3 scripts. Do NOT use `python3 -c` for any file operations (read, write, delete, glob). Use dedicated scripts instead. Do NOT use `find -delete` or `rm` with `.claude` paths (use Python glob+os.remove instead). Do NOT pass inline JSON containing `.claude` paths on the Bash command line (use `--result-file` with a staging temp file instead).
 1. **CRUD lifecycle**: Memories can be created, updated, or retired through the 4-phase consolidation flow
 2. **Silent operation**: Do NOT mention memory operations in visible output during auto-capture
 3. **Check before creating**: Always run memory_candidate.py first to avoid duplicates

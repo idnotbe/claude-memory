@@ -326,21 +326,16 @@ class TestSkillMdGuardianConflicts:
         )
 
     def test_python3_c_multiline_does_not_match_block(self, bash_blocks):
-        """Verify that multiline python3 -c commands (like Phase 0 cleanup)
-        do NOT match the interpreter deletion block pattern.
+        """Verify that any multiline python3 -c commands do NOT match
+        the interpreter deletion block pattern.
 
         The block pattern uses [^|&\\n]* which stops at newlines, so
         `python3 -c "import ...\\nos.remove(f)"` should not match because
         os.remove is on a different line from python3.
 
-        NOTE: While the block regex itself won't match, Guardian's
-        check_interpreter_payload() extracts the full -c payload and scans
-        it separately. It would detect os.remove, mark is_delete=True,
-        and if no target paths can be resolved, trigger an F1 safety net
-        "ask" verdict. This is a known limitation documented in the
-        action plan. The fix was to accept this trade-off since the
-        Phase 0 cleanup command is necessary and the regex-level block
-        pattern is what matters for unconditional denials.
+        NOTE: As of P1 popup fix, SKILL.md no longer uses python3 -c for
+        file operations (Rule 0 forbids it). This test remains as a guard
+        against regressions if python3 -c is reintroduced.
         """
         interpreter_block = GUARDIAN_BLOCK_PATTERNS[2]
         python3_c_blocks = [
@@ -487,53 +482,33 @@ class TestSkillMdRule0Compliance:
             "\n".join(violations)
         )
 
-    def test_python3_c_with_claude_path_warning(self, bash_blocks):
-        """python3 -c with .claude paths is a known trade-off.
+    def test_no_python3_c_with_claude_path(self, bash_blocks):
+        """No bash block should use python3 -c with .claude paths.
 
-        The Phase 0 cleanup command uses python3 -c with .claude paths
-        for intent file cleanup. This is flagged as a WARNING rather than
-        a hard failure because:
-        1. The block regex won't match (multiline stops it).
-        2. Guardian's check_interpreter_payload() may trigger an F1 safety
-           net ask, which is an accepted trade-off vs. the alternative of
-           leaving stale intent files.
+        Rule 0 forbids python3 -c for any file operations. The Phase 0
+        cleanup command was migrated to use cleanup-intents action in
+        memory_write.py to avoid Guardian interpreter payload detection.
 
-        This test documents the known instances and fails if NEW ones appear.
+        This test fails if ANY python3 -c blocks with .claude paths appear.
         """
         python3_c_claude_re = re.compile(
             r'python3\s+-c\s+["\'].*\.claude', re.DOTALL
         )
 
-        known_instances = []
+        violations = []
         for code, line_no in bash_blocks:
             if python3_c_claude_re.search(code):
-                known_instances.append((code.strip()[:200], line_no))
+                violations.append((code.strip()[:200], line_no))
 
-        # We expect exactly the Phase 0 cleanup command (1 known instance).
-        # If more appear, this test fails to draw attention.
-        max_known = 1
-        if len(known_instances) > max_known:
-            extra = known_instances[max_known:]
-            pytest.fail(
-                f"Found {len(known_instances)} python3 -c blocks with "
-                f".claude paths (expected at most {max_known}). "
-                f"New instances should be avoided per Rule 0.\n"
-                f"New instances:\n" +
-                "\n".join(
-                    f"  Line ~{ln}: {cmd[:120]}" for cmd, ln in extra
-                )
+        assert not violations, (
+            f"SKILL.md has {len(violations)} python3 -c block(s) with "
+            f".claude paths. Rule 0 forbids python3 -c for file operations. "
+            f"Use dedicated scripts instead.\n"
+            f"Violations:\n" +
+            "\n".join(
+                f"  Line ~{ln}: {cmd[:120]}" for cmd, ln in violations
             )
-
-        # If we have <= max_known, emit a warning (not failure)
-        if known_instances:
-            import warnings
-            warnings.warn(
-                f"SKILL.md has {len(known_instances)} python3 -c block(s) "
-                f"with .claude paths (accepted trade-off, see Phase 0 "
-                f"cleanup). Guardian check_interpreter_payload() may "
-                f"trigger F1 safety net ask for these commands.",
-                stacklevel=1,
-            )
+        )
 
 
 # ===================================================================
