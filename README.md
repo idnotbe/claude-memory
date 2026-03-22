@@ -189,7 +189,7 @@ Key settings:
 
 Default `category_models`: session_summary=haiku, decision=sonnet, runbook=haiku, constraint=sonnet, tech_debt=haiku, preference=haiku.
 
-Default `triage.thresholds`: decision=0.4, runbook=0.4, constraint=0.5, tech_debt=0.4, preference=0.4, session_summary=0.6. Higher values = fewer but higher-confidence captures. Threshold keys are case-insensitive (both `decision` and `DECISION` work).
+Default `triage.thresholds`: decision=0.4, runbook=0.4, constraint=0.45, tech_debt=0.4, preference=0.4, session_summary=0.6. Higher values = fewer but higher-confidence captures. Threshold keys are case-insensitive (both `decision` and `DECISION` work).
 
 **`retention_days` vs `grace_period_days`**: These serve different purposes. `retention_days` is an agent-interpreted hint for when to consider auto-retiring old entries (e.g., 90 days for session summaries). `grace_period_days` is the script-enforced delay between retirement and permanent deletion by GC. A session summary with `retention_days=90` may be auto-retired after 90 days, then permanently deleted 30 days later (after the grace period).
 
@@ -282,7 +282,7 @@ The `stop_hook_active` flag prevents infinite loops -- when the agent stops agai
 | SESSION_SUMMARY | Sufficient activity metrics (tool uses, exchanges) |
 | DECISION | Choice keywords + rationale co-occurrence ("decided X because Y") |
 | RUNBOOK | Error keywords + resolution co-occurrence ("error ... fixed by") |
-| CONSTRAINT | Limitation keywords + discovery co-occurrence |
+| CONSTRAINT | Limitation keywords + structural/permanence co-occurrence |
 | TECH_DEBT | Deferral keywords + acknowledgment co-occurrence ("deferred ... because") |
 | PREFERENCE | Convention keywords + agreement co-occurrence |
 

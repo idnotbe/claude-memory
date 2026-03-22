@@ -46,6 +46,13 @@ _ZERO_PROMPT_THRESHOLD = 0.50      # 50% of skips with prompt_length=0
 _ERROR_RATE_THRESHOLD = 0.10       # 10% error rate in any category
 _MAX_EVENTS = 100_000              # Memory safety: cap loaded events
 
+# Minimum sample sizes for rate-based anomaly detection (statistical validity)
+_MIN_SKIP_EVENTS_ZERO_PROMPT = 10   # _detect_zero_length_prompt
+_MIN_RETRIEVAL_EVENTS_SKIP_RATE = 20  # _detect_skip_rate_high
+_MIN_TRIAGE_EVENTS_CATEGORY = 30   # _detect_category_never_triggers
+_MIN_TRIAGE_EVENTS_BOOSTER = 50    # _detect_booster_never_hits
+_MIN_ERROR_SPIKE_EVENTS = 10       # _detect_error_spike (per-category)
+
 
 # ---------------------------------------------------------------------------
 # File loading (security-aware)
@@ -139,6 +146,10 @@ def _detect_skip_rate_high(events, event_counts):
     if retrieval_events == 0:
         return None
 
+    # Guard: insufficient sample size for reliable rate calculation
+    if retrieval_events < _MIN_RETRIEVAL_EVENTS_SKIP_RATE:
+        return None
+
     skip_rate = skip_count / retrieval_events
     if skip_rate <= _SKIP_RATE_THRESHOLD:
         return None
@@ -155,6 +166,7 @@ def _detect_skip_rate_high(events, event_counts):
             "skip_count": skip_count,
             "total_retrieval": retrieval_events,
             "skip_rate": round(skip_rate, 4),
+            "sample_size": retrieval_events,
         },
     }
 
@@ -165,6 +177,10 @@ def _detect_zero_length_prompt(events, event_counts):
         e for e in events if e.get("event_type") == "retrieval.skip"
     ]
     if not skip_events:
+        return None
+
+    # Guard: insufficient sample size for reliable rate calculation
+    if len(skip_events) < _MIN_SKIP_EVENTS_ZERO_PROMPT:
         return None
 
     zero_count = sum(
@@ -188,6 +204,7 @@ def _detect_zero_length_prompt(events, event_counts):
             "zero_count": zero_count,
             "total_skip": len(skip_events),
             "zero_rate": round(zero_rate, 4),
+            "sample_size": len(skip_events),
         },
     }
 
@@ -198,6 +215,10 @@ def _detect_category_never_triggers(events, event_counts):
         e for e in events if e.get("event_type") == "triage.score"
     ]
     if not triage_events:
+        return []
+
+    # Guard: insufficient sample size for reliable category analysis
+    if len(triage_events) < _MIN_TRIAGE_EVENTS_CATEGORY:
         return []
 
     # Collect per-category: trigger count + whether it ever had score > 0
@@ -236,11 +257,87 @@ def _detect_category_never_triggers(events, event_counts):
                 "message": (
                     f"Category {cat} has non-zero scores but never triggers. "
                     f"Threshold may be too high."
+                    f" (based on {len(triage_events)} triage events)"
                 ),
                 "data": {
                     "category": cat,
                     "trigger_count": 0,
                     "has_nonzero_scores": True,
+                    "sample_size": len(triage_events),
+                },
+            })
+
+    return findings
+
+
+def _detect_booster_never_hits(events, event_counts):
+    """BOOSTER_NEVER_HITS: category has 0 booster hits but non-zero primary scores.
+
+    Requires triage.score events to include per-category primary_hits and
+    booster_hits fields in all_scores. If these fields are absent (old log
+    format), the detector is silently skipped.
+    """
+    triage_events = [
+        e for e in events if e.get("event_type") == "triage.score"
+    ]
+    if not triage_events:
+        return []
+
+    # Accumulate per-category: total primary hits and total booster hits
+    # Count only new-format events (with both booster fields) for sample size
+    cat_primary_total = Counter()
+    cat_booster_total = Counter()
+    new_format_count = 0
+
+    for e in triage_events:
+        data = e.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        all_scores = data.get("all_scores", [])
+        if not isinstance(all_scores, list):
+            continue
+        event_has_booster = False
+        for s in all_scores:
+            if not isinstance(s, dict) or "category" not in s:
+                continue
+            # Detect new-format log data (require both fields)
+            if "primary_hits" in s and "booster_hits" in s:
+                event_has_booster = True
+                cat = s["category"]
+                cat_primary_total[cat] += s.get("primary_hits", 0)
+                cat_booster_total[cat] += s.get("booster_hits", 0)
+        if event_has_booster:
+            new_format_count += 1
+
+    # If no events contain booster fields, skip silently (old format)
+    if new_format_count == 0:
+        return []
+
+    # Guard: insufficient new-format sample size
+    if new_format_count < _MIN_TRIAGE_EVENTS_BOOSTER:
+        return []
+
+    findings = []
+    for cat in sorted(_ALL_TRIAGE_CATEGORIES):
+        # SESSION_SUMMARY is activity-based, no booster concept
+        if cat == "SESSION_SUMMARY":
+            continue
+        primary = cat_primary_total.get(cat, 0)
+        booster = cat_booster_total.get(cat, 0)
+        if primary > 0 and booster == 0:
+            findings.append({
+                "severity": "warning",
+                "code": "BOOSTER_NEVER_HITS",
+                "message": (
+                    f"Category {cat} has {primary} primary pattern hits "
+                    f"but 0 booster hits across {new_format_count} "
+                    f"triage events. Booster patterns may be too narrow."
+                ),
+                "data": {
+                    "category": cat,
+                    "primary_hits": primary,
+                    "booster_hits": 0,
+                    "sample_size": new_format_count,
                 },
             })
 
@@ -296,6 +393,8 @@ def _detect_error_spike(events, event_counts):
     for cat in sorted(category_totals):
         total = category_totals[cat]
         errors = category_errors.get(cat, 0)
+        if total < _MIN_ERROR_SPIKE_EVENTS:
+            continue
         if total > 0 and errors / total > _ERROR_RATE_THRESHOLD:
             error_rate = errors / total
             findings.append({
@@ -310,6 +409,7 @@ def _detect_error_spike(events, event_counts):
                     "error_count": errors,
                     "total_count": total,
                     "error_rate": round(error_rate, 4),
+                    "sample_size": total,
                 },
             })
 
@@ -430,6 +530,8 @@ def analyze(root: Path, days: int) -> dict:
 
     findings.extend(_detect_category_never_triggers(events, event_counts))
 
+    findings.extend(_detect_booster_never_hits(events, event_counts))
+
     result = _detect_missing_event_types(events, event_counts)
     if result:
         findings.append(result)
@@ -486,6 +588,19 @@ def _generate_recommendations(findings: list) -> list:
             f"Categories {', '.join(never_cats)} score above zero but "
             f"never exceed their trigger thresholds. Consider lowering "
             f"thresholds in memory-config.json (triage.thresholds)."
+        )
+
+    if "BOOSTER_NEVER_HITS" in codes_seen:
+        booster_cats = sorted(
+            f["data"]["category"]
+            for f in findings
+            if f["code"] == "BOOSTER_NEVER_HITS"
+        )
+        recs.append(
+            f"Categories {', '.join(booster_cats)} have primary pattern "
+            f"matches but zero booster co-occurrence hits. Review booster "
+            f"patterns in memory_triage.py CATEGORY_PATTERNS or check "
+            f"that conversation content includes contextual booster terms."
         )
 
     if "MISSING_EVENT_TYPES" in codes_seen:

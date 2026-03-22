@@ -33,7 +33,7 @@ Supported operations:
 **Triage settings:**
 - Enable/disable auto-capture: set `triage.enabled` (default: true)
 - Change transcript window: set `triage.max_messages` (10-200, default: 50)
-- Tune category thresholds: set `triage.thresholds.<category>` (0.0-1.0). Lower = more captures, higher = fewer but higher-quality. Defaults: decision=0.4, runbook=0.4, constraint=0.5, tech_debt=0.4, preference=0.4, session_summary=0.6
+- Tune category thresholds: set `triage.thresholds.<category>` (0.0-1.0). Lower = more captures, higher = fewer but higher-quality. Defaults: decision=0.4, runbook=0.4, constraint=0.45, tech_debt=0.4, preference=0.4, session_summary=0.6
 
 **Parallel processing settings:**
 - Change drafting model per category: set `triage.parallel.category_models.<category>` (haiku/sonnet/opus)

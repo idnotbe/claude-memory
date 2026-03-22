@@ -55,7 +55,7 @@ CO_OCCURRENCE_WINDOW = 4
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "DECISION": 0.4,
     "RUNBOOK": 0.4,
-    "CONSTRAINT": 0.5,
+    "CONSTRAINT": 0.45,
     "TECH_DEBT": 0.4,
     "PREFERENCE": 0.4,
     "SESSION_SUMMARY": 0.6,
@@ -132,13 +132,13 @@ CATEGORY_PATTERNS: dict[str, dict] = {
     "CONSTRAINT": {
         "primary": [
             re.compile(
-                rf"{_WORD}(limitation|api\s+limit|cannot|restricted|not\s+supported|quota|rate\s+limit){_WORD}",
+                rf"{_WORD}(limitation|api\s+limit|restricted|not\s+supported|quota|rate\s+limit|does\s+not\s+support|limited\s+to|hard\s+limit|service\s+limit|vendor\s+limitation){_WORD}",
                 re.IGNORECASE,
             ),
         ],
         "boosters": [
             re.compile(
-                rf"{_WORD}(discovered|found\s+that|turns\s+out|permanently|enduring|platform){_WORD}",
+                rf"{_WORD}(discovered|found\s+that|turns\s+out|permanently|enduring|platform|cannot|by\s+design|upstream|provider|not\s+configurable|managed\s+plan|incompatible|deprecated){_WORD}",
                 re.IGNORECASE,
             ),
         ],
@@ -355,14 +355,15 @@ def _has_pattern_in_window(
 def score_text_category(
     lines: list[str],
     category: str,
-) -> tuple[float, list[str]]:
+) -> tuple[float, list[str], int, int]:
     """Score a text-based category using primary patterns + co-occurrence boosters.
 
-    Returns (normalized_score, list_of_matched_context_snippets).
+    Returns (normalized_score, list_of_matched_context_snippets,
+             primary_hit_count, boosted_hit_count).
     """
     cfg = CATEGORY_PATTERNS.get(category)
     if not cfg:
-        return 0.0, []
+        return 0.0, [], 0, 0
 
     primary_pats: list[re.Pattern] = cfg["primary"]
     booster_pats: list[re.Pattern] = cfg["boosters"]
@@ -401,7 +402,7 @@ def score_text_category(
                 break
 
     normalized = min(1.0, raw_score / denominator) if denominator > 0 else 0.0
-    return normalized, snippets
+    return normalized, snippets, primary_count, boosted_count
 
 
 def score_session_summary(metrics: dict[str, int]) -> tuple[float, list[str]]:
@@ -446,11 +447,13 @@ def _score_all_raw(
 
     # Text-based categories
     for category in CATEGORY_PATTERNS:
-        score, snippets = score_text_category(lines, category)
+        score, snippets, p_hits, b_hits = score_text_category(lines, category)
         all_raw.append({
             "category": category,
             "score": score,
             "snippets": snippets,
+            "primary_hits": p_hits,
+            "booster_hits": b_hits,
         })
 
     # Activity-based: SESSION_SUMMARY
@@ -459,6 +462,8 @@ def _score_all_raw(
         "category": "SESSION_SUMMARY",
         "score": score,
         "snippets": snippets,
+        "primary_hits": 0,
+        "booster_hits": 0,
     })
 
     return all_raw
@@ -496,11 +501,16 @@ def score_all_categories(
     to keep log payloads compact and avoid leaking transcript content.
 
     Returns:
-        [{"category": "DECISION", "score": 0.32}, ...]
+        [{"category": "DECISION", "score": 0.32, "primary_hits": 3, "booster_hits": 1}, ...]
     """
     all_raw = _score_all_raw(text, metrics)
     return [
-        {"category": entry["category"], "score": round(entry["score"], 4)}
+        {
+            "category": entry["category"],
+            "score": round(entry["score"], 4),
+            "primary_hits": entry.get("primary_hits", 0),
+            "booster_hits": entry.get("booster_hits", 0),
+        }
         for entry in all_raw
     ]
 

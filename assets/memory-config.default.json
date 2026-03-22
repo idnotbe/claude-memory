@@ -70,7 +70,7 @@
     "thresholds": {
       "decision": 0.4,
       "runbook": 0.4,
-      "constraint": 0.5,
+      "constraint": 0.45,
       "tech_debt": 0.4,
       "preference": 0.4,
       "session_summary": 0.6

@@ -2614,15 +2614,16 @@ class TestScoreAllCategories:
             assert "snippets" not in entry, \
                 f"Category {entry['category']} should not have snippets"
 
-    def test_only_category_and_score_keys(self):
-        """Each entry has exactly 'category' and 'score' keys."""
+    def test_only_expected_keys(self):
+        """Each entry has exactly the expected keys (no snippets leak)."""
         text = "We decided to use OAuth because it is secure"
         result = score_all_categories(
             text, {"tool_uses": 5, "distinct_tools": 2, "exchanges": 10},
         )
+        expected_keys = {"category", "score", "primary_hits", "booster_hits"}
         for entry in result:
-            assert set(entry.keys()) == {"category", "score"}, \
-                f"Expected only category+score keys, got {set(entry.keys())}"
+            assert set(entry.keys()) == expected_keys, \
+                f"Expected {expected_keys}, got {set(entry.keys())}"
 
     def test_scores_are_rounded_to_4_decimals(self):
         """Scores should be rounded to 4 decimal places."""

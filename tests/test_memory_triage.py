@@ -34,11 +34,13 @@ from memory_triage import (
     parse_transcript,
     run_triage,
     score_session_summary,
+    score_text_category,
     check_stop_flag,
     set_stop_flag,
     _run_triage,
     main,
     DEFAULT_THRESHOLDS,
+    CATEGORY_PATTERNS,
     FLAG_TTL_SECONDS,
     _deep_copy_parallel_defaults,
 )
@@ -1952,3 +1954,192 @@ class TestSessionSummaryTranscriptExcerpt:
         assert "Relevant transcript excerpts:" in content
         assert "Transcript (opening excerpt):" not in content
         assert "Transcript (full):" not in content
+
+
+# ---------------------------------------------------------------------------
+# CONSTRAINT threshold fix -- regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestConstraintThresholdFix:
+    """Regression tests for CONSTRAINT threshold fix (0.5 -> 0.45).
+
+    Validates:
+    - Threshold lowered to 0.45
+    - `cannot` demoted from primary to booster
+    - New primary keywords added (does not support, limited to, hard limit,
+      service limit, vendor limitation)
+    - New booster keywords added (by design, upstream, provider, etc.)
+    - Other categories unaffected
+    """
+
+    # -- Boundary Tests ----------------------------------------------------
+
+    def test_three_primaries_crosses_threshold(self):
+        """3 CONSTRAINT primary keywords on separate lines -> score 0.4737 > 0.45."""
+        lines = [
+            "The API has a strict quota on requests.",
+            "There is also a rate limit per minute.",
+            "Access to that endpoint is restricted.",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            lines, "CONSTRAINT"
+        )
+        # 3 primaries * 0.3 / 1.9 = 0.4737
+        assert score == pytest.approx(0.9 / 1.9, abs=1e-4)
+        assert score > 0.45, f"Score {score} should cross 0.45 threshold"
+        assert primary_count == 3
+        assert boosted_count == 0
+
+    def test_two_primaries_below_threshold(self):
+        """2 CONSTRAINT primary keywords -> score 0.3158 < 0.45."""
+        lines = [
+            "The API has a strict quota on requests.",
+            "There is also a rate limit per minute.",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            lines, "CONSTRAINT"
+        )
+        # 2 primaries * 0.3 / 1.9 = 0.3158
+        assert score == pytest.approx(0.6 / 1.9, abs=1e-4)
+        assert score < 0.45, f"Score {score} should be below 0.45 threshold"
+        assert primary_count == 2
+        assert boosted_count == 0
+
+    def test_cannot_not_primary(self):
+        """Text containing only 'cannot' should score 0.0 for CONSTRAINT.
+
+        'cannot' was demoted from primary to booster, so alone it contributes
+        nothing (boosters only amplify when co-occurring with a primary).
+        """
+        lines = [
+            "We cannot do this.",
+            "The system cannot handle that load.",
+            "Users cannot access this feature.",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            lines, "CONSTRAINT"
+        )
+        assert score == 0.0, f"'cannot' alone should not score; got {score}"
+        assert primary_count == 0
+        assert boosted_count == 0
+
+    def test_cannot_as_booster(self):
+        """Primary keyword + 'cannot' within window -> boosted score (0.2632)."""
+        lines = [
+            "The API has a strict quota on requests.",
+            "We cannot increase the limit.",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            lines, "CONSTRAINT"
+        )
+        # 1 boosted match * 0.5 / 1.9 = 0.2632
+        assert score == pytest.approx(0.5 / 1.9, abs=1e-4)
+        assert boosted_count == 1
+        # The primary was consumed as a boosted match, so primary_count stays 0
+        assert primary_count == 0
+
+    # -- Overlap Tests -----------------------------------------------------
+
+    def test_constraint_runbook_overlap_reduced(self):
+        """'error' + 'cannot' should NOT score for CONSTRAINT.
+
+        'cannot' is now a booster (not primary), and 'error' is not a
+        CONSTRAINT primary. This was the main overlap scenario with RUNBOOK.
+        """
+        lines = [
+            "Got an error when connecting to the database.",
+            "Cannot find the configuration file.",
+            "The process failed with exit code 1.",
+        ]
+        score, snippets, primary_count, boosted_count = score_text_category(
+            lines, "CONSTRAINT"
+        )
+        assert score == 0.0, (
+            f"'error' + 'cannot' should not trigger CONSTRAINT; got {score}"
+        )
+        assert primary_count == 0
+        assert boosted_count == 0
+
+    # -- New Keyword Tests -------------------------------------------------
+
+    def test_new_primaries_score(self):
+        """Each new primary keyword should contribute to CONSTRAINT score."""
+        new_primaries = [
+            "does not support",
+            "limited to",
+            "hard limit",
+            "service limit",
+            "vendor limitation",
+        ]
+        for keyword in new_primaries:
+            lines = [f"The system {keyword} this operation."]
+            score, snippets, primary_count, boosted_count = score_text_category(
+                lines, "CONSTRAINT"
+            )
+            assert score > 0.0, (
+                f"New primary '{keyword}' should produce a positive score; "
+                f"got {score}"
+            )
+            assert primary_count >= 1, (
+                f"New primary '{keyword}' should register as primary hit"
+            )
+
+    def test_new_boosters_boost(self):
+        """Each new booster should amplify CONSTRAINT score with a primary."""
+        new_boosters = [
+            "by design",
+            "upstream",
+            "provider",
+            "not configurable",
+            "managed plan",
+            "incompatible",
+            "deprecated",
+        ]
+        # Baseline: 1 primary alone
+        baseline_lines = ["The API has a strict quota on requests."]
+        baseline_score, _, _, _ = score_text_category(
+            baseline_lines, "CONSTRAINT"
+        )
+        # baseline = 0.3 / 1.9 = 0.1579
+
+        for booster_kw in new_boosters:
+            lines = [
+                "The API has a strict quota on requests.",
+                f"This is {booster_kw} and will not change.",
+            ]
+            score, snippets, primary_count, boosted_count = score_text_category(
+                lines, "CONSTRAINT"
+            )
+            # Boosted score should be higher than baseline (0.5/1.9 > 0.3/1.9)
+            assert score > baseline_score, (
+                f"Booster '{booster_kw}' should amplify score above baseline "
+                f"{baseline_score}; got {score}"
+            )
+            assert boosted_count >= 1, (
+                f"Booster '{booster_kw}' should register as boosted hit"
+            )
+
+    # -- Regression Tests --------------------------------------------------
+
+    def test_other_categories_unaffected(self):
+        """DEFAULT_THRESHOLDS for non-CONSTRAINT categories are unchanged."""
+        expected = {
+            "DECISION": 0.4,
+            "RUNBOOK": 0.4,
+            "TECH_DEBT": 0.4,
+            "PREFERENCE": 0.4,
+            "SESSION_SUMMARY": 0.6,
+        }
+        for cat, threshold in expected.items():
+            assert DEFAULT_THRESHOLDS[cat] == pytest.approx(threshold), (
+                f"{cat} threshold should be {threshold}; "
+                f"got {DEFAULT_THRESHOLDS[cat]}"
+            )
+
+    def test_default_threshold_value(self):
+        """CONSTRAINT threshold should be 0.45 (lowered from 0.5)."""
+        assert DEFAULT_THRESHOLDS["CONSTRAINT"] == pytest.approx(0.45), (
+            f"CONSTRAINT threshold should be 0.45; "
+            f"got {DEFAULT_THRESHOLDS['CONSTRAINT']}"
+        )
