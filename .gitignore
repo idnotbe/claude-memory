@@ -23,6 +23,10 @@ __pycache__/
 .env
 .env.*
 
+# Temp working files (analysis/verification artifacts)
+temp/*
+!temp/.gitkeep
+
 # Windows reserved filename artifact
 nul
 
