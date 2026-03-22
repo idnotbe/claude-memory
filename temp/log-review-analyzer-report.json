@@ -1,0 +1,59 @@
+{
+  "analysis_date": "2026-03-22",
+  "period": {
+    "start": "2026-03-21",
+    "end": "2026-03-22"
+  },
+  "total_events": 144,
+  "event_breakdown": {
+    "triage.score": 71,
+    "retrieval.inject": 68,
+    "retrieval.skip": 5
+  },
+  "findings": [
+    {
+      "severity": "critical",
+      "code": "ZERO_LENGTH_PROMPT",
+      "message": "80.0% of retrieval.skip events have prompt_length=0 (4/5). Hook is not receiving user prompts.",
+      "data": {
+        "zero_count": 4,
+        "total_skip": 5,
+        "zero_rate": 0.8
+      }
+    },
+    {
+      "severity": "high",
+      "code": "CATEGORY_NEVER_TRIGGERS",
+      "message": "Category CONSTRAINT has non-zero scores but never triggers. Threshold may be too high.",
+      "data": {
+        "category": "CONSTRAINT",
+        "trigger_count": 0,
+        "has_nonzero_scores": true
+      }
+    },
+    {
+      "severity": "high",
+      "code": "CATEGORY_NEVER_TRIGGERS",
+      "message": "Category DECISION has non-zero scores but never triggers. Threshold may be too high.",
+      "data": {
+        "category": "DECISION",
+        "trigger_count": 0,
+        "has_nonzero_scores": true
+      }
+    },
+    {
+      "severity": "high",
+      "code": "CATEGORY_NEVER_TRIGGERS",
+      "message": "Category PREFERENCE has non-zero scores but never triggers. Threshold may be too high.",
+      "data": {
+        "category": "PREFERENCE",
+        "trigger_count": 0,
+        "has_nonzero_scores": true
+      }
+    }
+  ],
+  "recommendations": [
+    "Hook is receiving prompt_length=0. This likely indicates the UserPromptSubmit hook input field name has changed or prompt extraction logic has a bug.",
+    "Categories CONSTRAINT, DECISION, PREFERENCE score above zero but never exceed their trigger thresholds. Consider lowering thresholds in memory-config.json (triage.thresholds)."
+  ]
+}

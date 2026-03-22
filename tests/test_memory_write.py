@@ -71,6 +71,10 @@ from memory_write import (
     check_merge_protections,
     format_validation_error,
     cleanup_intents,
+    cleanup_staging,
+    write_save_result,
+    update_sentinel_state,
+    _is_valid_legacy_staging,
     TAG_CAP,
     CHANGES_CAP,
 )
@@ -1036,15 +1040,14 @@ class TestCleanupIntents:
         """Create a staging directory with test files.
 
         Args:
-            prefix: "new" for /tmp/-style, "legacy" for memory/.staging style
+            prefix: "new" for /tmp/-style, "legacy" for .claude/memory/.staging style
         """
         if prefix == "new":
-            staging = tmp_path / "tmp" / ".claude-memory-staging-abc123"
-            # cleanup_intents uses resolve() and checks startswith("/tmp/...")
-            # In tests we can't use actual /tmp, so use legacy instead
-            staging = tmp_path / "memory" / ".staging"
+            # Use legacy .claude/memory/.staging structure (can't test /tmp/ prefix
+            # in pytest tmp_path since it doesn't resolve to /tmp/.claude-memory-*)
+            staging = tmp_path / ".claude" / "memory" / ".staging"
         else:
-            staging = tmp_path / "memory" / ".staging"
+            staging = tmp_path / ".claude" / "memory" / ".staging"
         staging.mkdir(parents=True, exist_ok=True)
         return staging
 
@@ -1269,6 +1272,160 @@ class TestCleanupIntentsTmpPath:
             if outside and outside.exists():
                 outside.unlink()
             shutil.rmtree(staging, ignore_errors=True)
+
+    def test_rejects_invalid_tmp_path(self):
+        """A /tmp/ path NOT matching .claude-memory-staging-* prefix is rejected."""
+        import tempfile
+        evil_dir = Path(tempfile.mkdtemp(prefix="evil-dir-", dir="/tmp"))
+        try:
+            (evil_dir / "intent-test.json").write_text('{}')
+            result = cleanup_intents(str(evil_dir))
+            assert result["status"] == "error"
+            assert "not a valid staging directory" in result["message"]
+            # File should NOT have been deleted
+            assert (evil_dir / "intent-test.json").exists()
+        finally:
+            import shutil
+            shutil.rmtree(evil_dir, ignore_errors=True)
+
+    def test_rejects_arbitrary_memory_staging(self):
+        """/tmp/evil/memory/.staging without .claude ancestor is rejected."""
+        import tempfile
+        base = Path(tempfile.mkdtemp(prefix="evil-", dir="/tmp"))
+        evil_staging = base / "memory" / ".staging"
+        try:
+            evil_staging.mkdir(parents=True, mode=0o700)
+            (evil_staging / "intent-test.json").write_text('{}')
+            result = cleanup_intents(str(evil_staging))
+            assert result["status"] == "error"
+            assert "not a valid staging directory" in result["message"]
+            # File should NOT have been deleted
+            assert (evil_staging / "intent-test.json").exists()
+        finally:
+            import shutil
+            shutil.rmtree(base, ignore_errors=True)
+
+
+# ---------------------------------------------------------------
+# V-R2 GAP 4: cleanup_staging with real /tmp/ staging paths
+# ---------------------------------------------------------------
+
+class TestCleanupStagingTmpPath:
+    """Test cleanup_staging with actual /tmp/ staging paths (V-R2 GAP 4).
+
+    Mirrors TestCleanupIntentsTmpPath but for cleanup_staging(), which
+    handles transient staging files (context-*, triage-data.json, etc.)
+    after a successful save.
+    """
+
+    def test_cleanup_staging_accepts_real_tmp_path(self):
+        """cleanup_staging should delete transient files from /tmp/ staging."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        try:
+            # Create files matching cleanup patterns
+            (staging / "context-session_summary.txt").write_text("transcript excerpt")
+            (staging / "triage-data.json").write_text('{"categories": []}')
+            (staging / ".triage-pending.json").write_text('{}')
+            (staging / "intent-decision.json").write_text('{}')
+            # Non-matching file should survive cleanup
+            (staging / "last-save-result.json").write_text('{}')
+
+            result = cleanup_staging(str(staging))
+
+            assert result["status"] == "ok"
+            assert "context-session_summary.txt" in result["deleted"]
+            assert "triage-data.json" in result["deleted"]
+            assert ".triage-pending.json" in result["deleted"]
+            assert "intent-decision.json" in result["deleted"]
+            # Verify files are actually gone
+            assert not (staging / "context-session_summary.txt").exists()
+            assert not (staging / "triage-data.json").exists()
+            assert not (staging / ".triage-pending.json").exists()
+            assert not (staging / "intent-decision.json").exists()
+            # Non-matching file should survive
+            assert (staging / "last-save-result.json").exists()
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_cleanup_staging_rejects_invalid_tmp_path(self):
+        """A /tmp/ path NOT matching .claude-memory-staging-* prefix is rejected."""
+        import tempfile
+        evil_dir = Path(tempfile.mkdtemp(prefix="evil-dir-", dir="/tmp"))
+        try:
+            (evil_dir / "context-test.txt").write_text("should not be deleted")
+            result = cleanup_staging(str(evil_dir))
+            assert result["status"] == "error"
+            assert "not a valid staging directory" in result["message"]
+            # File should NOT have been deleted
+            assert (evil_dir / "context-test.txt").exists()
+        finally:
+            import shutil
+            shutil.rmtree(evil_dir, ignore_errors=True)
+
+    def test_cleanup_staging_rejects_arbitrary_memory_staging(self):
+        """/tmp/evil/memory/.staging without .claude ancestor is rejected."""
+        import tempfile
+        base = Path(tempfile.mkdtemp(prefix="evil-", dir="/tmp"))
+        evil_staging = base / "memory" / ".staging"
+        try:
+            evil_staging.mkdir(parents=True, mode=0o700)
+            (evil_staging / "context-test.txt").write_text("should not be deleted")
+            result = cleanup_staging(str(evil_staging))
+            assert result["status"] == "error"
+            assert "not a valid staging directory" in result["message"]
+            assert (evil_staging / "context-test.txt").exists()
+        finally:
+            import shutil
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_cleanup_staging_symlink_skipped_in_tmp(self):
+        """Symlink files in /tmp/ staging should be skipped, not followed."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        outside = None
+        try:
+            outside_fd = tempfile.NamedTemporaryFile(
+                suffix=".txt", dir="/tmp", delete=False
+            )
+            outside = Path(outside_fd.name)
+            outside_fd.write(b"secret content")
+            outside_fd.close()
+
+            # Create symlink masquerading as a context file
+            (staging / "context-evil.txt").symlink_to(outside)
+            # Also a real file for comparison
+            (staging / "context-real.txt").write_text("real content")
+
+            result = cleanup_staging(str(staging))
+
+            assert result["status"] == "ok"
+            # Real file should be deleted
+            assert "context-real.txt" in result["deleted"]
+            # Symlink should be skipped (skipped count incremented)
+            assert "context-evil.txt" not in result["deleted"]
+            assert result["skipped"] >= 1
+            # Original file outside staging should still exist
+            assert outside.exists()
+        finally:
+            import shutil
+            if outside and outside.exists():
+                outside.unlink()
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_cleanup_staging_empty_tmp_dir(self):
+        """Empty /tmp/ staging dir should return ok with empty lists."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        try:
+            result = cleanup_staging(str(staging))
+            assert result["status"] == "ok"
+            assert result["deleted"] == []
+            assert result["errors"] == []
+            assert result["skipped"] == 0
+        finally:
+            staging.rmdir()
 
 
 # ---------------------------------------------------------------
@@ -1712,6 +1869,222 @@ class TestUpdateSentinelState:
             output = json.loads(stdout)
             assert output["status"] == "error"
             assert "Cannot read sentinel" in output["message"]
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+class TestLegacyStagingValidation:
+    """Tests for _is_valid_legacy_staging() helper function.
+
+    Ensures legacy staging path validation requires .claude/memory/.staging
+    ancestry, rejecting arbitrary paths ending in memory/.staging.
+    Default mode (allow_child=False) requires .staging as the terminal component.
+    """
+
+    # --- Directory mode (default, allow_child=False) ---
+
+    def test_valid_legacy_path_accepted(self):
+        """Standard .claude/memory/.staging path is accepted."""
+        assert _is_valid_legacy_staging("/home/user/project/.claude/memory/.staging") is True
+
+    def test_evil_memory_staging_rejected(self):
+        """/tmp/evil/memory/.staging without .claude ancestor is rejected."""
+        assert _is_valid_legacy_staging("/tmp/evil/memory/.staging") is False
+
+    def test_etc_memory_staging_rejected(self):
+        """/etc/memory/.staging without .claude ancestor is rejected."""
+        assert _is_valid_legacy_staging("/etc/memory/.staging") is False
+
+    def test_tmp_staging_still_accepted(self):
+        """/tmp/.claude-memory-staging-* paths are NOT legacy paths.
+
+        These are validated by a separate startswith() check in each function.
+        _is_valid_legacy_staging should return False for them (handled elsewhere).
+        """
+        assert _is_valid_legacy_staging("/tmp/.claude-memory-staging-abc123") is False
+
+    def test_nested_claude_path_accepted(self):
+        """Deeply nested project path with .claude/memory/.staging is accepted."""
+        assert _is_valid_legacy_staging("/home/user/deeply/nested/project/.claude/memory/.staging") is True
+
+    def test_root_claude_path_accepted(self):
+        """Root-level .claude/memory/.staging is accepted."""
+        assert _is_valid_legacy_staging("/.claude/memory/.staging") is True
+
+    def test_wrong_order_rejected(self):
+        """Components in wrong order (memory/.claude/.staging) are rejected."""
+        assert _is_valid_legacy_staging("/home/user/memory/.claude/.staging") is False
+
+    def test_missing_memory_rejected(self):
+        """Path with .claude but missing memory component is rejected."""
+        assert _is_valid_legacy_staging("/home/user/.claude/.staging") is False
+
+    def test_partial_claude_name_rejected(self):
+        """Path component 'claude' (without dot) does not match."""
+        assert _is_valid_legacy_staging("/home/user/claude/memory/.staging") is False
+
+    def test_subdirectory_bypass_rejected(self):
+        """Deep subdirectory under .staging is rejected in directory mode.
+
+        Prevents attacker from expanding cleanup scope by specifying a
+        subdirectory as the staging root.
+        """
+        assert _is_valid_legacy_staging(
+            "/home/user/.claude/memory/.staging/some/deep/folder"
+        ) is False
+
+    def test_file_in_staging_rejected_in_dir_mode(self):
+        """File path inside staging is rejected in default directory mode.
+
+        Only allow_child=True should accept files within staging.
+        """
+        assert _is_valid_legacy_staging(
+            "/home/user/.claude/memory/.staging/intent-decision.json"
+        ) is False
+
+    # --- File mode (allow_child=True) ---
+
+    def test_file_inside_staging_accepted_with_allow_child(self):
+        """File path within .claude/memory/.staging/ is accepted with allow_child."""
+        assert _is_valid_legacy_staging(
+            "/home/user/.claude/memory/.staging/intent-decision.json",
+            allow_child=True,
+        ) is True
+
+    def test_staging_dir_accepted_with_allow_child(self):
+        """Staging directory itself is accepted with allow_child too."""
+        assert _is_valid_legacy_staging(
+            "/home/user/.claude/memory/.staging",
+            allow_child=True,
+        ) is True
+
+    def test_evil_path_rejected_with_allow_child(self):
+        """Evil path without .claude ancestor rejected even with allow_child."""
+        assert _is_valid_legacy_staging(
+            "/tmp/evil/memory/.staging/intent.json",
+            allow_child=True,
+        ) is False
+
+
+class TestRuntimeErrorDegradation:
+    """Tests for RuntimeError/OSError graceful degradation in write_save_result()
+    and path containment checks in update_sentinel_state().
+
+    When validate_staging_dir() raises RuntimeError (e.g., symlink at staging
+    path) or OSError, write_save_result() should return an error dict instead
+    of propagating an unhandled exception. This is a V-R2 adversarial finding.
+    """
+
+    def _make_tmp_staging(self):
+        """Create a valid /tmp/ staging directory for testing."""
+        import tempfile
+        staging = Path(tempfile.mkdtemp(prefix=".claude-memory-staging-"))
+        return staging
+
+    def _valid_result_json(self):
+        """Return a minimal valid result JSON string."""
+        return json.dumps({
+            "categories": ["decision"],
+            "titles": ["Test Title"],
+            "errors": [],
+            "saved_at": "2026-03-22T00:00:00Z",
+            "session_id": None,
+        })
+
+    def test_write_save_result_degrades_on_runtime_error(self):
+        """write_save_result returns error dict when validate_staging_dir raises RuntimeError.
+
+        Mocks validate_staging_dir to raise RuntimeError (e.g., symlink detected
+        at staging path). The function must return {"status": "error", ...}
+        instead of propagating an unhandled exception.
+        """
+        from unittest.mock import patch
+
+        staging = self._make_tmp_staging()
+        try:
+            with patch(
+                "memory_staging_utils.validate_staging_dir",
+                side_effect=RuntimeError(
+                    f"Staging dir is a symlink (possible attack): {staging}"
+                ),
+            ):
+                result = write_save_result(str(staging), self._valid_result_json())
+                assert isinstance(result, dict), "Must return a dict, not raise"
+                assert result["status"] == "error", f"Expected error status, got: {result}"
+                assert "message" in result
+                assert "Staging dir validation failed" in result["message"]
+                assert "symlink" in result["message"].lower()
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_write_save_result_degrades_on_os_error(self):
+        """write_save_result returns error dict when validate_staging_dir raises OSError.
+
+        Mocks validate_staging_dir to raise OSError (e.g., permission denied).
+        The function must degrade gracefully instead of crashing.
+        """
+        from unittest.mock import patch
+
+        staging = self._make_tmp_staging()
+        try:
+            with patch(
+                "memory_staging_utils.validate_staging_dir",
+                side_effect=OSError("Permission denied: /tmp/.claude-memory-staging-mock"),
+            ):
+                result = write_save_result(str(staging), self._valid_result_json())
+                assert isinstance(result, dict), "Must return a dict, not raise"
+                assert result["status"] == "error"
+                assert "Staging dir validation failed" in result["message"]
+                assert "Permission denied" in result["message"]
+        finally:
+            import shutil
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def test_update_sentinel_state_rejects_invalid_path(self):
+        """update_sentinel_state rejects paths that aren't valid staging directories.
+
+        The path containment check should reject arbitrary paths that are
+        neither /tmp/.claude-memory-staging-* nor legacy .claude/memory/.staging.
+        """
+        # Use an arbitrary /tmp path that doesn't match staging pattern
+        result = update_sentinel_state("/tmp/not-a-staging-dir", "saving")
+        assert result["status"] == "error"
+        assert "not a valid staging directory" in result["message"]
+
+        # Also verify /home paths are rejected
+        result2 = update_sentinel_state("/home/user/random/path", "saving")
+        assert result2["status"] == "error"
+        assert "not a valid staging directory" in result2["message"]
+
+        # Verify /etc is rejected
+        result3 = update_sentinel_state("/etc/passwd", "saving")
+        assert result3["status"] == "error"
+        assert "not a valid staging directory" in result3["message"]
+
+    def test_write_save_result_error_message_contains_detail(self):
+        """Error message from RuntimeError degradation includes the original exception text.
+
+        When validate_staging_dir raises RuntimeError with a descriptive message,
+        that text must be preserved in the returned error dict so operators
+        can diagnose the root cause.
+        """
+        from unittest.mock import patch
+
+        staging = self._make_tmp_staging()
+        specific_message = "Staging dir owned by uid 1001, expected 1000: /tmp/.claude-memory-staging-abc"
+        try:
+            with patch(
+                "memory_staging_utils.validate_staging_dir",
+                side_effect=RuntimeError(specific_message),
+            ):
+                result = write_save_result(str(staging), self._valid_result_json())
+                assert result["status"] == "error"
+                # The specific RuntimeError message must appear in the response
+                assert specific_message in result["message"], (
+                    f"Expected specific error detail in message. Got: {result['message']}"
+                )
         finally:
             import shutil
             shutil.rmtree(staging, ignore_errors=True)

@@ -78,6 +78,30 @@ CHANGES_CAP = 50
 ID_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]{0,78}[a-z0-9])?$")
 
 
+def _is_valid_legacy_staging(resolved_path: str, allow_child: bool = False) -> bool:
+    """Validate legacy staging path requires .claude/memory/.staging ancestry.
+
+    Rejects paths like /tmp/evil/memory/.staging that lack the .claude
+    parent directory. Requires the exact .claude -> memory -> .staging
+    component sequence.
+
+    Args:
+        resolved_path: Resolved (absolute) path string.
+        allow_child: If False (default), .staging must be the final component
+            (for staging directory validation). If True, .staging can have
+            child components (for file-within-staging validation).
+    """
+    parts = Path(resolved_path).parts
+    for i, part in enumerate(parts):
+        if part == ".claude" and i + 2 < len(parts):
+            if parts[i + 1] == "memory" and parts[i + 2] == ".staging":
+                if allow_child:
+                    return True
+                # Directory mode: .staging must be the last component
+                return i + 2 == len(parts) - 1
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Category-specific content models
 # ---------------------------------------------------------------------------
@@ -525,8 +549,7 @@ def cleanup_staging(staging_dir: str) -> dict:
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
     is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
-    parts = staging_path.parts
-    is_legacy_staging = (len(parts) >= 2 and parts[-1] == ".staging" and parts[-2] == "memory")
+    is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
         return {
@@ -578,8 +601,7 @@ def cleanup_intents(staging_dir: str) -> dict:
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
     is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
-    parts = staging_path.parts
-    is_legacy_staging = (len(parts) >= 2 and parts[-1] == ".staging" and parts[-2] == "memory")
+    is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
         return {
@@ -629,8 +651,7 @@ def write_save_result(staging_dir: str, result_json: str) -> dict:
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
     is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
-    parts = staging_path.parts
-    is_legacy_staging = (len(parts) >= 2 and parts[-1] == ".staging" and parts[-2] == "memory")
+    is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
         return {
@@ -694,6 +715,8 @@ def write_save_result(staging_dir: str, result_json: str) -> dict:
         validate_staging_dir(str(staging_path))
     except ImportError:
         os.makedirs(str(staging_path), exist_ok=True)
+    except (RuntimeError, OSError) as e:
+        return {"status": "error", "message": f"Staging dir validation failed: {e}"}
     target = str(staging_path / "last-save-result.json")
     atomic_write_text(target, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
@@ -732,6 +755,17 @@ def update_sentinel_state(staging_dir: str, target_state: str) -> dict:
         }
 
     staging_path = Path(staging_dir).resolve()
+
+    # Path containment: accept /tmp/ staging and legacy .staging paths
+    resolved_str = str(staging_path)
+    is_tmp_staging = resolved_str.startswith("/tmp/.claude-memory-staging-")
+    is_legacy_staging = _is_valid_legacy_staging(resolved_str)
+    if not is_tmp_staging and not is_legacy_staging:
+        return {
+            "status": "error",
+            "message": f"Path is not a valid staging directory: {staging_dir}",
+        }
+
     sentinel_path = str(staging_path / ".triage-handled")
 
     # Read current sentinel
@@ -763,13 +797,18 @@ def update_sentinel_state(staging_dir: str, target_state: str) -> dict:
     current["state"] = target_state
     current["timestamp"] = time.time()
 
-    # Atomic write via tmp + rename (O_NOFOLLOW on tmp file)
+    # Atomic write via tmp + rename (O_EXCL prevents hard link attacks)
     content = json.dumps(current) + "\n"
     tmp_path = f"{sentinel_path}.{os.getpid()}.tmp"
+    # Remove stale tmp from previous failed attempt (same PID reuse)
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
     try:
         wfd = os.open(
             tmp_path,
-            os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+            os.O_CREAT | os.O_WRONLY | os.O_EXCL,
             0o600,
         )
         try:
@@ -1558,7 +1597,7 @@ def _read_input(input_path: str) -> Optional[dict]:
     basename = os.path.basename(resolved)
     in_staging = (
         resolved.startswith("/tmp/.claude-memory-staging-")
-        or "/.claude/memory/.staging/" in resolved
+        or _is_valid_legacy_staging(resolved, allow_child=True)
         or (resolved.startswith("/tmp/") and basename.startswith(".memory-write-pending") and basename.endswith(".json"))
     )
     if not in_staging:

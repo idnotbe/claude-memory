@@ -284,21 +284,27 @@ python3 scripts for commands. NEVER use Bash for file writes.
 Example: `cmd1 ; cmd2 ; cmd3`
 
 If any command fails, the `;` separator ensures remaining commands
-still execute. After ALL commands complete, run cleanup and result
-file commands in the same or a second Bash call.
+still execute.
 
-Commands:
-1. <first memory_write.py command>
-2. <second memory_write.py command>
-...
-N. <memory_enforce.py command, if applicable>
+CRITICAL: ALL commands below (sentinel advancement, save commands,
+cleanup, result file, and final sentinel state) MUST be combined into
+a SINGLE Bash tool call using `;` separators. Do NOT split across
+multiple Bash calls -- an interruption between calls would leave the
+sentinel stuck in 'saving' state permanently.
 
-If ALL commands succeeded (no errors), run cleanup:
-python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action cleanup-staging --staging-dir <staging_dir>
-If ANY command failed, do NOT delete staging files (preserve for retry).
+Combined command sequence (single Bash call with status tracking):
+_ok=1 ; python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state saving ; <save command 1> || _ok=0 ; <save command 2> || _ok=0 ; ... ; <memory_enforce.py command> || _ok=0 ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action cleanup-staging --staging-dir <staging_dir>; fi ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result-direct --staging-dir <staging_dir> --categories \"<comma-separated saved categories>\" --titles \"<comma-separated saved titles>\"; fi ; if [ \"$_ok\" -eq 1 ]; then python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state saved; else python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action update-sentinel-state --staging-dir <staging_dir> --state failed; fi
 
-Then write the result file (atomic, regardless of success/failure):
-python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py\" --action write-save-result-direct --staging-dir <staging_dir> --categories \"<comma-separated saved categories>\" --titles \"<comma-separated saved titles>\"
+IMPORTANT: The `|| _ok=0` after EVERY command (save commands AND memory_enforce.py) captures individual failures while allowing remaining commands to execute. The `_ok` variable tracks overall success. The result file and cleanup ONLY run on full success — on failure, the sentinel transitions to "failed" which allows re-triage.
+
+The sequence is:
+1. Initialize `_ok=1` (optimistic)
+2. Advance sentinel to 'saving'
+3. Execute all memory_write.py save commands (create/update/retire), appending `|| _ok=0` to each
+4. Run memory_enforce.py if session_summary was created, also with `|| _ok=0`
+5. If ALL commands succeeded (`_ok=1`): run cleanup-staging. If ANY failed (`_ok=0`): skip cleanup
+6. If ALL commands succeeded (`_ok=1`): write the result file. If ANY failed: skip (no result file = save-result guard won't block re-triage)
+7. Advance sentinel to final state: 'saved' if `_ok=1`, 'failed' if `_ok=0`
 
 Return ONLY a single-line summary like: 'Saved: session_summary (update), constraint (create)' — no extra text."
 )
@@ -309,19 +315,24 @@ Result file fields:
 - `categories`: list of categories that were saved (PASS only)
 - `titles`: list of titles corresponding to each saved memory
 - `errors`: list of `{"category": "<name>", "error": "<message>"}` objects for any failed saves (empty array if all succeeded)
+- `session_id`: session identifier from sentinel (auto-populated by `write-save-result-direct`, null if sentinel read fails)
 
 **Step 3: Error Handling**
 
 If the Task subagent fails, times out, or returns errors:
-1. Write a pending sentinel using the Write tool (NOT Bash — staging guard blocks Bash writes to staging):
+1. Advance sentinel to failed state (best-effort, fail-open):
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/memory_write.py" --action update-sentinel-state --staging-dir <staging_dir> --state failed
+   ```
+2. Write a pending sentinel using the Write tool (NOT Bash -- staging guard blocks Bash writes to staging):
    ```
    Write(
      file_path: "<staging_dir>/.triage-pending.json",
      content: '{"timestamp": "<ISO 8601 UTC>", "categories": ["<failed categories>"], "reason": "subagent_error"}'
    )
    ```
-2. Do NOT delete staging files (preserve triage-data.json, context-*.txt for retry).
-3. The next session's UserPromptSubmit hook will detect the pending sentinel.
+3. Do NOT delete staging files (preserve triage-data.json, context-*.txt for retry).
+4. The next session's UserPromptSubmit hook will detect the pending sentinel.
 
 ### Write Pipeline Protections
 

@@ -9,8 +9,10 @@ Covers:
 
 import hashlib
 import os
+import shutil
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -131,12 +133,11 @@ class TestEnsureStagingDir:
         perms = stat.S_IMODE(mode)
         assert perms == 0o700, f"Expected 0o700, got {oct(perms)}"
 
-    def test_cleanup(self, tmp_path):
-        """Clean up the test staging dir after test."""
+    def test_created_dir_is_real_not_symlink(self, tmp_path):
+        """ensure_staging_dir should create a real dir, not follow a symlink."""
         result = ensure_staging_dir(str(tmp_path))
-        # Cleanup
-        if os.path.isdir(result):
-            os.rmdir(result)
+        assert not os.path.islink(result), "Staging dir should not be a symlink"
+        assert os.path.isdir(result)
 
 
 # ===================================================================
@@ -196,20 +197,13 @@ class TestValidateStagingDirSecurity:
 
     def test_rejects_symlink_at_staging_path(self, tmp_path):
         """Pre-existing symlink at staging path should raise RuntimeError."""
-        # Create a target directory for the symlink to point to
         target = tmp_path / "attacker_dir"
         target.mkdir()
 
-        # Create a symlink at a /tmp/ staging path
-        staging_path = f"{STAGING_DIR_PREFIX}test_symlink_reject"
+        # Use unique /tmp/ path to avoid CI parallel conflicts
+        staging_path = tempfile.mkdtemp(prefix=".claude-memory-staging-", dir="/tmp")
+        os.rmdir(staging_path)  # Remove so we can place a symlink
         try:
-            # Remove if it exists from a previous failed test
-            if os.path.islink(staging_path) or os.path.exists(staging_path):
-                if os.path.islink(staging_path):
-                    os.unlink(staging_path)
-                elif os.path.isdir(staging_path):
-                    os.rmdir(staging_path)
-
             os.symlink(str(target), staging_path)
 
             with pytest.raises(RuntimeError, match="symlink"):
@@ -244,12 +238,10 @@ class TestValidateStagingDirSecurity:
 
         Verifies the permission-tightening branch (S_IMODE & 0o077).
         """
-        staging_path = f"{STAGING_DIR_PREFIX}test_loose_perms"
+        staging_path = tempfile.mkdtemp(prefix=".claude-memory-staging-", dir="/tmp")
         try:
-            # Create directory with loose permissions
-            os.mkdir(staging_path, 0o777)
+            os.chmod(staging_path, 0o777)
 
-            # validate_staging_dir should tighten permissions
             validate_staging_dir(staging_path)
 
             actual_perms = stat.S_IMODE(os.lstat(staging_path).st_mode)
@@ -258,62 +250,47 @@ class TestValidateStagingDirSecurity:
                 f"loose permissions were not tightened"
             )
         finally:
-            if os.path.isdir(staging_path):
-                os.rmdir(staging_path)
+            shutil.rmtree(staging_path, ignore_errors=True)
 
-    def test_regular_file_at_path_does_not_pass_silently(self, tmp_path):
-        """Regular file (not dir) at staging path should cause downstream failure.
+    def test_regular_file_at_path_raises_runtime_error(self, tmp_path):
+        """Regular file (not dir) at staging path should raise RuntimeError.
 
-        validate_staging_dir() does not currently check S_ISDIR, so a regular
-        file at the path would pass validation but cause FileNotFoundError
-        downstream when trying to write files into it. This test documents
-        that behavior -- the file passes the symlink/ownership checks but
-        is not a directory.
+        A pre-existing regular file at the staging path is rejected by the
+        S_ISDIR check, preventing downstream failures from trying to write
+        files into a non-directory.
         """
-        staging_path = f"{STAGING_DIR_PREFIX}test_regular_file"
+        staging_path = tempfile.mkdtemp(prefix=".claude-memory-staging-", dir="/tmp")
+        os.rmdir(staging_path)  # Remove dir so we can create a file
         try:
-            # Create a regular file at the staging path
             with open(staging_path, "w") as f:
                 f.write("not a directory")
             os.chmod(staging_path, 0o700)
 
-            # validate_staging_dir does NOT raise -- it passes symlink/uid checks
-            # (this documents the behavior; a future S_ISDIR check would change it)
-            validate_staging_dir(staging_path)
-
-            # But it's not a directory, so downstream operations would fail
-            assert os.path.isfile(staging_path)
-            assert not os.path.isdir(staging_path)
+            with pytest.raises(RuntimeError, match="not a directory"):
+                validate_staging_dir(staging_path)
         finally:
             if os.path.exists(staging_path):
                 os.unlink(staging_path)
 
     def test_accepts_valid_own_directory(self, tmp_path):
         """A valid directory owned by current user should pass without error."""
-        staging_path = f"{STAGING_DIR_PREFIX}test_valid_own"
+        staging_path = tempfile.mkdtemp(prefix=".claude-memory-staging-", dir="/tmp")
         try:
-            os.mkdir(staging_path, 0o700)
-
             # Should not raise
             validate_staging_dir(staging_path)
         finally:
-            if os.path.isdir(staging_path):
-                os.rmdir(staging_path)
+            shutil.rmtree(staging_path, ignore_errors=True)
 
     def test_mkdir_creates_new_dir_without_validation(self, tmp_path):
         """When the directory does not exist, mkdir creates it (no lstat path)."""
-        staging_path = f"{STAGING_DIR_PREFIX}test_new_create"
+        staging_path = tempfile.mkdtemp(prefix=".claude-memory-staging-", dir="/tmp")
+        os.rmdir(staging_path)  # Remove so validate_staging_dir can create it
         try:
-            # Ensure it does not exist
-            if os.path.exists(staging_path):
-                os.rmdir(staging_path)
-
             validate_staging_dir(staging_path)
             assert os.path.isdir(staging_path)
             assert stat.S_IMODE(os.lstat(staging_path).st_mode) == 0o700
         finally:
-            if os.path.isdir(staging_path):
-                os.rmdir(staging_path)
+            shutil.rmtree(staging_path, ignore_errors=True)
 
     def test_ensure_staging_dir_propagates_runtime_error(self, tmp_path):
         """ensure_staging_dir should propagate RuntimeError from validate_staging_dir.
@@ -326,3 +303,108 @@ class TestValidateStagingDirSecurity:
         ):
             with pytest.raises(RuntimeError, match="symlink"):
                 ensure_staging_dir(str(tmp_path))
+
+
+# ===================================================================
+# validate_staging_dir() -- legacy path security tests
+# ===================================================================
+
+class TestValidateStagingDirLegacyPath:
+    """Security tests for the legacy path branch (.claude/memory/.staging).
+
+    These mirror the /tmp/ path security tests but target the else-branch
+    that handles paths not starting with STAGING_DIR_PREFIX.
+    """
+
+    def test_legacy_staging_rejects_symlink(self, tmp_path):
+        """Symlink at legacy staging path should raise RuntimeError."""
+        # Set up legacy-style path: <tmp>/.claude/memory/.staging
+        parent = tmp_path / ".claude" / "memory"
+        parent.mkdir(parents=True)
+        staging_dir = str(parent / ".staging")
+
+        # Create an attacker target and symlink
+        attacker_dir = tmp_path / "attacker_controlled"
+        attacker_dir.mkdir()
+        os.symlink(str(attacker_dir), staging_dir)
+
+        with pytest.raises(RuntimeError, match="symlink"):
+            validate_staging_dir(staging_dir)
+
+    def test_legacy_staging_fixes_permissions(self, tmp_path):
+        """World-readable legacy staging dir should be tightened to 0o700."""
+        parent = tmp_path / ".claude" / "memory"
+        parent.mkdir(parents=True)
+        staging_dir = str(parent / ".staging")
+
+        # Create with overly permissive mode
+        os.mkdir(staging_dir, 0o777)
+
+        # validate_staging_dir should fix permissions
+        validate_staging_dir(staging_dir)
+
+        actual_perms = stat.S_IMODE(os.lstat(staging_dir).st_mode)
+        assert actual_perms == 0o700, (
+            f"Expected 0o700, got {oct(actual_perms)} -- "
+            f"loose permissions were not tightened"
+        )
+
+    def test_legacy_staging_rejects_wrong_owner(self):
+        """Legacy staging dir owned by different uid should raise RuntimeError.
+
+        Uses mocking since we can't create dirs owned by another user
+        without root.
+        """
+        staging_dir = "/home/user/.claude/memory/.staging"
+
+        mock_stat = mock.MagicMock()
+        mock_stat.st_mode = stat.S_IFDIR | 0o700  # Regular directory
+        mock_stat.st_uid = 9999  # Foreign UID
+
+        with mock.patch("memory_staging_utils.os.mkdir", side_effect=FileExistsError):
+            with mock.patch("memory_staging_utils.os.lstat", return_value=mock_stat):
+                with mock.patch("memory_staging_utils.os.geteuid", return_value=1000):
+                    with mock.patch("memory_staging_utils.os.path.isdir", return_value=True):
+                        with pytest.raises(RuntimeError, match="owned by uid 9999"):
+                            validate_staging_dir(staging_dir)
+
+    def test_legacy_staging_creates_parents(self, tmp_path):
+        """Legacy path should create parent dirs (.claude/memory/) if missing."""
+        staging_dir = str(tmp_path / ".claude" / "memory" / ".staging")
+
+        # Parents don't exist yet
+        assert not os.path.isdir(str(tmp_path / ".claude"))
+
+        validate_staging_dir(staging_dir)
+
+        assert os.path.isdir(staging_dir)
+        assert stat.S_IMODE(os.lstat(staging_dir).st_mode) == 0o700
+
+    def test_legacy_staging_idempotent(self, tmp_path):
+        """Calling validate_staging_dir twice on legacy path should work."""
+        parent = tmp_path / ".claude" / "memory"
+        parent.mkdir(parents=True)
+        staging_dir = str(parent / ".staging")
+
+        validate_staging_dir(staging_dir)
+        validate_staging_dir(staging_dir)  # second call should not raise
+
+        assert os.path.isdir(staging_dir)
+
+    def test_legacy_staging_rejects_regular_file(self, tmp_path):
+        """Regular file (not dir) at legacy staging path should raise RuntimeError.
+
+        Mirrors the /tmp/ path S_ISDIR test -- ensures the legacy branch also
+        rejects non-directory entries via _validate_existing_staging().
+        """
+        parent = tmp_path / ".claude" / "memory"
+        parent.mkdir(parents=True)
+        staging_path = str(parent / ".staging")
+
+        # Create a regular file where the staging dir should be
+        with open(staging_path, "w") as f:
+            f.write("not a directory")
+        os.chmod(staging_path, 0o700)
+
+        with pytest.raises(RuntimeError, match="not a directory"):
+            validate_staging_dir(staging_path)

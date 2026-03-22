@@ -173,11 +173,11 @@ CATEGORY_PATTERNS: dict[str, dict] = {
                 re.IGNORECASE,
             ),
             # Group 3: Phase 3 save command templates and pipeline keywords
+            # Uses memory_write.py --action [-\w]+ to catch hyphenated actions
+            # (cleanup-staging, write-save-result-direct, etc.) in one pattern.
             re.compile(
                 r"(?:Execute\s+(?:these\s+)?memory\s+save\s+commands|"
-                r"write-save-result(?:-direct)?|"
-                r"cleanup-staging|"
-                r"memory_write\.py.*--action\s+\w+|"
+                r"memory_write\.py.*--action\s+[-\w]+|"
                 r"memory_enforce\.py\b)",
                 re.IGNORECASE,
             ),
@@ -189,11 +189,13 @@ CATEGORY_PATTERNS: dict[str, dict] = {
                 r"NEVER\s+use\s+Bash\s+for\s+file\s+writes)",
                 re.IGNORECASE,
             ),
-            # Group 5: General instructional/procedural patterns
+            # Group 5: SKILL.md-specific instructional patterns (anchored/extended
+            # to avoid suppressing real troubleshooting that happens to use
+            # similar phrasing like "If any command failed, we checked...")
             re.compile(
                 r"(?:^Run\s+the\s+following\b|"
-                r"If\s+ALL\s+commands\s+succeeded|"
-                r"If\s+ANY\s+command\s+failed)",
+                r"If\s+ALL\s+commands\s+succeeded\s*\(no\s+errors\)|"
+                r"If\s+ANY\s+command\s+failed,\s+do\s+NOT\s+delete)",
                 re.IGNORECASE,
             ),
         ],
@@ -808,7 +810,7 @@ def _check_save_result_guard(cwd: str, current_session_id: str) -> bool:
             if isinstance(result_session, str) and result_session:
                 if result_session == current_session_id:
                     return True
-                return False  # Different session
+                continue  # Different session in this candidate, try next
 
             # Fallback: cross-check with sentinel (backwards compatibility)
             sentinel = read_sentinel(cwd)
@@ -816,7 +818,7 @@ def _check_save_result_guard(cwd: str, current_session_id: str) -> bool:
                 if sentinel.get("state", "") in _SENTINEL_BLOCK_STATES:
                     return True
 
-            return False
+            continue  # Fallback inconclusive, try next candidate
         except OSError:
             continue  # Try next candidate path
 

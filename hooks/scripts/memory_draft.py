@@ -54,7 +54,11 @@ from memory_staging_utils import validate_staging_dir  # noqa: E402
 
 
 def _ensure_staging_dir_safe(staging_dir: str) -> None:
-    """Validate and create staging dir using shared security logic."""
+    """Validate and create staging dir using shared security logic.
+
+    Raises RuntimeError or OSError on security violations (symlink,
+    foreign ownership). Callers should catch and handle gracefully.
+    """
     validate_staging_dir(staging_dir)
 
 # ---------------------------------------------------------------------------

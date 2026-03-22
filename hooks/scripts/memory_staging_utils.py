@@ -60,36 +60,70 @@ def ensure_staging_dir(cwd: str = "") -> str:
     return staging_dir
 
 
-def validate_staging_dir(staging_dir: str) -> None:
-    """Ensure a staging directory exists with safe ownership/permissions.
+def _validate_existing_staging(staging_dir: str) -> None:
+    """Validate an existing staging directory (symlink, type, ownership, perms).
 
-    For /tmp/ staging paths: uses mkdir + lstat validation (symlink/ownership).
-    For legacy paths (not in /tmp/): uses makedirs with exist_ok (user-owned).
+    Called when os.mkdir raises FileExistsError -- the path already exists,
+    so we must verify it hasn't been tampered with.
 
     Args:
         staging_dir: Absolute path to the staging directory.
 
     Raises:
-        RuntimeError: If the /tmp/ directory is a symlink or foreign-owned.
+        RuntimeError: If the path is a symlink, not a directory, or foreign-owned.
+    """
+    st = os.lstat(staging_dir)
+    if stat.S_ISLNK(st.st_mode):
+        raise RuntimeError(
+            f"Staging dir is a symlink (possible attack): {staging_dir}"
+        )
+    if not stat.S_ISDIR(st.st_mode):
+        raise RuntimeError(
+            f"Staging path exists but is not a directory: {staging_dir}"
+        )
+    if st.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"Staging dir owned by uid {st.st_uid}, "
+            f"expected {os.geteuid()}: {staging_dir}"
+        )
+    if stat.S_IMODE(st.st_mode) & 0o077:
+        # TOCTOU note: the window between lstat and chmod is practically
+        # unexploitable -- /tmp/ has sticky bit, legacy paths are in
+        # the user's workspace. An attacker cannot delete+replace the
+        # directory in this window without already having write access.
+        os.chmod(staging_dir, 0o700)
+
+
+def validate_staging_dir(staging_dir: str) -> None:
+    """Ensure a staging directory exists with safe ownership/permissions.
+
+    For /tmp/ staging paths: uses mkdir + lstat validation (symlink/ownership).
+    For legacy paths (not in /tmp/): uses makedirs for parents + mkdir for
+    the final .staging component with lstat validation (symlink/ownership).
+
+    Args:
+        staging_dir: Absolute path to the staging directory.
+
+    Raises:
+        RuntimeError: If the directory is a symlink, not a directory,
+            or foreign-owned.
     """
     if staging_dir.startswith(STAGING_DIR_PREFIX):
         try:
             os.mkdir(staging_dir, 0o700)
         except FileExistsError:
-            st = os.lstat(staging_dir)
-            if stat.S_ISLNK(st.st_mode):
-                raise RuntimeError(
-                    f"Staging dir is a symlink (possible attack): {staging_dir}"
-                )
-            if st.st_uid != os.geteuid():
-                raise RuntimeError(
-                    f"Staging dir owned by uid {st.st_uid}, "
-                    f"expected {os.geteuid()}: {staging_dir}"
-                )
-            if stat.S_IMODE(st.st_mode) & 0o077:
-                os.chmod(staging_dir, 0o700)
+            _validate_existing_staging(staging_dir)
     else:
-        os.makedirs(staging_dir, mode=0o700, exist_ok=True)
+        # Legacy path (e.g. <cwd>/.claude/memory/.staging)
+        # Use makedirs for parents only, mkdir for the final component
+        # to get atomic creation + symlink/ownership defense.
+        parent = os.path.dirname(staging_dir)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+        try:
+            os.mkdir(staging_dir, 0o700)
+        except FileExistsError:
+            _validate_existing_staging(staging_dir)
 
 
 def is_staging_path(path: str) -> bool:
