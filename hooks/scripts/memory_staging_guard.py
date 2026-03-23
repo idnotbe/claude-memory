@@ -39,15 +39,30 @@ def _log(event_type, data, level="info"):
 
 
 # Detect bash writes targeting staging directory.
-# Matches both the new /tmp/.claude-memory-staging-* path and legacy .claude/memory/.staging/
-# Build regex dynamically using os.path.realpath("/tmp") to handle macOS /private/tmp.
-# Generate alternation from sorted({"/tmp", os.path.realpath("/tmp")}) to match both
-# literal and resolved prefixes in command strings.
+# Matches the new XDG staging path, legacy /tmp/ staging path, and .claude/memory/.staging/
+# Import prefixes from shared module; fallback for partial deploys.
+try:
+    _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if _scripts_dir not in sys.path:
+        sys.path.insert(0, _scripts_dir)
+    from memory_staging_utils import STAGING_DIR_PREFIX as _STAGING_PREFIX, _LEGACY_STAGING_PREFIX
+except ImportError:
+    _RESOLVED_TMP = os.path.realpath("/tmp")
+    _STAGING_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
+    _LEGACY_STAGING_PREFIX = _STAGING_PREFIX
+
+# Build regex from both new and legacy staging prefixes plus /tmp variants.
+# Collect all unique directory prefixes that could appear in command strings.
+_staging_dirs = set()
+# Add the new staging prefix directory (everything before .claude-memory-staging-)
+_staging_dirs.add(os.path.dirname(_STAGING_PREFIX))
+# Add legacy /tmp variants
 _RESOLVED_TMP = os.path.realpath("/tmp")
-_tmp_variants = sorted({"/tmp", _RESOLVED_TMP})
-_tmp_alt = "|".join(re.escape(t) for t in _tmp_variants)
+for _t in sorted({"/tmp", _RESOLVED_TMP}):
+    _staging_dirs.add(_t)
+_staging_alt = "|".join(re.escape(d) for d in sorted(_staging_dirs))
 _STAGING_PATH_PATTERN = (
-    r'(?:\.claude/memory/\.staging/|(?:' + _tmp_alt + r')/\.claude-memory-staging-[a-f0-9]+/)'
+    r'(?:\.claude/memory/\.staging/|(?:' + _staging_alt + r')/\.claude-memory-staging-[a-f0-9]+/)'
 )
 _STAGING_WRITE_PATTERN = re.compile(
     r'(?:cat|echo|printf)\s+[^|&;\n>\s]*>\s*[^\s]*' + _STAGING_PATH_PATTERN

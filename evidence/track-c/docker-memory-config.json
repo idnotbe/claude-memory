@@ -47,59 +47,42 @@
   },
   "auto_commit": false,
   "max_memories_per_category": 100,
-  "retrieval": {
-    "max_inject": 3,
-    "match_strategy": "fts5_bm25",
-    "confidence_abs_floor": 0.0,
-    "cluster_detection_enabled": false,
-    "output_mode": "legacy",
-    "judge": {
-      "enabled": false,
-      "model": "claude-haiku-4-5-20251001",
-      "timeout_per_call": 3.0,
-      "fallback_top_k": 2,
-      "candidate_pool_size": 15,
-      "dual_verification": false,
-      "include_conversation_context": true,
-      "context_turns": 5
-    }
-  },
   "triage": {
     "enabled": true,
     "max_messages": 50,
     "thresholds": {
-      "decision": 0.4,
+      "decision": 0.26,
       "runbook": 0.4,
-      "constraint": 0.45,
+      "constraint": 0.5,
       "tech_debt": 0.4,
-      "preference": 0.4,
+      "preference": 0.34,
       "session_summary": 0.6
     },
     "parallel": {
       "enabled": true,
+      "default_model": "haiku",
+      "verification_model": "haiku",
       "category_models": {
         "session_summary": "haiku",
-        "decision": "sonnet",
+        "decision": "haiku",
         "runbook": "haiku",
-        "constraint": "sonnet",
+        "constraint": "haiku",
         "tech_debt": "haiku",
         "preference": "haiku"
-      },
-      "verification_enabled": false,
-      "verification_model": "sonnet",
-      "default_model": "haiku"
+      }
     }
+  },
+  "retrieval": {
+    "max_inject": 5,
+    "match_strategy": "title_tags"
   },
   "delete": {
     "grace_period_days": 30,
     "archive_retired": true
   },
   "logging": {
-    "enabled": false,
+    "enabled": true,
     "level": "info",
     "retention_days": 14
-  },
-  "architecture": {
-    "simplified_flow": true
   }
 }

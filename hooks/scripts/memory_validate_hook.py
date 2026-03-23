@@ -14,8 +14,18 @@ import os
 import sys
 import time
 
-# Resolved /tmp/ prefix for cross-platform compatibility (macOS: /tmp -> /private/tmp)
-_RESOLVED_TMP = os.path.realpath("/tmp")
+# Import staging constants from shared module; fallback for partial deploys
+try:
+    _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if _scripts_dir not in sys.path:
+        sys.path.insert(0, _scripts_dir)
+    from memory_staging_utils import STAGING_DIR_PREFIX, _LEGACY_STAGING_PREFIX, is_staging_path
+except ImportError:
+    _RESOLVED_TMP = os.path.realpath("/tmp")
+    STAGING_DIR_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
+    _LEGACY_STAGING_PREFIX = STAGING_DIR_PREFIX
+    def is_staging_path(path):
+        return path.startswith(STAGING_DIR_PREFIX)
 
 # Lazy logger import (fail-open: never block hook execution)
 _logger = None
@@ -190,10 +200,9 @@ def main():
         sys.exit(0)
 
     # Skip staging files -- temporary working files, not memory records.
-    # Check both new /tmp/ staging path and legacy .claude/memory/.staging/ path.
+    # Check both new XDG staging path, legacy /tmp/ path, and .claude/memory/.staging/ path.
     _stg = ".stagi" + "ng"
     staging_marker = MEMORY_DIR_SEGMENT + _stg + "/"
-    _TMP_STAGING_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
     normalized = resolved.replace(os.sep, "/")
     # Derive memory_root for logging
     _mem_root = ""
@@ -201,7 +210,7 @@ def main():
     if _mem_idx >= 0:
         _mem_root = normalized[:_mem_idx + len(MEMORY_DIR_SEGMENT)].rstrip("/")
 
-    is_staging = (staging_marker in normalized) or resolved.startswith(_TMP_STAGING_PREFIX)
+    is_staging = (staging_marker in normalized) or is_staging_path(resolved)
     if is_staging:
         # Defense-in-depth: check nlink as diagnostic warning (not gate).
         # PreToolUse write_guard is the primary defense with nlink gating.

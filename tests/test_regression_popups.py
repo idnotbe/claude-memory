@@ -668,54 +668,32 @@ class TestZeroPython3CInSkill:
 
 
 # ===================================================================
-# Test Class 7: P4 — Phase 3 save subagent prompt heredoc guard
+# Test Class 7: P4 — Save execution heredoc safety (v6: orchestrator-based)
 # ===================================================================
 
 class TestNoHeredocInSavePrompt:
-    """Verify SKILL.md Phase 3 save subagent prompt forbids heredoc (<<)
-    and does not itself use heredoc in bash commands.
+    """Verify SKILL.md save execution does not expose heredoc risk.
 
-    P2 popup fix added explicit heredoc warning. Shell injection fix
-    replaced write-save-result-direct with file-based write-save-result.
+    v5: Phase 3 haiku saver subagent needed explicit heredoc warnings.
+    v6: Save execution is handled by memory_orchestrate.py (Python subprocess),
+    which structurally eliminates heredoc risk. These tests verify that
+    SKILL.md does not reintroduce heredoc-based save patterns.
     """
 
-    @pytest.fixture(scope="class")
-    def phase3_section(self) -> str:
-        """Extract the Phase 3 save subagent section from SKILL.md."""
+    def test_heredoc_warning_in_rules(self):
+        """Rules section must still contain the heredoc warning text."""
         text = SKILL_MD.read_text(encoding="utf-8")
-        # Find "### Phase 3: Save" section
-        phase3_start = text.find("### Phase 3: Save")
-        assert phase3_start != -1, "Phase 3 section not found in SKILL.md"
-        # Find next ### heading or end of file
-        next_heading = text.find("\n### ", phase3_start + 1)
-        if next_heading == -1:
-            # Try ## heading
-            next_heading = text.find("\n## ", phase3_start + 1)
-        if next_heading == -1:
-            next_heading = len(text)
-        return text[phase3_start:next_heading]
-
-    def test_heredoc_warning_present(self, phase3_section):
-        """Phase 3 section must contain the heredoc warning text."""
-        assert "heredoc" in phase3_section.lower(), (
-            "Phase 3 section missing heredoc warning"
+        assert "heredoc" in text.lower(), (
+            "SKILL.md missing heredoc warning in Rules section"
         )
-        assert "<<" in phase3_section, (
-            "Phase 3 section should mention << to warn against it"
-        )
-        # The actual warning text
-        assert "CRITICAL" in phase3_section or "NEVER" in phase3_section, (
-            "Phase 3 section should have a strong warning about heredoc"
+        assert "<<" in text, (
+            "SKILL.md should mention << to warn against it"
         )
 
-    def test_no_heredoc_in_phase3_bash_commands(self, phase3_section):
-        """No bash command in Phase 3 should use heredoc (<<) for
-        file writes. The warning text mentioning << is OK since it's
-        prose, not a command."""
-        # Extract bash blocks from the section
-        # We need to find actual command lines (not the warning prose)
-        # Parse the save subagent prompt's Commands section
-        lines = phase3_section.splitlines()
+    def test_no_heredoc_in_bash_commands(self):
+        """No bash command in SKILL.md should use heredoc (<<) for file writes."""
+        text = SKILL_MD.read_text(encoding="utf-8")
+        lines = text.splitlines()
         in_bash = False
         bash_lines = []
         for line in lines:
@@ -733,19 +711,23 @@ class TestNoHeredocInSavePrompt:
         heredoc_pattern = re.compile(r'<<\s*[\'"]?\w+')
         for bash_line in bash_lines:
             assert not heredoc_pattern.search(bash_line), (
-                f"Phase 3 bash command uses heredoc: {bash_line}"
+                f"SKILL.md bash command uses heredoc: {bash_line}"
             )
 
-    def test_uses_write_save_result_with_result_file(self, phase3_section):
-        """Phase 3 should use write-save-result --result-file (not direct CLI args)."""
-        assert "write-save-result" in phase3_section, (
-            "Phase 3 section should use write-save-result action"
+    def test_no_haiku_saver_subagent(self):
+        """v6 should not contain Phase 3 haiku saver subagent instructions."""
+        text = SKILL_MD.read_text(encoding="utf-8")
+        # Phase 3 Save subagent was removed in v6
+        assert "### Phase 3: Save" not in text, (
+            "SKILL.md v6 should not have Phase 3 Save section (replaced by orchestrator)"
         )
-        assert "--result-file" in phase3_section, (
-            "Phase 3 section should use --result-file for file-based input"
-        )
-        assert "write-save-result-direct" not in phase3_section, (
-            "Phase 3 section should NOT use removed write-save-result-direct action"
+
+    def test_save_via_orchestrator(self):
+        """Phase 2 COMMIT must use memory_orchestrate.py for save execution."""
+        text = SKILL_MD.read_text(encoding="utf-8")
+        assert "memory_orchestrate.py" in text
+        assert "--action run" in text, (
+            "SKILL.md should reference --action run for combined prepare+commit"
         )
 
 

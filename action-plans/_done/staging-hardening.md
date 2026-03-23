@@ -68,19 +68,19 @@ Cross-model audit (Opus 4.6 + Codex 5.3 + Gemini 3.1 Pro) of the eliminate-all-p
 
 ## Phase 4: Regression Tests + Verification
 
-- [ ] **Step 4.1**: Run full test suite `pytest tests/ -v` — verify no regressions from Phase 1-3 changes
-- [ ] **Step 4.2**: Compile-check all modified scripts: `for f in hooks/scripts/memory_*.py; do python3 -m py_compile "$f"; done`
-- [ ] **Step 4.3**: Verify staging guard regex in `memory_staging_guard.py` still matches new paths
-- [ ] **Step 4.4**: Verification: 2 independent rounds (structural + adversarial)
+- [x] **Step 4.1**: Run full test suite `pytest tests/ -v` — verify no regressions from Phase 1-3 changes
+- [x] **Step 4.2**: Compile-check all modified scripts: `for f in hooks/scripts/memory_*.py; do python3 -m py_compile "$f"; done`
+- [x] **Step 4.3**: Verify staging guard regex in `memory_staging_guard.py` still matches new paths
+- [x] **Step 4.4**: Verification: 2 independent rounds (structural + adversarial)
 
 ## Phase 5: Future Hardening (Track Only)
 
 These are lower-priority follow-ups, not blocking for this plan:
 
-- [ ] **P3**: Legacy path parent chain validation (validate ancestor ownership with `lstat`)
-- [ ] **P4**: fd-pinning with `O_DIRECTORY | O_NOFOLLOW` + `dir_fd=` for TOCTOU elimination
-- [ ] **P5**: `XDG_RUNTIME_DIR` / `~/.cache` migration to eliminate `/tmp/` class entirely
-- [ ] **P6**: `follow_symlinks=False` audit for all `os.chmod()` calls across hook scripts
+- [x] **P3**: Legacy path parent chain validation (validate ancestor ownership with `lstat`)
+- [x] **P4**: fd-pinning with `O_DIRECTORY | O_NOFOLLOW` + `dir_fd=` for TOCTOU elimination
+- [x] **P5**: `XDG_RUNTIME_DIR` / `~/.cache` migration to eliminate `/tmp/` class entirely
+- [x] **P6**: `follow_symlinks=False` audit for all `os.chmod()` calls across hook scripts
 
 ## Files Changed
 

@@ -16,12 +16,32 @@ PYTHON = sys.executable
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-import hashlib
+from memory_staging_utils import get_staging_dir as _get_staging_dir_str
 
 def _get_staging_dir(proj_path: str) -> Path:
-    """Compute the /tmp/ staging directory for a project path (test helper)."""
-    project_hash = hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(proj_path)}".encode()).hexdigest()[:12]
-    return Path(f"/tmp/.claude-memory-staging-{project_hash}")
+    """Compute the staging directory for a project path (test helper).
+
+    Uses the shared memory_staging_utils module to match the actual
+    staging path resolution (XDG_RUNTIME_DIR / ~/.cache fallback).
+    """
+    return Path(_get_staging_dir_str(proj_path))
+
+def _get_staging_dir_subprocess(proj_path: str) -> Path:
+    """Compute staging dir via subprocess (honors current env vars like HOME).
+
+    Use this instead of _get_staging_dir when env vars (HOME, XDG_*)
+    have been monkeypatched and the staging base needs to match what
+    a subprocess would resolve.
+    """
+    import subprocess as _sp
+    result = _sp.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, '{}'); "
+         "from memory_staging_utils import get_staging_dir; "
+         "print(get_staging_dir('{}'))".format(str(SCRIPTS_DIR), proj_path)],
+        capture_output=True, text=True, timeout=5,
+    )
+    return Path(result.stdout.strip())
 from memory_retrieve import (
     tokenize,
     parse_index_line,
@@ -1286,7 +1306,8 @@ class TestOrphanCrashDetection:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         (fake_home / ".claude").mkdir()
-        staging = _get_staging_dir(str(proj))
+        # Use subprocess helper to resolve staging dir with monkeypatched HOME
+        staging = _get_staging_dir_subprocess(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
         triage_path.write_text(json.dumps({"categories": ["decision"]}))
@@ -1309,7 +1330,8 @@ class TestOrphanCrashDetection:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         (fake_home / ".claude").mkdir()
-        staging = _get_staging_dir(str(proj))
+        # Use subprocess helper to resolve staging dir with monkeypatched HOME
+        staging = _get_staging_dir_subprocess(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
         triage_path.write_text(json.dumps({"categories": ["decision"]}))
@@ -1344,7 +1366,8 @@ class TestOrphanCrashDetection:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         (fake_home / ".claude").mkdir()
-        staging = _get_staging_dir(str(proj))
+        # Use subprocess helper to resolve staging dir with monkeypatched HOME
+        staging = _get_staging_dir_subprocess(str(proj))
         staging.mkdir(parents=True, exist_ok=True)
         triage_path = staging / "triage-data.json"
         triage_path.write_text(json.dumps({"categories": ["decision"]}))

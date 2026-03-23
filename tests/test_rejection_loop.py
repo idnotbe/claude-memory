@@ -18,10 +18,12 @@ from pathlib import Path
 
 import pytest
 
-# Skip entire module if no API key or no claude binary
+from conftest import CLAUDE_AUTHENTICATED
+
+# Skip entire module if claude is not available or not authenticated
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") or not shutil.which("claude"),
-    reason="ANTHROPIC_API_KEY not set or claude not in PATH",
+    not CLAUDE_AUTHENTICATED,
+    reason="claude not in PATH or not authenticated (set ANTHROPIC_API_KEY or run 'claude auth login')",
 )
 
 PLUGIN_DIR = str(Path(__file__).parent.parent)
@@ -38,6 +40,7 @@ def _run_claude_stream(prompt, timeout=120):
     cmd = [
         "claude", "-p", prompt,
         "--output-format", "stream-json",
+        "--verbose",
         "--plugin-dir", PLUGIN_DIR,
     ]
 

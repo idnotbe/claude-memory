@@ -53,10 +53,15 @@ except ImportError:
 # Resolved /tmp/ prefix for cross-platform compatibility (macOS: /tmp -> /private/tmp).
 # Import from memory_staging_utils when available; fallback to local computation.
 try:
-    from memory_staging_utils import STAGING_DIR_PREFIX as _STAGING_PREFIX, RESOLVED_TMP_PREFIX as _RESOLVED_TMP_PREFIX
+    from memory_staging_utils import (
+        STAGING_DIR_PREFIX as _STAGING_PREFIX,
+        RESOLVED_TMP_PREFIX as _RESOLVED_TMP_PREFIX,
+        _LEGACY_STAGING_PREFIX,
+    )
 except ImportError:
     _RESOLVED_TMP = os.path.realpath("/tmp")
     _STAGING_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
+    _LEGACY_STAGING_PREFIX = _STAGING_PREFIX  # same as _STAGING_PREFIX when in /tmp/
     _RESOLVED_TMP_PREFIX = _RESOLVED_TMP + "/"
 
 
@@ -428,13 +433,23 @@ def build_index_line(data: dict, rel_path: str) -> str:
 
 
 def add_to_index(index_path: Path, line: str) -> None:
-    """Add a line to index.md, maintaining sorted order."""
+    """Add a line to index.md, maintaining sorted order.
+
+    C2 fix: deduplicates by rel_path before appending to prevent duplicate
+    entries from partial failure retries.
+    """
     lines = _read_index_lines(index_path)
-    # Separate header and entry lines
+    # Extract rel_path from new line for dedup (format: "... -> rel_path #tags:...")
+    new_rel_path = None
+    if " -> " in line:
+        new_rel_path = line.split(" -> ", 1)[1].split(" #tags:")[0].strip()
+    # Separate header and entry lines, removing any existing entry with same path
     entries = []
     header = []
     for l in lines:
         if l.startswith("- ["):
+            if new_rel_path and f"-> {new_rel_path}" in l:
+                continue  # C2: remove duplicate entry for same path
             entries.append(l)
         else:
             header.append(l)
@@ -557,7 +572,7 @@ def cleanup_staging(staging_dir: str) -> dict:
 
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
-    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX)
+    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX) or resolved_str.startswith(_LEGACY_STAGING_PREFIX)
     is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
@@ -609,7 +624,7 @@ def cleanup_intents(staging_dir: str) -> dict:
 
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
-    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX)
+    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX) or resolved_str.startswith(_LEGACY_STAGING_PREFIX)
     is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
@@ -659,7 +674,7 @@ def write_save_result(staging_dir: str, result_json: str) -> dict:
 
     # Accept both new /tmp/ staging and legacy .claude/memory/.staging paths
     resolved_str = str(staging_path)
-    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX)
+    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX) or resolved_str.startswith(_LEGACY_STAGING_PREFIX)
     is_legacy_staging = _is_valid_legacy_staging(resolved_str)
 
     if not is_tmp_staging and not is_legacy_staging:
@@ -767,7 +782,7 @@ def update_sentinel_state(staging_dir: str, target_state: str) -> dict:
 
     # Path containment: accept /tmp/ staging and legacy .staging paths
     resolved_str = str(staging_path)
-    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX)
+    is_tmp_staging = resolved_str.startswith(_STAGING_PREFIX) or resolved_str.startswith(_LEGACY_STAGING_PREFIX)
     is_legacy_staging = _is_valid_legacy_staging(resolved_str)
     if not is_tmp_staging and not is_legacy_staging:
         return {
@@ -1059,8 +1074,30 @@ def do_create(args, memory_root: Path, index_path: Path) -> int:
                             f"Wait or use a different target path."
                         )
                         return 1
-            except (json.JSONDecodeError, KeyError, ValueError):
+            except (json.JSONDecodeError, KeyError, ValueError, AttributeError, TypeError):
+                # Corrupt/non-dict JSON at target — allow overwrite
                 pass
+            else:
+                # C1 fix: reject overwrite of active/archived files (allow idempotent replay)
+                status = existing.get("record_status", "active") if isinstance(existing, dict) else "active"
+                if status in ("active", "archived"):
+                    # Check idempotent replay: same content hash → allow
+                    existing_hash = hashlib.md5(
+                        json.dumps(existing, sort_keys=True).encode()
+                    ).hexdigest()
+                    new_hash = hashlib.md5(
+                        json.dumps(data, sort_keys=True).encode()
+                    ).hexdigest()
+                    if existing_hash != new_hash:
+                        print(
+                            f"CREATE_OVERWRITE_ERROR\n"
+                            f"target: {args.target}\n"
+                            f"record_status: {status}\n"
+                            f"fix: Use --action update to modify existing memories, "
+                            f"or use a different target path."
+                        )
+                        return 1
+                    # else: idempotent replay — same content, allow overwrite
 
         atomic_write_json(str(target_abs), data)
         index_line = build_index_line(data, rel_path)
@@ -1070,7 +1107,7 @@ def do_create(args, memory_root: Path, index_path: Path) -> int:
     _cleanup_input(args.input)
 
     # ── Mechanical enforcement: auto-enforce rolling window after session create ──
-    if args.category == "session_summary":
+    if args.category == "session_summary" and not getattr(args, 'skip_auto_enforce', False):
         try:
             import subprocess
             enforce_script = Path(__file__).resolve().parent / "memory_enforce.py"
@@ -1606,6 +1643,7 @@ def _read_input(input_path: str) -> Optional[dict]:
     basename = os.path.basename(resolved)
     in_staging = (
         resolved.startswith(_STAGING_PREFIX)
+        or resolved.startswith(_LEGACY_STAGING_PREFIX)
         or _is_valid_legacy_staging(resolved, allow_child=True)
         or (resolved.startswith(_RESOLVED_TMP_PREFIX) and basename.startswith(".memory-write-pending") and basename.endswith(".json"))
     )
@@ -1837,6 +1875,12 @@ def main():
     parser.add_argument(
         "--state",
         help="Target state for update-sentinel-state (saving, saved, failed)",
+    )
+    parser.add_argument(
+        "--skip-auto-enforce",
+        action="store_true",
+        default=False,
+        help="Skip auto-enforcement after session_summary create (used by orchestrator)",
     )
 
     args = parser.parse_args()

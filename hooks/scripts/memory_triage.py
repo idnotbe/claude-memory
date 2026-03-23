@@ -29,35 +29,14 @@ from typing import Optional
 
 # Lazy import: staging utilities
 try:
-    from memory_staging_utils import get_staging_dir, ensure_staging_dir
+    from memory_staging_utils import get_staging_dir, ensure_staging_dir, PinnedStagingDir
 except ImportError:
-    # Fallback: compute inline if module not available during partial deploys
-    import hashlib as _hashlib
-    import stat as _stat
-    _resolved_tmp = os.path.realpath("/tmp")
-    def get_staging_dir(cwd: str = "") -> str:
-        if not cwd:
-            cwd = os.getcwd()
-        _h = _hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(cwd)}".encode()).hexdigest()[:12]
-        return f"{_resolved_tmp}/.claude-memory-staging-{_h}"
-    def ensure_staging_dir(cwd: str = "") -> str:
-        d = get_staging_dir(cwd)
-        try:
-            os.mkdir(d, 0o700)
-        except FileExistsError:
-            _st = os.lstat(d)
-            if _stat.S_ISLNK(_st.st_mode):
-                raise RuntimeError(f"Staging dir is a symlink: {d}")
-            if not _stat.S_ISDIR(_st.st_mode):
-                raise RuntimeError(f"Staging path exists but is not a directory: {d}")
-            if _st.st_uid != os.geteuid():
-                raise RuntimeError(f"Staging dir owned by uid {_st.st_uid}: {d}")
-            if _stat.S_IMODE(_st.st_mode) & 0o077:
-                try:
-                    os.chmod(d, 0o700, follow_symlinks=False)
-                except (NotImplementedError, OSError):
-                    os.chmod(d, 0o700)
-        return d
+    # Staging utilities are required; degrade to no staging on partial deploy
+    def get_staging_dir(cwd=""):
+        return ""
+    def ensure_staging_dir(cwd=""):
+        return ""
+    PinnedStagingDir = None
 
 # Lazy import: logging module may not exist during partial deployments
 try:
@@ -668,12 +647,30 @@ def _sentinel_path(cwd: str) -> str:
     return os.path.join(get_staging_dir(cwd), ".triage-handled")
 
 
-def read_sentinel(cwd: str) -> Optional[dict]:
+def read_sentinel(cwd: str, *, pinned=None) -> Optional[dict]:
     """Read and parse the sentinel JSON file.
 
     Returns the parsed dict, or None if the file doesn't exist or is corrupt.
     Fail-open: returns None on any error.
+
+    Args:
+        pinned: Optional PinnedStagingDir. If provided, uses fd-pinned
+                reads (TOCTOU-safe). Falls back to path-based ops if None.
     """
+    sentinel_name = ".triage-handled"
+
+    # Fast path: use pinned dir_fd for TOCTOU-safe read
+    if pinned is not None:
+        try:
+            raw = pinned.read_file(sentinel_name).decode("utf-8", errors="replace")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+            return None
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+
+    # Legacy path-based read
     path = _sentinel_path(cwd)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -693,13 +690,17 @@ def read_sentinel(cwd: str) -> Optional[dict]:
         return None
 
 
-def write_sentinel(cwd: str, session_id: str, state: str) -> bool:
+def write_sentinel(cwd: str, session_id: str, state: str, *, pinned=None) -> bool:
     """Write sentinel JSON atomically.
 
     Returns True on success, False on failure (fail-open).
     Uses O_NOFOLLOW for symlink safety.
+
+    Args:
+        pinned: Optional PinnedStagingDir. If provided, uses fd-pinned
+                writes (TOCTOU-safe). Falls back to path-based ops if None.
     """
-    path = _sentinel_path(cwd)
+    sentinel_name = ".triage-handled"
     data = {
         "session_id": session_id,
         "state": state,
@@ -707,6 +708,17 @@ def write_sentinel(cwd: str, session_id: str, state: str) -> bool:
         "pid": os.getpid(),
     }
     content = json.dumps(data) + "\n"
+
+    # Fast path: use pinned dir_fd for TOCTOU-safe write
+    if pinned is not None:
+        try:
+            pinned.write_file(sentinel_name, content)
+            return True
+        except (OSError, RuntimeError):
+            return False
+
+    # Legacy path-based write
+    path = _sentinel_path(cwd)
     tmp_path = f"{path}.{os.getpid()}.tmp"
     try:
         staging_dir = os.path.dirname(path)
@@ -841,24 +853,65 @@ _LOCK_HELD = "held"           # Lock held by another process, caller should yiel
 _LOCK_ERROR = "error"         # OS error, proceed without lock (fail-open)
 
 
-def _acquire_triage_lock(cwd: str, session_id: str) -> tuple[str, str]:
+def _acquire_triage_lock(cwd: str, session_id: str, *, pinned=None) -> tuple[str, str]:
     """Acquire exclusive triage lock using O_CREAT|O_EXCL.
 
     Returns (lock_path, status) where status is one of:
       _LOCK_ACQUIRED: Lock obtained. Caller MUST release via _release_triage_lock().
       _LOCK_HELD: Lock held by another concurrent triage. Caller should return 0.
       _LOCK_ERROR: OS error. Caller may proceed without lock (fail-open).
+
+    Args:
+        pinned: Optional PinnedStagingDir. If provided, uses fd-pinned
+                file ops (TOCTOU-safe). Falls back to path-based ops if None.
     """
-    try:
-        staging_dir = ensure_staging_dir(cwd)
-    except (OSError, RuntimeError):
-        return "", _LOCK_ERROR  # Fail-open: staging dir unavailable
-    lock_path = os.path.join(staging_dir, ".stop_hook_lock")
+    lock_name = ".stop_hook_lock"
     lock_content = json.dumps({
         "session_id": session_id,
         "pid": os.getpid(),
         "timestamp": time.time(),
     }).encode("utf-8")
+
+    # Fast path: use pinned dir_fd for TOCTOU-safe lock
+    if pinned is not None:
+        lock_path = os.path.join(pinned.path, lock_name)
+        try:
+            fd = pinned.open_file(lock_name, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, lock_content)
+            finally:
+                os.close(fd)
+            return lock_path, _LOCK_ACQUIRED
+        except FileExistsError:
+            # Check if stale via pinned read
+            try:
+                raw = pinned.read_file(lock_name).decode("utf-8", errors="replace")
+                lock_data = json.loads(raw)
+                lock_ts = lock_data.get("timestamp", 0)
+                age = time.time() - float(lock_ts)
+                if age > 120:
+                    pinned.unlink(lock_name)
+                    try:
+                        fd = pinned.open_file(lock_name, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        try:
+                            os.write(fd, lock_content)
+                        finally:
+                            os.close(fd)
+                        return lock_path, _LOCK_ACQUIRED
+                    except (OSError, FileExistsError):
+                        return lock_path, _LOCK_HELD
+                return lock_path, _LOCK_HELD
+            except (OSError, json.JSONDecodeError, ValueError):
+                return lock_path, _LOCK_HELD
+        except OSError:
+            return lock_path, _LOCK_ERROR
+
+    # Legacy path-based lock
+    try:
+        staging_dir = ensure_staging_dir(cwd)
+    except (OSError, RuntimeError):
+        return "", _LOCK_ERROR  # Fail-open: staging dir unavailable
+    lock_path = os.path.join(staging_dir, lock_name)
 
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
@@ -892,8 +945,20 @@ def _acquire_triage_lock(cwd: str, session_id: str) -> tuple[str, str]:
         return lock_path, _LOCK_ERROR  # Fail-open: proceed without lock
 
 
-def _release_triage_lock(lock_path: str) -> None:
-    """Release the triage lock file."""
+def _release_triage_lock(lock_path: str, *, pinned=None) -> None:
+    """Release the triage lock file.
+
+    Args:
+        pinned: Optional PinnedStagingDir. If provided, uses fd-pinned
+                unlink (TOCTOU-safe). Falls back to path-based unlink if None.
+    """
+    lock_name = ".stop_hook_lock"
+    if pinned is not None:
+        try:
+            pinned.unlink(lock_name)
+        except OSError:
+            pass  # Best-effort cleanup
+        return
     try:
         os.unlink(lock_path)
     except OSError:
@@ -904,7 +969,7 @@ def _release_triage_lock(lock_path: str) -> None:
 # Fire count tracking
 # ---------------------------------------------------------------------------
 
-def _increment_fire_count(cwd: str) -> int:
+def _increment_fire_count(cwd: str, *, pinned=None) -> int:
     """Increment and return session fire count.
 
     Tracks how many times the triage hook fires per workspace (staging dir
@@ -912,7 +977,31 @@ def _increment_fire_count(cwd: str) -> int:
 
     Uses O_NOFOLLOW for symlink safety.  The read-modify-write is
     best-effort (not race-free); acceptable for an informational metric.
+
+    Args:
+        pinned: Optional PinnedStagingDir. If provided, uses fd-pinned
+                file ops (TOCTOU-safe). Falls back to path-based ops if None.
     """
+    counter_name = ".triage-fire-count"
+
+    # Fast path: use pinned dir_fd for TOCTOU-safe read/write
+    if pinned is not None:
+        try:
+            count = 0
+            try:
+                raw = pinned.read_file(counter_name, max_bytes=64).decode(
+                    "utf-8", errors="replace"
+                ).strip()
+                count = max(0, int(raw))
+            except (OSError, ValueError):
+                pass
+            count += 1
+            pinned.write_file(counter_name, str(count))
+            return count
+        except Exception:
+            return 0  # Fail-open
+
+    # Legacy path-based read/write
     try:
         staging_dir = get_staging_dir(cwd)
         counter_path = os.path.join(staging_dir, ".triage-fire-count")
@@ -1173,6 +1262,7 @@ def write_context_files(
     *,
     cwd: str = "",
     category_descriptions: dict[str, str] | None = None,
+    pinned=None,
 ) -> dict[str, str]:
     """Write per-category context files to the project staging directory.
 
@@ -1183,23 +1273,31 @@ def write_context_files(
     Files are written to /tmp/.claude-memory-staging-<hash>/context-{cat}.txt.
     Returns empty dict if staging dir creation fails (no fallback to
     predictable /tmp/ paths -- security hardening).
+
+    Args:
+        pinned: Optional PinnedStagingDir. If provided, uses fd-pinned
+                writes (TOCTOU-safe). Falls back to path-based ops if None.
     """
     lines = text.split("\n")
     context_paths: dict[str, str] = {}
 
     # Determine staging directory (deterministic /tmp/ path)
-    staging_dir = ""
-    try:
-        staging_dir = ensure_staging_dir(cwd or "")
-    except (OSError, RuntimeError):
-        return {}  # Skip all context file writes on staging failure
+    if pinned is not None:
+        staging_dir = pinned.path
+    else:
+        staging_dir = ""
+        try:
+            staging_dir = ensure_staging_dir(cwd or "")
+        except (OSError, RuntimeError):
+            return {}  # Skip all context file writes on staging failure
 
     for r in results:
         category = r["category"]
         cat_lower = category.lower()
         score = r["score"]
         snippets = r.get("snippets", [])
-        path = os.path.join(staging_dir, f"context-{cat_lower}.txt")
+        context_filename = f"context-{cat_lower}.txt"
+        path = os.path.join(staging_dir, context_filename)
 
         try:
             parts: list[str] = [
@@ -1267,22 +1365,25 @@ def write_context_files(
                 )
                 content = truncated + "\n</transcript_data>\n[Truncated: context exceeded 50KB]"
 
-            # Secure file creation: O_CREAT|O_WRONLY|O_TRUNC|O_NOFOLLOW
-            # prevents symlink attacks and sets restrictive permissions
-            fd = os.open(
-                path,
-                os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
-                0o600,
-            )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(content)
-            except Exception:
+            # Use pinned dir_fd for TOCTOU-safe write if available
+            if pinned is not None:
+                pinned.write_file(context_filename, content)
+            else:
+                # Legacy: Secure file creation with O_NOFOLLOW
+                fd = os.open(
+                    path,
+                    os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+                    0o600,
+                )
                 try:
-                    os.close(fd)
-                except OSError:
-                    pass
-                raise
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(content)
+                except Exception:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    raise
 
             context_paths[cat_lower] = path
         except OSError:
@@ -1485,181 +1586,212 @@ def _run_triage() -> int:
     _memory_root_str = os.path.join(cwd, ".claude", "memory")
     _triage_raw_config = config.get("_raw", {})
 
-    # Increment fire count (tracks total hook invocations per session)
-    _fire_count = _increment_fire_count(cwd)
-
-    # 4a. Check .stop_hook_active flag (user re-stopping signal)
-    #     Kept for backward compat: when user re-stops after a block,
-    #     this flag lets the stop through immediately.
-    if check_stop_flag(cwd):
-        emit_event("triage.idempotency_skip", {
-            "guard": "stop_flag", "fire_count": _fire_count,
-        }, hook="Stop", script="memory_triage.py",
-           session_id=session_id,
-           memory_root=_memory_root_str, config=_triage_raw_config)
-        return 0
-
-    # 4b. Session-scoped sentinel: skip if same session already handled
-    if session_id and check_sentinel_session(cwd, session_id):
-        emit_event("triage.idempotency_skip", {
-            "guard": "sentinel", "fire_count": _fire_count,
-        }, hook="Stop", script="memory_triage.py",
-           session_id=session_id,
-           memory_root=_memory_root_str, config=_triage_raw_config)
-        return 0
-
-    # 4c. Defense-in-depth: check last-save-result.json
-    if session_id and _check_save_result_guard(cwd, session_id):
-        emit_event("triage.idempotency_skip", {
-            "guard": "save_result", "fire_count": _fire_count,
-        }, hook="Stop", script="memory_triage.py",
-           session_id=session_id,
-           memory_root=_memory_root_str, config=_triage_raw_config)
-        return 0
-
-    # 5. Acquire atomic lock (TOCTOU prevention for concurrent stop hooks)
-    lock_path, lock_status = _acquire_triage_lock(cwd, session_id)
-
-    # If lock is held by another concurrent triage, yield to it.
-    # The lock holder will handle the triage; we exit cleanly.
-    if lock_status == _LOCK_HELD:
-        emit_event("triage.idempotency_skip", {
-            "guard": "lock_held", "fire_count": _fire_count,
-        }, hook="Stop", script="memory_triage.py",
-           session_id=session_id,
-           memory_root=_memory_root_str, config=_triage_raw_config)
-        return 0
-    # If lock acquisition failed due to OS error, proceed without lock
-    # (fail-open). The sentinel check above still provides idempotency.
-    # lock_status == _LOCK_ACQUIRED means we own the lock.
+    # Open a PinnedStagingDir early for TOCTOU-safe staging operations.
+    # All staging file ops (sentinel, lock, context files, triage-data.json)
+    # will use this pinned fd when available.
+    _pinned = None
+    _staging_dir = ""
+    if PinnedStagingDir is not None:
+        try:
+            _pinned = PinnedStagingDir(cwd=cwd)
+            _pinned.__enter__()
+            _staging_dir = _pinned.path
+        except (OSError, RuntimeError):
+            _pinned = None
+    else:
+        try:
+            _staging_dir = ensure_staging_dir(cwd)
+        except (OSError, RuntimeError):
+            pass
 
     try:
-        # Re-check sentinel under lock (double-check pattern)
-        if session_id and check_sentinel_session(cwd, session_id):
+        # Increment fire count (tracks total hook invocations per session)
+        _fire_count = _increment_fire_count(cwd, pinned=_pinned)
+
+        # 4a. Check .stop_hook_active flag (user re-stopping signal)
+        #     Kept for backward compat: when user re-stops after a block,
+        #     this flag lets the stop through immediately.
+        if check_stop_flag(cwd):
             emit_event("triage.idempotency_skip", {
-                "guard": "sentinel_recheck", "fire_count": _fire_count,
+                "guard": "stop_flag", "fire_count": _fire_count,
             }, hook="Stop", script="memory_triage.py",
                session_id=session_id,
                memory_root=_memory_root_str, config=_triage_raw_config)
             return 0
 
-        # 6. Read and parse transcript
-        if not transcript_path or not os.path.isfile(transcript_path):
+        # 4b. Session-scoped sentinel: skip if same session already handled
+        if session_id and check_sentinel_session(cwd, session_id):
+            emit_event("triage.idempotency_skip", {
+                "guard": "sentinel", "fire_count": _fire_count,
+            }, hook="Stop", script="memory_triage.py",
+               session_id=session_id,
+               memory_root=_memory_root_str, config=_triage_raw_config)
             return 0
 
-        # Validate transcript path is within expected scope (defense in depth)
-        resolved = os.path.realpath(transcript_path)
-        home = os.path.expanduser("~")
-        _resolved_tmp_pfx = os.path.realpath("/tmp") + "/"
-        if not (resolved.startswith(_resolved_tmp_pfx) or resolved.startswith(home + "/")):
+        # 4c. Defense-in-depth: check last-save-result.json
+        if session_id and _check_save_result_guard(cwd, session_id):
+            emit_event("triage.idempotency_skip", {
+                "guard": "save_result", "fire_count": _fire_count,
+            }, hook="Stop", script="memory_triage.py",
+               session_id=session_id,
+               memory_root=_memory_root_str, config=_triage_raw_config)
             return 0
 
-        messages = parse_transcript(resolved, config["max_messages"])
-        if not messages:
+        # 5. Acquire atomic lock (TOCTOU prevention for concurrent stop hooks)
+        lock_path, lock_status = _acquire_triage_lock(cwd, session_id, pinned=_pinned)
+
+        # If lock is held by another concurrent triage, yield to it.
+        # The lock holder will handle the triage; we exit cleanly.
+        if lock_status == _LOCK_HELD:
+            emit_event("triage.idempotency_skip", {
+                "guard": "lock_held", "fire_count": _fire_count,
+            }, hook="Stop", script="memory_triage.py",
+               session_id=session_id,
+               memory_root=_memory_root_str, config=_triage_raw_config)
             return 0
+        # If lock acquisition failed due to OS error, proceed without lock
+        # (fail-open). The sentinel check above still provides idempotency.
+        # lock_status == _LOCK_ACQUIRED means we own the lock.
 
-        # 7. Extract text and activity metrics
-        text = extract_text_content(messages)
-        metrics = extract_activity_metrics(messages)
+        try:
+            # Re-check sentinel under lock (double-check pattern)
+            if session_id and check_sentinel_session(cwd, session_id):
+                emit_event("triage.idempotency_skip", {
+                    "guard": "sentinel_recheck", "fire_count": _fire_count,
+                }, hook="Stop", script="memory_triage.py",
+                   session_id=session_id,
+                   memory_root=_memory_root_str, config=_triage_raw_config)
+                return 0
 
-        # 8. Run heuristic triage (single scoring pass via shared _score_all_raw)
-        results = run_triage(text, metrics, config["thresholds"])
+            # 6. Read and parse transcript
+            if not transcript_path or not os.path.isfile(transcript_path):
+                return 0
 
-        # All category scores for logging. Note: this re-evaluates _score_all_raw
-        # (duplicate regex pass). Acceptable since triage runs once per session stop
-        # and total overhead is <100ms. The shared _score_all_raw ensures both
-        # functions stay in sync when categories are added/changed.
-        all_scores = score_all_categories(text, metrics)
+            # Validate transcript path is within expected scope (defense in depth)
+            resolved = os.path.realpath(transcript_path)
+            home = os.path.expanduser("~")
+            _resolved_tmp_pfx = os.path.realpath("/tmp") + "/"
+            if not (resolved.startswith(_resolved_tmp_pfx) or resolved.startswith(home + "/")):
+                return 0
 
-        # Structured logging via emit_event
-        emit_event("triage.score", {
-            "text_len": len(text),
-            "exchanges": metrics.get("exchanges", 0),
-            "tool_uses": metrics.get("tool_uses", 0),
-            "fire_count": _fire_count,
-            "triggered": [
-                {"category": r["category"], "score": round(r["score"], 4)}
-                for r in results
-            ],
-            "all_scores": all_scores,
-        }, hook="Stop", script="memory_triage.py",
-           session_id=session_id,
-           duration_ms=round((time.perf_counter() - _triage_start) * 1000, 2),
-           memory_root=_memory_root_str, config=_triage_raw_config)
+            messages = parse_transcript(resolved, config["max_messages"])
+            if not messages:
+                return 0
 
-        # 9. Output decision
-        if results:
-            # Block stop: create flag and write sentinel
-            set_stop_flag(cwd)
+            # 7. Extract text and activity metrics
+            text = extract_text_content(messages)
+            metrics = extract_activity_metrics(messages)
 
-            # Write session-scoped sentinel with "pending" state
-            write_sentinel(cwd, session_id, "pending")
+            # 8. Run heuristic triage (single scoring pass via shared _score_all_raw)
+            results = run_triage(text, metrics, config["thresholds"])
 
-            # Write per-category context files for subagent consumption
-            cat_descs = config.get("category_descriptions", {})
-            context_paths = write_context_files(
-                text, metrics, results,
-                cwd=cwd,
-                category_descriptions=cat_descs,
-            )
+            # All category scores for logging. Note: this re-evaluates _score_all_raw
+            # (duplicate regex pass). Acceptable since triage runs once per session stop
+            # and total overhead is <100ms. The shared _score_all_raw ensures both
+            # functions stay in sync when categories are added/changed.
+            all_scores = score_all_categories(text, metrics)
 
-            # Build triage data and write to file (atomic)
-            parallel_config = config.get("parallel", _deep_copy_parallel_defaults())
-            triage_data = build_triage_data(
-                results, context_paths, parallel_config,
-                category_descriptions=cat_descs,
-            )
-            # Include staging_dir in triage data so SKILL.md orchestration
-            # knows where to find/write staging files
-            try:
-                _staging_dir = ensure_staging_dir(cwd)
-            except (OSError, RuntimeError):
-                _staging_dir = ""
-            if _staging_dir:
-                triage_data["staging_dir"] = _staging_dir
-            triage_data_path = None
-            if _staging_dir:
-                triage_data_path = os.path.join(_staging_dir, "triage-data.json")
-                tmp_path = None
-                try:
-                    tmp_path = f"{triage_data_path}.{os.getpid()}.tmp"
-                    fd = os.open(
-                        tmp_path,
-                        os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
-                        0o600,
-                    )
-                    try:
-                        f = os.fdopen(fd, "w", encoding="utf-8")
-                    except Exception:
-                        os.close(fd)
-                        raise
-                    with f:
-                        json.dump(triage_data, f, indent=2)
-                    os.replace(tmp_path, triage_data_path)
-                except Exception:
-                    # Clean up stale tmp on failure (catches OSError + unexpected errors)
-                    if tmp_path:
+            # Structured logging via emit_event
+            emit_event("triage.score", {
+                "text_len": len(text),
+                "exchanges": metrics.get("exchanges", 0),
+                "tool_uses": metrics.get("tool_uses", 0),
+                "fire_count": _fire_count,
+                "triggered": [
+                    {"category": r["category"], "score": round(r["score"], 4)}
+                    for r in results
+                ],
+                "all_scores": all_scores,
+            }, hook="Stop", script="memory_triage.py",
+               session_id=session_id,
+               duration_ms=round((time.perf_counter() - _triage_start) * 1000, 2),
+               memory_root=_memory_root_str, config=_triage_raw_config)
+
+            # 9. Output decision
+            if results:
+                # Block stop: create flag and write sentinel
+                set_stop_flag(cwd)
+
+                # Write session-scoped sentinel with "pending" state
+                write_sentinel(cwd, session_id, "pending", pinned=_pinned)
+
+                # Write per-category context files for subagent consumption
+                cat_descs = config.get("category_descriptions", {})
+                context_paths = write_context_files(
+                    text, metrics, results,
+                    cwd=cwd,
+                    category_descriptions=cat_descs,
+                    pinned=_pinned,
+                )
+
+                # Build triage data and write to file (atomic)
+                parallel_config = config.get("parallel", _deep_copy_parallel_defaults())
+                triage_data = build_triage_data(
+                    results, context_paths, parallel_config,
+                    category_descriptions=cat_descs,
+                )
+                # Include staging_dir in triage data so SKILL.md orchestration
+                # knows where to find/write staging files
+                if _staging_dir:
+                    triage_data["staging_dir"] = _staging_dir
+                triage_data_path = None
+                if _staging_dir:
+                    triage_data_name = "triage-data.json"
+                    triage_data_path = os.path.join(_staging_dir, triage_data_name)
+                    triage_json_content = json.dumps(triage_data, indent=2)
+
+                    if _pinned is not None:
+                        # TOCTOU-safe: atomic write via pinned dir_fd
                         try:
-                            os.unlink(tmp_path)
-                        except OSError:
-                            pass
-                    triage_data_path = None  # Fallback to inline
+                            _pinned.write_file(triage_data_name, triage_json_content)
+                        except Exception:
+                            triage_data_path = None  # Fallback to inline
+                    else:
+                        # Legacy path-based atomic write
+                        tmp_path = None
+                        try:
+                            tmp_path = f"{triage_data_path}.{os.getpid()}.tmp"
+                            fd = os.open(
+                                tmp_path,
+                                os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,
+                                0o600,
+                            )
+                            try:
+                                f = os.fdopen(fd, "w", encoding="utf-8")
+                            except Exception:
+                                os.close(fd)
+                                raise
+                            with f:
+                                f.write(triage_json_content)
+                            os.replace(tmp_path, triage_data_path)
+                        except Exception:
+                            # Clean up stale tmp on failure
+                            if tmp_path:
+                                try:
+                                    os.unlink(tmp_path)
+                                except OSError:
+                                    pass
+                            triage_data_path = None  # Fallback to inline
 
-            # Format message with structured triage data
-            message = format_block_message(
-                results, context_paths, parallel_config,
-                category_descriptions=cat_descs,
-                triage_data_path=triage_data_path,
-            )
-            print(json.dumps({"decision": "block", "reason": message}))
-            return 0
-        else:
-            # Allow stop: nothing to save
-            return 0
+                # Format message with structured triage data
+                message = format_block_message(
+                    results, context_paths, parallel_config,
+                    category_descriptions=cat_descs,
+                    triage_data_path=triage_data_path,
+                )
+                print(json.dumps({"decision": "block", "reason": message}))
+                return 0
+            else:
+                # Allow stop: nothing to save
+                return 0
+        finally:
+            # Release the lock if we acquired it (V-R2 finding)
+            if lock_status == _LOCK_ACQUIRED:
+                _release_triage_lock(lock_path, pinned=_pinned)
     finally:
-        # Release the lock if we acquired it (V-R2 finding)
-        if lock_status == _LOCK_ACQUIRED:
-            _release_triage_lock(lock_path)
+        # Close the pinned staging dir fd
+        if _pinned is not None:
+            _pinned.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

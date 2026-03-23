@@ -53,8 +53,14 @@ from memory_write import (  # noqa: E402
 from memory_staging_utils import (  # noqa: E402
     STAGING_DIR_PREFIX as _STAGING_PREFIX,
     RESOLVED_TMP_PREFIX as _RESOLVED_TMP_PREFIX,
+    _LEGACY_STAGING_PREFIX,
     validate_staging_dir,
 )
+
+try:
+    from memory_staging_utils import PinnedStagingDir  # noqa: E402
+except ImportError:
+    PinnedStagingDir = None
 
 
 def _ensure_staging_dir_safe(staging_dir: str) -> None:
@@ -92,6 +98,7 @@ def validate_input_path(path: str) -> str | None:
 
     in_staging = (
         resolved.startswith(_STAGING_PREFIX)
+        or resolved.startswith(_LEGACY_STAGING_PREFIX)
         or "/.claude/memory/.staging/" in resolved
     )
     in_tmp = resolved.startswith(_RESOLVED_TMP_PREFIX)
@@ -250,12 +257,14 @@ def write_draft(data: dict, category: str, root: str) -> str:
 
     If root looks like a /tmp/.claude-memory-staging-* path, write directly there.
     Otherwise, use root/.staging/ (legacy behavior).
+
+    When PinnedStagingDir is available, uses fd-pinned writes to eliminate
+    TOCTOU windows between validation and file creation.
     """
-    if root.startswith(_STAGING_PREFIX):
+    if root.startswith(_STAGING_PREFIX) or root.startswith(_LEGACY_STAGING_PREFIX):
         staging_dir = root
     else:
         staging_dir = os.path.join(root, ".staging")
-    _ensure_staging_dir_safe(staging_dir)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     pid = os.getpid()
@@ -263,7 +272,14 @@ def write_draft(data: dict, category: str, root: str) -> str:
     draft_path = os.path.join(staging_dir, filename)
 
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    # Use O_NOFOLLOW to prevent symlink attacks on staging files
+
+    if PinnedStagingDir is not None:
+        with PinnedStagingDir(path=staging_dir) as pinned:
+            pinned.write_file(filename, content)
+        return draft_path
+
+    # Fallback: path-based validation + O_NOFOLLOW write
+    _ensure_staging_dir_safe(staging_dir)
     fd = os.open(
         draft_path,
         os.O_CREAT | os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW,

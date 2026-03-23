@@ -44,7 +44,7 @@ from memory_triage import (
     FLAG_TTL_SECONDS,
     _deep_copy_parallel_defaults,
 )
-from memory_staging_utils import get_staging_dir
+from memory_staging_utils import get_staging_dir, STAGING_DIR_PREFIX
 
 
 # ---------------------------------------------------------------------------
@@ -1128,10 +1128,10 @@ class TestEdgeCases:
 
 
 class TestStagingPaths:
-    """Tests for R2: context files written to /tmp/.claude-memory-staging-<hash>/ when cwd is provided."""
+    """Tests for R2: context files written to staging dir when cwd is provided."""
 
     def test_context_files_use_staging_dir_when_cwd_provided(self, tmp_path):
-        """When cwd is provided, context files should go to /tmp/.claude-memory-staging-<hash>/."""
+        """When cwd is provided, context files should go to STAGING_DIR_PREFIX<hash>/."""
         text = "We decided to use PostgreSQL because of JSONB support."
         metrics = {"tool_uses": 0, "distinct_tools": 0, "exchanges": 2}
         results = [
@@ -1145,12 +1145,12 @@ class TestStagingPaths:
 
         assert "decision" in context_paths
         path = context_paths["decision"]
-        assert path.startswith("/tmp/.claude-memory-staging-"), f"Path {path} should start with /tmp/.claude-memory-staging-"
+        assert path.startswith(STAGING_DIR_PREFIX), f"Path {path} should start with {STAGING_DIR_PREFIX}"
         assert path.endswith("context-decision.txt")
         assert os.path.isfile(path)
 
-    def test_context_files_fallback_to_tmp_when_no_cwd(self):
-        """When cwd is empty, context files should fall back to /tmp/."""
+    def test_context_files_fallback_when_no_cwd(self):
+        """When cwd is empty, context files should use staging dir based on os.getcwd()."""
         text = "We decided to use PostgreSQL because of JSONB support."
         metrics = {"tool_uses": 0, "distinct_tools": 0, "exchanges": 2}
         results = [
@@ -1160,13 +1160,11 @@ class TestStagingPaths:
         context_paths = write_context_files(text, metrics, results)
 
         assert "decision" in context_paths
-        assert context_paths["decision"].startswith("/tmp/")
+        assert context_paths["decision"].startswith(STAGING_DIR_PREFIX)
 
     def test_staging_dir_created_if_absent(self, tmp_path):
-        """The /tmp/ staging directory should be created if it doesn't exist."""
-        import hashlib
-        project_hash = hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(str(tmp_path))}".encode()).hexdigest()[:12]
-        staging_dir = Path(f"/tmp/.claude-memory-staging-{project_hash}")
+        """The staging directory should be created if it doesn't exist."""
+        staging_dir = Path(get_staging_dir(str(tmp_path)))
 
         text = "We decided to use PostgreSQL because it supports JSONB."
         metrics = {"tool_uses": 0, "distinct_tools": 0, "exchanges": 2}
@@ -1194,7 +1192,7 @@ class TestStagingPaths:
         )
 
         for cat, path in context_paths.items():
-            assert path.startswith("/tmp/.claude-memory-staging-"), f"Category {cat} path {path} not in staging"
+            assert path.startswith(STAGING_DIR_PREFIX), f"Category {cat} path {path} not in staging (expected prefix {STAGING_DIR_PREFIX})"
             assert os.path.isfile(path)
 
     def test_staging_content_matches_tmp_content(self, tmp_path):
@@ -1742,10 +1740,8 @@ class TestRunTriageWritesTriageDataFile:
         response = json.loads(stdout_text)
         assert response["decision"] == "block"
 
-        # Check that triage-data.json was written to /tmp/ staging dir
-        import hashlib
-        project_hash = hashlib.sha256(f"{os.geteuid()}:{os.path.realpath(str(proj))}".encode()).hexdigest()[:12]
-        triage_data_path = Path(f"/tmp/.claude-memory-staging-{project_hash}/triage-data.json")
+        # Check that triage-data.json was written to staging dir
+        triage_data_path = Path(get_staging_dir(str(proj))) / "triage-data.json"
         assert triage_data_path.exists(), f"triage-data.json should exist at {triage_data_path}"
 
         # Verify it's valid JSON with expected structure
@@ -1780,18 +1776,27 @@ class TestRunTriageWritesTriageDataFile:
         ]
 
         captured_out = io.StringIO()
-        # Mock os.open to fail only for triage-data.json.*.tmp writes
+        # Mock PinnedStagingDir.write_file to fail for triage-data.json,
+        # and mock os.open for the legacy path fallback.
         original_os_open = os.open
-        def mock_os_open(path, flags, mode=0o777):
+        def mock_os_open(path, flags, mode=0o777, **kwargs):
             if isinstance(path, str) and "triage-data.json." in path and path.endswith(".tmp"):
                 raise OSError("Simulated write failure")
-            return original_os_open(path, flags, mode)
+            return original_os_open(path, flags, mode, **kwargs)
+
+        from memory_staging_utils import PinnedStagingDir
+        original_write_file = PinnedStagingDir.write_file
+        def mock_pinned_write(self, name, content):
+            if "triage-data.json" in name:
+                raise OSError("Simulated write failure")
+            return original_write_file(self, name, content)
 
         with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
              mock.patch("sys.stdout", captured_out), \
              mock.patch("memory_triage.check_stop_flag", return_value=False), \
              mock.patch("memory_triage.run_triage", return_value=forced_results), \
-             mock.patch("memory_triage.os.open", side_effect=mock_os_open):
+             mock.patch("memory_triage.os.open", side_effect=mock_os_open), \
+             mock.patch.object(PinnedStagingDir, "write_file", mock_pinned_write):
             exit_code = _run_triage()
 
         assert exit_code == 0
@@ -1826,16 +1831,19 @@ class TestRunTriageWritesTriageDataFile:
 
         captured_out = io.StringIO()
         original_replace = os.replace
-        def mock_replace(src, dst):
+        def mock_replace(src, dst, **kwargs):
             if isinstance(dst, str) and "triage-data.json" in dst and ".tmp" not in dst:
                 raise OSError("Simulated replace failure")
-            return original_replace(src, dst)
+            return original_replace(src, dst, **kwargs)
 
+        # Disable PinnedStagingDir to force path-based fallback, where
+        # os.replace mock can intercept the triage-data.json write.
         with mock.patch("memory_triage.read_stdin", return_value=hook_input), \
              mock.patch("sys.stdout", captured_out), \
              mock.patch("memory_triage.check_stop_flag", return_value=False), \
              mock.patch("memory_triage.run_triage", return_value=forced_results), \
-             mock.patch("memory_triage.os.replace", side_effect=mock_replace):
+             mock.patch("memory_triage.os.replace", side_effect=mock_replace), \
+             mock.patch("memory_triage.PinnedStagingDir", None):
             exit_code = _run_triage()
 
         assert exit_code == 0
@@ -2782,85 +2790,46 @@ class TestStopHookRefireFix:
 
 
 class TestTriageFallbackStagingDir:
-    """Test that the ImportError fallback for memory_staging_utils is hardened.
+    """Test that the ImportError fallback for memory_staging_utils degrades safely.
 
-    The triage module has an inline fallback `ensure_staging_dir` that
-    activates when `memory_staging_utils` cannot be imported. This fallback
-    must also reject symlinks and foreign-owned directories (A6 finding).
+    When memory_staging_utils cannot be imported, the triage module falls back
+    to no-op functions that return empty strings. This causes staging operations
+    to silently degrade rather than crash. The hardened validation (symlink/
+    ownership checks) lives in memory_staging_utils itself, not the fallback.
     """
 
-    def test_fallback_ensure_staging_dir_rejects_symlink(self, tmp_path):
-        """The inline fallback ensure_staging_dir should reject symlinks.
+    def test_fallback_returns_empty_string(self):
+        """The fallback ensure_staging_dir should return empty string (no staging).
 
-        Simulates a partial deploy where memory_staging_utils is unavailable
-        by extracting the fallback function from the triage module source.
+        Simulates a partial deploy where memory_staging_utils is unavailable.
+        The fallback degrades gracefully rather than attempting /tmp/ operations.
         """
-        import importlib
-        import types
-
-        # Read the fallback code from the triage module source
-        # We test the actual inline fallback by creating a fresh module
-        # with memory_staging_utils blocked from import
-        triage_path = Path(SCRIPTS_DIR) / "memory_triage.py"
-        source = triage_path.read_text(encoding="utf-8")
-
-        # Create a symlink target and symlink at a known staging path
-        target = tmp_path / "attacker_dir"
-        target.mkdir()
-        staging_path = f"/tmp/.claude-memory-staging-testfallback"
+        saved = sys.modules.get("memory_staging_utils")
+        sys.modules["memory_staging_utils"] = None  # Block import
         try:
-            if os.path.islink(staging_path) or os.path.exists(staging_path):
-                if os.path.islink(staging_path):
-                    os.unlink(staging_path)
-                elif os.path.isdir(staging_path):
-                    os.rmdir(staging_path)
-            os.symlink(str(target), staging_path)
+            if "memory_triage" in sys.modules:
+                del sys.modules["memory_triage"]
+            import memory_triage as mt_fallback
 
-            # Force the fallback by temporarily hiding memory_staging_utils
-            saved = sys.modules.get("memory_staging_utils")
-            sys.modules["memory_staging_utils"] = None  # Block import
-            try:
-                # Re-import memory_triage to trigger the fallback path
-                if "memory_triage" in sys.modules:
-                    del sys.modules["memory_triage"]
-                # Need to suppress memory_logger too if it fails
-                import memory_triage as mt_fallback
-
-                # The module's ensure_staging_dir should be the fallback
-                # Call it with a cwd that maps to our known staging path
-                # We mock get_staging_dir to return our controlled path
-                with mock.patch.object(mt_fallback, "get_staging_dir", return_value=staging_path):
-                    with pytest.raises(RuntimeError, match="symlink"):
-                        mt_fallback.ensure_staging_dir("")
-            finally:
-                # Restore original module
-                if saved is not None:
-                    sys.modules["memory_staging_utils"] = saved
-                elif "memory_staging_utils" in sys.modules:
-                    del sys.modules["memory_staging_utils"]
-                # Re-import to restore clean state
-                if "memory_triage" in sys.modules:
-                    del sys.modules["memory_triage"]
-                import memory_triage  # noqa: F811 - reimport to restore
+            result = mt_fallback.ensure_staging_dir("")
+            assert result == "", (
+                f"Fallback ensure_staging_dir should return empty string, got {result!r}"
+            )
         finally:
-            if os.path.islink(staging_path):
-                os.unlink(staging_path)
+            if saved is not None:
+                sys.modules["memory_staging_utils"] = saved
+            elif "memory_staging_utils" in sys.modules:
+                del sys.modules["memory_staging_utils"]
+            if "memory_triage" in sys.modules:
+                del sys.modules["memory_triage"]
+            import memory_triage  # noqa: F811 - reimport to restore
 
-    def test_fallback_ensure_staging_dir_rejects_foreign_uid(self):
-        """The fallback should reject directories owned by a different user.
+    def test_fallback_get_staging_dir_returns_empty(self):
+        """The fallback get_staging_dir should return empty string.
 
-        Uses mocking to simulate a directory owned by UID 9999.
+        This ensures no /tmp/ paths are generated when the staging module
+        is unavailable, eliminating the /tmp/ attack class in the fallback.
         """
-        import stat as stat_module
-
-        staging_path = "/tmp/.claude-memory-staging-testforeign"
-
-        # Create a mock stat result for a foreign-owned directory
-        mock_stat_result = mock.MagicMock()
-        mock_stat_result.st_mode = stat_module.S_IFDIR | 0o700
-        mock_stat_result.st_uid = 9999
-
-        # Force the fallback by hiding memory_staging_utils
         saved = sys.modules.get("memory_staging_utils")
         sys.modules["memory_staging_utils"] = None
         try:
@@ -2868,12 +2837,32 @@ class TestTriageFallbackStagingDir:
                 del sys.modules["memory_triage"]
             import memory_triage as mt_fallback
 
-            with mock.patch.object(mt_fallback, "get_staging_dir", return_value=staging_path):
-                with mock.patch("os.mkdir", side_effect=FileExistsError):
-                    with mock.patch("os.lstat", return_value=mock_stat_result):
-                        with mock.patch("os.geteuid", return_value=1000):
-                            with pytest.raises(RuntimeError, match="owned by uid 9999"):
-                                mt_fallback.ensure_staging_dir("")
+            result = mt_fallback.get_staging_dir("/some/project")
+            assert result == "", (
+                f"Fallback get_staging_dir should return empty string, got {result!r}"
+            )
+        finally:
+            if saved is not None:
+                sys.modules["memory_staging_utils"] = saved
+            elif "memory_staging_utils" in sys.modules:
+                del sys.modules["memory_staging_utils"]
+            if "memory_triage" in sys.modules:
+                del sys.modules["memory_triage"]
+            import memory_triage  # noqa: F811 - reimport to restore
+
+    def test_fallback_pinned_staging_dir_is_none(self):
+        """The fallback PinnedStagingDir should be None.
+
+        Downstream code checks for None before using PinnedStagingDir.
+        """
+        saved = sys.modules.get("memory_staging_utils")
+        sys.modules["memory_staging_utils"] = None
+        try:
+            if "memory_triage" in sys.modules:
+                del sys.modules["memory_triage"]
+            import memory_triage as mt_fallback
+
+            assert mt_fallback.PinnedStagingDir is None
         finally:
             if saved is not None:
                 sys.modules["memory_staging_utils"] = saved
@@ -3091,14 +3080,21 @@ class TestTriageFallbackPaths:
         ]
 
         captured_out = io.StringIO()
-        # ensure_staging_dir raises RuntimeError on every call (both in
-        # write_context_files and in the triage-data section of _run_triage).
-        # No fallback to get_staging_dir() -- _staging_dir is set to "" and
-        # the triage-data.json write is skipped entirely.
+        # Both PinnedStagingDir and ensure_staging_dir must fail to test
+        # the fallback chain. PinnedStagingDir.__enter__() calls
+        # validate_staging_dir() internally, so we mock the class itself.
+        mock_pinned_cls = mock.MagicMock()
+        mock_pinned_instance = mock.MagicMock()
+        mock_pinned_cls.return_value = mock_pinned_instance
+        mock_pinned_instance.__enter__ = mock.Mock(
+            side_effect=RuntimeError("Staging dir is a symlink (test)"))
+        mock_pinned_instance.__exit__ = mock.Mock(return_value=False)
+
         with mock.patch.object(mt, "read_stdin", return_value=hook_input), \
              mock.patch("sys.stdout", captured_out), \
              mock.patch.object(mt, "check_stop_flag", return_value=False), \
              mock.patch.object(mt, "run_triage", return_value=forced_results), \
+             mock.patch.object(mt, "PinnedStagingDir", mock_pinned_cls), \
              mock.patch.object(mt, "ensure_staging_dir",
                                side_effect=RuntimeError("Staging dir is a symlink (test)")):
             exit_code = mt._run_triage()
@@ -3270,18 +3266,27 @@ class TestStagingHardeningPhase1:
         # Track all file write attempts via os.open
         write_attempts = []
         original_os_open = os.open
-        def tracking_os_open(path, flags, mode=0o777):
+        def tracking_os_open(path, flags, mode=0o777, **kwargs):
             write_attempts.append(str(path))
-            return original_os_open(path, flags, mode)
+            return original_os_open(path, flags, mode, **kwargs)
 
         # Get the path that get_staging_dir would return (the rejected path)
         rejected_path = get_staging_dir(str(proj))
+
+        # Mock PinnedStagingDir to fail (simulates staging dir compromise)
+        mock_pinned_cls = mock.MagicMock()
+        mock_pinned_instance = mock.MagicMock()
+        mock_pinned_cls.return_value = mock_pinned_instance
+        mock_pinned_instance.__enter__ = mock.Mock(
+            side_effect=RuntimeError("Staging dir is a symlink (test)"))
+        mock_pinned_instance.__exit__ = mock.Mock(return_value=False)
 
         captured_out = io.StringIO()
         with mock.patch.object(mt, "read_stdin", return_value=hook_input), \
              mock.patch("sys.stdout", captured_out), \
              mock.patch.object(mt, "check_stop_flag", return_value=False), \
              mock.patch.object(mt, "run_triage", return_value=forced_results), \
+             mock.patch.object(mt, "PinnedStagingDir", mock_pinned_cls), \
              mock.patch.object(mt, "ensure_staging_dir",
                                side_effect=RuntimeError("Staging dir is a symlink (test)")), \
              mock.patch.object(mt.os, "open", side_effect=tracking_os_open):

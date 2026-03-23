@@ -34,5 +34,8 @@ nul
 .claude/.stop_hook_active
 .claude/worktrees/
 
+# Track C evidence runs (Docker test outputs)
+evidence/track-c/runs/
+
 # Memory index is a derived artifact (rebuilt on demand from JSON source files)
 .claude/memory/index.md

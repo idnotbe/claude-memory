@@ -2,6 +2,8 @@
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -12,6 +14,40 @@ import pytest
 SCRIPTS_DIR = str(Path(__file__).parent.parent / "hooks" / "scripts")
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
+
+
+# ---------------------------------------------------------------------------
+# Claude CLI auth detection (shared by S1/S5 integration tests)
+# ---------------------------------------------------------------------------
+
+def claude_authenticated():
+    """Check if claude CLI is available and authenticated (API key or OAuth).
+
+    Supports both ANTHROPIC_API_KEY env var and OAuth (Max/Pro plan) via
+    ``claude auth status --json``. No credentials are loaded into process
+    memory -- only the sanitized loggedIn boolean is checked.
+    """
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return True
+    if not shutil.which("claude"):
+        return False
+    try:
+        result = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return False
+        data = json.loads(result.stdout)
+        return data.get("loggedIn") is True
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return False
+
+
+# Cache the result at import time so each test file pays the cost only once.
+CLAUDE_AUTHENTICATED = claude_authenticated()
 
 
 # ---------------------------------------------------------------------------

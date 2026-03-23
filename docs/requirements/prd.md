@@ -122,54 +122,44 @@ normalized = min(1.0, raw_score / denominator)
 ```
 Where `primary_weight` ~ 0.2-0.35, `boosted_weight` ~ 0.5-0.6, caps on both match types.
 
-#### 3.1.2 Five-Phase Save Orchestration (SKILL.md)
+#### 3.1.2 Three-Phase Save Orchestration (SKILL.md v6)
 
 **Pre-Phase: Staging Cleanup.**
 On manual `/memory:save` (no triage data present), clean stale staging files from previous failed sessions before proceeding.
 
-**Phase 0: Parse Triage Output.**
+**SETUP (deterministic).**
 - Clean stale intent files.
 - Extract `triage-data.json` path from `<triage_data_file>` tag (fallback: inline `<triage_data>` JSON).
-- Read config for parallel processing settings.
+- Read config for parallel processing settings and `architecture.simplified_flow` flag.
 
-**Phase 1: Parallel Intent Drafting.**
+**Phase 1: DRAFT (LLM, per-category Agent subagents).**
 For each triggered category, spawn an Agent subagent using the `memory-drafter` agent file:
 - Agent has `tools: Read, Write` only (no Bash -- structurally prevents Guardian conflicts).
 - Agent reads its context file and writes an intent JSON (SAVE or NOOP).
 - All category subagents spawn in PARALLEL.
 - Model selection is per-category (configurable via `triage.parallel.category_models`).
+- M1 fallback: if ALL drafters fail, write `.triage-pending.json` for retrieval hook detection.
 
 Intent JSON formats:
 - **SAVE:** `{ category, new_info_summary, intended_action?, lifecycle_hints?, partial_content: { title, tags, confidence, related_files?, change_summary, content } }`
 - **NOOP:** `{ category, action: "noop", noop_reason }`
 
-**Phase 1.5: Deterministic Execution (Main Agent).**
-No LLM judgment -- all decisions follow mechanical rules:
+**Phase 1.5: VERIFY (optional, disabled by default).**
+When `triage.parallel.verification_enabled: true`:
+- Orchestrator runs `--action prepare` (steps 1-6: collect, candidate, CUD, draft, manifest).
+- Risk-eligible categories (decision/constraint, DELETE actions, low-confidence) are verified.
+- Verifiers inspect assembled draft JSON for accuracy and hallucination.
+- `BLOCK` verdicts exclude categories from the subsequent `--action commit` call.
 
-1. **Collect intents:** Read all `.staging/intent-<cat>.json` files. Skip NOOPs.
-2. **Candidate selection:** Run `memory_candidate.py` for each SAVE intent (parallel Bash calls). Scores new info against existing index entries. Returns structural CUD recommendation.
-3. **CUD Resolution:** Combine L1 (candidate.py `structural_cud`) with L2 (intent's `intended_action`) using the CUD Verification Rules table:
-   - CREATE+CREATE = CREATE, UPDATE_OR_DELETE+UPDATE = UPDATE, etc.
-   - Mechanical trumps LLM (vetoes are absolute).
-   - Safety defaults: UPDATE over DELETE, UPDATE over CREATE, NOOP for contradictions.
-4. **Draft assembly:** Run `memory_draft.py` for each CREATE/UPDATE (parallel Bash calls). Assembles complete schema-valid JSON from partial input + existing data.
-5. **Handle DELETE:** Write retire JSON for DELETE actions.
-
-**Phase 2: Content Verification.**
-For each draft, spawn a Task subagent (verification_model, default: sonnet):
-- Reads draft JSON and original context file.
-- Checks content quality: accuracy, hallucination, completeness, tag relevance.
-- Hallucination = BLOCK. Minor quality concern = ADVISORY (proceed).
-- All verification subagents spawn in PARALLEL.
-
-**Phase 3: Save (Subagent).**
-One foreground Task subagent (model: haiku) executes all memory_write.py commands:
-- Builds command list from resolved actions + verification results.
-- Combines all commands into a single Bash call (minimizes console noise).
-- Runs `memory_enforce.py` for session_summary creates.
-- Cleans up staging files on success.
-- Writes result file (`last-save-result.json`) for next-session confirmation.
-- On failure: writes `.triage-pending.json` sentinel for retry notification.
+**Phase 2: COMMIT (deterministic, single Python subprocess).**
+Single call: `python3 memory_orchestrate.py --staging-dir <dir> --action run --memory-root <root>`.
+The orchestrator performs all deterministic steps as subprocesses:
+1. Collect intents, candidate selection (with OCC hash capture), CUD resolution.
+2. Draft assembly via `memory_draft.py`, target path generation for CREATEs.
+3. Save execution via `memory_write.py` (with `--skip-auto-enforce`).
+4. Enforcement (`memory_enforce.py`) for session_summary creates.
+5. Result file writing (`last-save-result.json`) for next-session confirmation.
+6. Staging cleanup on success; `.triage-pending.json` + sentinel update on failure.
 
 #### 3.1.3 CUD Verification Rules Table
 
@@ -525,7 +515,7 @@ Restores retired memory to active:
 - **Silent auto-capture:** Memory operations during auto-capture should produce no visible output to the user except a brief save confirmation in the next session.
 - **No approval popups:** Write guard auto-approves staging file writes. All memory operations go through approved tool paths (Bash for `memory_write.py` scripts).
 - **Guardian compatibility:** The `memory-drafter` agent uses `tools: Read, Write` only (no Bash) to structurally prevent Guardian bash_guardian.py conflicts. Staging writes use the Write tool (not Bash heredoc) to avoid Guardian false positives. Path strings are constructed at runtime to avoid static pattern matching.
-- **Consolidated Bash calls:** Phase 3 save subagent combines all commands into a single Bash call with `;` separators.
+- **Deterministic save execution:** Phase 2 COMMIT runs `memory_orchestrate.py` as a single Python subprocess, which is invisible to Guardian. No haiku saver subagent or heredoc Bash commands needed.
 - **Progressive disclosure:** Search results show compact summaries first; full JSON only on explicit request.
 
 ### 4.2 Performance
@@ -540,9 +530,10 @@ Restores retired memory to active:
 | PostToolUse:Write (validate) | 10s |
 
 **Subagent costs:**
-- Each triggered category spawns 1 drafting subagent (Phase 1) + 1 verification subagent (Phase 2).
-- Worst case: all 6 categories = 12 subagent calls (rare).
-- Save execution: 1 haiku Task subagent.
+- Each triggered category spawns 1 drafting subagent (Phase 1 DRAFT). Only subagent type used.
+- Worst case: all 6 categories = 6 drafting subagent calls (rare).
+- When optional verification is enabled: risk-eligible categories (decision/constraint, DELETE, low-confidence) spawn additional verification subagents.
+- Save execution: deterministic Python subprocess (no subagent needed).
 - Per-category model selection optimizes cost (haiku for simple categories, sonnet for complex).
 
 **Search performance:**

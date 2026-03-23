@@ -12,9 +12,19 @@ import os
 import re
 import sys
 
-# Resolved /tmp/ prefix for cross-platform compatibility (macOS: /tmp -> /private/tmp)
-_RESOLVED_TMP = os.path.realpath("/tmp")
-_RESOLVED_TMP_PREFIX = _RESOLVED_TMP + "/"
+# Import staging constants from shared module; fallback for partial deploys
+try:
+    _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if _scripts_dir not in sys.path:
+        sys.path.insert(0, _scripts_dir)
+    from memory_staging_utils import STAGING_DIR_PREFIX, RESOLVED_TMP_PREFIX, is_staging_path, _LEGACY_STAGING_PREFIX
+except ImportError:
+    _RESOLVED_TMP = os.path.realpath("/tmp")
+    STAGING_DIR_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
+    _LEGACY_STAGING_PREFIX = STAGING_DIR_PREFIX
+    RESOLVED_TMP_PREFIX = _RESOLVED_TMP + "/"
+    def is_staging_path(path):
+        return path.startswith(STAGING_DIR_PREFIX)
 
 # Build the path marker at runtime to avoid static pattern matching
 _DOT_CLAUDE = ".clau" + "de"
@@ -86,7 +96,7 @@ def main():
     # Accept /tmp/.memory-write-pending*.json, /tmp/.memory-draft-*.json,
     # and /tmp/.memory-triage-context-*.txt (parallel triage temp files)
     basename = os.path.basename(resolved)
-    if resolved.startswith(_RESOLVED_TMP_PREFIX):
+    if resolved.startswith(RESOLVED_TMP_PREFIX):
         if (basename.startswith(".memory-write-pending") and basename.endswith(".json")):
             sys.exit(0)
         if (basename.startswith(".memory-draft-") and basename.endswith(".json")):
@@ -94,17 +104,18 @@ def main():
         if (basename.startswith(".memory-triage-context-") and basename.endswith(".txt")):
             sys.exit(0)
 
-    # Auto-approve writes to /tmp/.claude-memory-staging-* (new staging path).
+    # Auto-approve writes to staging directories (both new XDG and legacy /tmp/).
     # These are temporary working files used by subagents during memory consolidation.
-    # Moved from .claude/memory/.staging/ to /tmp/ to avoid Claude Code's
-    # hardcoded .claude/ protected directory prompts.
-    _TMP_STAGING_PREFIX = _RESOLVED_TMP + "/.claude-memory-staging-"
-
     # S2 defense: Detect symlink-compromised staging paths.
     # If the unresolved file_path looks like staging but resolves elsewhere,
     # the staging directory is likely a symlink — deny to prevent deceptive prompts.
     normalized_input = file_path.replace(os.sep, "/")
-    if normalized_input.startswith(_TMP_STAGING_PREFIX) and not resolved.startswith(_TMP_STAGING_PREFIX):
+    _input_looks_staging = (
+        normalized_input.startswith(STAGING_DIR_PREFIX)
+        or normalized_input.startswith(_LEGACY_STAGING_PREFIX)
+    )
+    _resolved_is_staging = is_staging_path(resolved)
+    if _input_looks_staging and not _resolved_is_staging:
         _log("guard.write_deny_staging_symlink", {
             "input_path": os.path.basename(file_path),
             "resolved_prefix": resolved[:50],
@@ -115,13 +126,13 @@ def main():
                 "permissionDecision": "deny",
                 "permissionDecisionReason": (
                     "Staging directory appears to be a symlink — resolved path "
-                    "does not match expected /tmp/ staging prefix. Aborting."
+                    "does not match expected staging prefix. Aborting."
                 ),
             }
         }, sys.stdout)
         sys.exit(0)
 
-    if resolved.startswith(_TMP_STAGING_PREFIX):
+    if _resolved_is_staging:
         basename = os.path.basename(resolved)
 
         # Gate 1: Extension whitelist — only .json and .txt
@@ -133,9 +144,11 @@ def main():
             sys.exit(0)  # Unknown filename, fall through to default prompt
 
         # Gate 3: Ensure path is directly in staging dir (no subdirectories)
-        # The staging dir is /tmp/.claude-memory-staging-<hash>/
-        # Extract the staging dir portion and verify no extra path components
-        after_prefix = resolved[len(_TMP_STAGING_PREFIX):]
+        # Determine which prefix matched and verify no extra path components
+        if resolved.startswith(STAGING_DIR_PREFIX):
+            after_prefix = resolved[len(STAGING_DIR_PREFIX):]
+        else:
+            after_prefix = resolved[len(_LEGACY_STAGING_PREFIX):]
         slash_count = after_prefix.count("/")
         if slash_count > 1:
             sys.exit(0)  # Subdirectory traversal, fall through to default prompt
