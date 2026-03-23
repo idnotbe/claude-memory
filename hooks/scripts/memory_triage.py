@@ -1422,11 +1422,16 @@ def build_triage_data(
     context_paths: dict[str, str],
     parallel_config: dict,
     category_descriptions: dict[str, str] | None = None,
+    triage_start_ts: float | None = None,
 ) -> dict:
     """Build structured triage data dict from results.
 
     Extracted from format_block_message() so _run_triage() can write
     the data to a file before formatting the message.
+
+    Args:
+        triage_start_ts: Wall-clock time.time() value captured at triage start.
+            Included in output for downstream save-flow timing (Phase 2 observability).
     """
     triage_categories = []
     for r in results:
@@ -1445,7 +1450,7 @@ def build_triage_data(
             entry["context_file"] = ctx_path
         triage_categories.append(entry)
 
-    return {
+    data = {
         "categories": triage_categories,
         "parallel_config": {
             "enabled": parallel_config.get("enabled", True),
@@ -1464,6 +1469,15 @@ def build_triage_data(
         },
     }
 
+    # Include wall-clock triage start timestamp for save-flow timing
+    if triage_start_ts is not None:
+        try:
+            data["triage_start_ts"] = float(triage_start_ts)
+        except (TypeError, ValueError):
+            pass  # fail-open: skip if not a valid float
+
+    return data
+
 
 def format_block_message(
     results: list[dict],
@@ -1472,6 +1486,7 @@ def format_block_message(
     *,
     category_descriptions: dict[str, str] | None = None,
     triage_data_path: str | None = None,
+    triage_start_ts: float | None = None,
 ) -> str:
     """Format the block message for stdout JSON response (block stop).
 
@@ -1516,6 +1531,7 @@ def format_block_message(
         triage_data = build_triage_data(
             results, context_paths, parallel_config,
             category_descriptions=category_descriptions,
+            triage_start_ts=triage_start_ts,
         )
         # Compact JSON (no indent) to reduce visible noise while keeping
         # the fallback functional — agents cannot read stderr from hooks.
@@ -1553,6 +1569,7 @@ def main() -> int:
 def _run_triage() -> int:
     """Internal triage logic, separated for testability."""
     _triage_start = time.perf_counter()
+    _triage_wall_start = time.time()  # wall-clock for save-flow timing
 
     # 1. Read stdin JSON
     raw_input = read_stdin(timeout_seconds=2.0)
@@ -1729,6 +1746,7 @@ def _run_triage() -> int:
                 triage_data = build_triage_data(
                     results, context_paths, parallel_config,
                     category_descriptions=cat_descs,
+                    triage_start_ts=_triage_wall_start,
                 )
                 # Include staging_dir in triage data so SKILL.md orchestration
                 # knows where to find/write staging files
@@ -1778,6 +1796,7 @@ def _run_triage() -> int:
                     results, context_paths, parallel_config,
                     category_descriptions=cat_descs,
                     triage_data_path=triage_data_path,
+                    triage_start_ts=_triage_wall_start,
                 )
                 print(json.dumps({"decision": "block", "reason": message}))
                 return 0

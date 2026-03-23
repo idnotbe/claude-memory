@@ -657,7 +657,7 @@ def cleanup_intents(staging_dir: str) -> dict:
     return {"status": "ok", "deleted": deleted, "errors": errors}
 
 
-_SAVE_RESULT_ALLOWED_KEYS = {"saved_at", "categories", "titles", "errors", "session_id"}
+_SAVE_RESULT_ALLOWED_KEYS = {"saved_at", "categories", "titles", "errors", "session_id", "phase_timing"}
 _SAVE_RESULT_MAX_SIZE = 10240  # 10KB
 _SAVE_RESULT_MAX_ITEMS = 10
 _SAVE_RESULT_MAX_TITLE_LEN = 120
@@ -732,6 +732,11 @@ def write_save_result(staging_dir: str, result_json: str) -> dict:
     sid = data.get("session_id")
     if sid is not None and not isinstance(sid, str):
         return {"status": "error", "message": "session_id must be a string or null"}
+
+    # phase_timing: must be a dict or None/absent (Phase 2 observability)
+    pt = data.get("phase_timing")
+    if pt is not None and not isinstance(pt, dict):
+        return {"status": "error", "message": "phase_timing must be a dict or null"}
 
     # Validate staging directory (symlink/ownership defense for /tmp/ paths)
     try:

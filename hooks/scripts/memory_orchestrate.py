@@ -34,6 +34,7 @@ import hashlib
 import json
 import re
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,6 +42,16 @@ try:
     from memory_staging_utils import PinnedStagingDir
 except ImportError:
     PinnedStagingDir = None
+
+# Lazy import: logging module may not exist during partial deployments
+try:
+    from memory_logger import emit_event, emit_error, parse_logging_config
+except (ImportError, SyntaxError) as e:
+    if isinstance(e, ImportError) and getattr(e, 'name', None) != 'memory_logger':
+        raise  # Transitive dependency failure -- fail-fast
+    def emit_event(*args, **kwargs): pass  # type: ignore[misc]
+    def emit_error(*args, **kwargs): pass  # type: ignore[misc]
+    def parse_logging_config(*args, **kwargs): return {"enabled": False, "level": "info", "retention_days": 14}  # type: ignore[misc]
 
 
 # CUD resolution table: (L1_structural_cud, L2_intended_action) -> resolved_action
@@ -482,8 +493,40 @@ def execute_saves(
             "saved": [{"category": str, "action": str, "title": str, "target": str}],
             "errors": [{"category": str, "error": str}],
             "blocked": [{"category": str, "reason": str}],
+            "phase_timing": {...} | None,
         }
     """
+    # -- Timing: capture orchestrate/save boundary (Phase 2 observability) --
+    _orchestrate_start = time.time()
+
+    # -- Read triage_start_ts from triage-data.json (fail-open) -------------
+    _triage_start_ts = None  # type: float | None
+    _log_config = None  # type: dict | None
+    try:
+        td_path = os.path.join(staging_dir, "triage-data.json")
+        if os.path.isfile(td_path):
+            with open(td_path, "r", encoding="utf-8") as f:
+                td = json.loads(f.read())
+            if isinstance(td, dict):
+                raw_ts = td.get("triage_start_ts")
+                if raw_ts is not None:
+                    ts_val = float(raw_ts)
+                    # Guard against NaN/Infinity from corrupted JSON
+                    import math as _math
+                    if _math.isfinite(ts_val):
+                        _triage_start_ts = ts_val
+    except Exception:
+        pass  # fail-open: timing is best-effort
+
+    # -- Load config for logging (fail-open) --------------------------------
+    try:
+        cfg_path = os.path.join(memory_root, "memory-config.json")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                _log_config = json.loads(f.read())
+    except Exception:
+        pass  # fail-open
+
     if exclude_categories is None:
         exclude_categories = set()
 
@@ -494,12 +537,25 @@ def execute_saves(
 
     # If manifest is all_noop, return immediately
     if manifest.get("status") == "all_noop":
-        return {"status": "success", "saved": [], "errors": [], "blocked": []}
+        return {"status": "success", "saved": [], "errors": [], "blocked": [], "phase_timing": None}
+
+    # -- Emit save.start log event (fail-open) ------------------------------
+    try:
+        emit_event("save.start", {
+            "categories_count": len(categories),
+            "triage_start_ts": _triage_start_ts,
+        }, hook="Stop", script="memory_orchestrate.py",
+           memory_root=memory_root, config=_log_config)
+    except Exception:
+        pass  # fail-open
 
     write_py = os.path.join(scripts_dir, "memory_write.py")
 
     # 1. Sentinel -> saving
     _update_sentinel(python, write_py, staging_dir, "saving")
+
+    # -- Timing: mark write phase start (after sentinel, before actual writes) --
+    _save_write_start = time.time()
 
     # 2. Per-category subprocess calls
     session_summary_saved = False
@@ -640,6 +696,27 @@ def execute_saves(
     else:
         status = "success"
 
+    # -- Timing: mark write phase end (after all saves + enforcement) -------
+    _save_write_end = time.time()
+
+    # -- Build phase_timing dict (fail-open) --------------------------------
+    _phase_timing = None  # type: dict | None
+    try:
+        # Compute cross-process durations (wall-clock, may be negative on NTP step)
+        _raw_triage_ms = round((_orchestrate_start - _triage_start_ts) * 1000, 2) if _triage_start_ts is not None else None
+        _raw_total_ms = round((_save_write_end - _triage_start_ts) * 1000, 2) if _triage_start_ts is not None else None
+        _phase_timing = {
+            # Clamp negative cross-process durations to None (NTP step / stale file)
+            "triage_ms": _raw_triage_ms if _raw_triage_ms is not None and _raw_triage_ms >= 0 else None,
+            "orchestrate_ms": round((_save_write_start - _orchestrate_start) * 1000, 2),
+            "write_ms": round((_save_write_end - _save_write_start) * 1000, 2),
+            "total_ms": _raw_total_ms if _raw_total_ms is not None and _raw_total_ms >= 0 else None,
+            "draft_ms": None,   # Populated by SKILL.md orchestration layer, not here
+            "verify_ms": None,  # Populated by SKILL.md orchestration layer, not here
+        }
+    except Exception:
+        pass  # fail-open: timing calculation failure must not break saves
+
     # 4. Write .triage-pending.json FIRST if any failed (D3-F1 correction)
     if errors:
         pending_data = {
@@ -664,6 +741,9 @@ def execute_saves(
             "titles": [s["title"] for s in saved],
             "errors": [{"category": e["category"], "error": e["error"]} for e in all_errors],
         }
+        # Add phase timing to result data (Phase 2 observability)
+        if _phase_timing is not None:
+            result_data["phase_timing"] = _phase_timing
         result_json = json.dumps(result_data, ensure_ascii=False)
         result_file_path = os.path.join(staging_dir, ".save-result-payload.json")
         try:
@@ -697,11 +777,30 @@ def execute_saves(
         except (subprocess.TimeoutExpired, OSError):
             pass  # fail-open
 
+    # -- Emit save.complete log event (fail-open) ---------------------------
+    # Note: duration_ms here includes post-write overhead (sentinel, cleanup),
+    # while phase_timing.total_ms stops at _save_write_end (before cleanup).
+    try:
+        _total_duration_ms = None
+        if _triage_start_ts is not None:
+            _raw_dur = round((time.time() - _triage_start_ts) * 1000, 2)
+            _total_duration_ms = _raw_dur if _raw_dur >= 0 else None
+        emit_event("save.complete", {
+            "status": status,
+            "saved_count": len(saved),
+            "error_count": len(all_errors),
+        }, hook="Stop", script="memory_orchestrate.py",
+           duration_ms=_total_duration_ms,
+           memory_root=memory_root, config=_log_config)
+    except Exception:
+        pass  # fail-open
+
     return {
         "status": status,
         "saved": saved,
         "errors": errors,
         "blocked": blocked,
+        "phase_timing": _phase_timing,
     }
 
 
@@ -779,7 +878,7 @@ def _run_commit(staging_dir: str, scripts_dir: str, python: str,
 
     # If all_noop, nothing to do
     if manifest.get("status") == "all_noop":
-        print(json.dumps({"status": "success", "saved": [], "errors": [], "blocked": []},
+        print(json.dumps({"status": "success", "saved": [], "errors": [], "blocked": [], "phase_timing": None},
                          separators=(",", ":")))
         return 0
 

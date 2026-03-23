@@ -5,12 +5,19 @@ Reads JSONL log files produced by memory_logger.py and detects
 operational anomalies: skip-rate spikes, missing pipeline stages,
 category threshold misconfiguration, performance degradation, etc.
 
+Also provides operational metrics (--metrics) and real-time log
+tailing (--watch).
+
 Directory structure expected:
     {root}/logs/{event_category}/{YYYY-MM-DD}.jsonl
 
 Usage:
     python3 memory_log_analyzer.py --root .claude/memory
     python3 memory_log_analyzer.py --root .claude/memory --days 14 --format json
+    python3 memory_log_analyzer.py --root .claude/memory --metrics
+    python3 memory_log_analyzer.py --root .claude/memory --metrics --format json
+    python3 memory_log_analyzer.py --root .claude/memory --watch
+    python3 memory_log_analyzer.py --root .claude/memory --watch --filter save
 
 No external dependencies (stdlib only).
 """
@@ -19,7 +26,9 @@ import argparse
 import json
 import os
 import re
+import statistics
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -700,6 +709,462 @@ def format_json(result: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Operational metrics (--metrics)
+# ---------------------------------------------------------------------------
+
+def compute_metrics(events: list) -> dict:
+    """Compute operational metrics from a list of parsed log events.
+
+    Pure function -- no I/O, fully testable. Returns a structured dict
+    matching the metrics output schema defined in the implementation plan.
+
+    Args:
+        events: list of parsed JSONL event dicts.
+
+    Returns:
+        Metrics dict with keys: period, total_events, save_duration,
+        refire_count, category_triggers, save_outcomes.
+    """
+    # -- Determine time period from event timestamps --------------------
+    timestamps = []
+    for e in events:
+        ts = e.get("timestamp", "")
+        if isinstance(ts, str) and len(ts) >= 10:
+            timestamps.append(ts[:10])
+    sorted_dates = sorted(set(d for d in timestamps if d))
+    period_start = sorted_dates[0] if sorted_dates else ""
+    period_end = sorted_dates[-1] if sorted_dates else ""
+
+    # -- 1. Save flow duration (from save.complete events) --------------
+    save_complete_events = [
+        e for e in events if e.get("event_type") == "save.complete"
+    ]
+    durations = []
+    for e in save_complete_events:
+        dur = e.get("duration_ms")
+        if dur is None:
+            # Also check inside data dict
+            data = e.get("data", {})
+            if isinstance(data, dict):
+                dur = data.get("duration_ms")
+        if isinstance(dur, (int, float)) and dur >= 0:
+            durations.append(float(dur))
+
+    if durations:
+        avg_ms = sum(durations) / len(durations)
+        sorted_durs = sorted(durations)
+        p50_ms = statistics.median(sorted_durs)
+        # Nearest-rank percentile (ceil method): always returns an observed value.
+        # ceil(N * 0.95) - 1 ensures at least 95% of observations fall at or below.
+        import math as _math
+        p95_idx = max(0, _math.ceil(len(sorted_durs) * 0.95) - 1)
+        p95_ms = sorted_durs[p95_idx] if sorted_durs else None
+        max_ms = sorted_durs[-1]
+    else:
+        avg_ms = None
+        p50_ms = None
+        p95_ms = None
+        max_ms = None
+
+    # Duration distribution buckets
+    dist = {"under_1s": 0, "1_5s": 0, "5_30s": 0, "30_60s": 0, "over_60s": 0}
+    for d in durations:
+        if d < 1000:
+            dist["under_1s"] += 1
+        elif d < 5000:
+            dist["1_5s"] += 1
+        elif d < 30000:
+            dist["5_30s"] += 1
+        elif d < 60000:
+            dist["30_60s"] += 1
+        else:
+            dist["over_60s"] += 1
+
+    save_duration = {
+        "count": len(durations),
+        "avg_ms": round(avg_ms, 1) if avg_ms is not None else None,
+        "p50_ms": round(p50_ms, 1) if p50_ms is not None else None,
+        "p95_ms": round(p95_ms, 1) if p95_ms is not None else None,
+        "max_ms": round(max_ms, 1) if max_ms is not None else None,
+        "distribution": dist,
+    }
+
+    # -- 2. Re-fire count distribution (from triage.score events) -------
+    triage_events = [
+        e for e in events if e.get("event_type") == "triage.score"
+    ]
+    fire_counts = []
+    for e in triage_events:
+        data = e.get("data", {})
+        if isinstance(data, dict):
+            fc = data.get("fire_count")
+            if isinstance(fc, (int, float)) and fc >= 0:
+                fire_counts.append(int(fc))
+
+    refire_dist = {"1": 0, "2": 0, "3_plus": 0}
+    for fc in fire_counts:
+        if fc == 1:
+            refire_dist["1"] += 1
+        elif fc == 2:
+            refire_dist["2"] += 1
+        elif fc >= 3:
+            refire_dist["3_plus"] += 1
+
+    refire_count = {
+        "total_sessions": len(fire_counts),
+        "distribution": refire_dist,
+        "avg_fire_count": (
+            round(sum(fire_counts) / len(fire_counts), 2)
+            if fire_counts else None
+        ),
+    }
+
+    # -- 3. Category trigger frequency (from triage.score events) -------
+    total_triage = len(triage_events)
+    cat_trigger_counts = Counter()
+    for e in triage_events:
+        data = e.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        triggered = data.get("triggered", [])
+        if isinstance(triggered, list):
+            for t in triggered:
+                if isinstance(t, dict) and "category" in t:
+                    cat_trigger_counts[t["category"]] += 1
+                elif isinstance(t, str):
+                    cat_trigger_counts[t] += 1
+
+    category_triggers = {}
+    for cat in sorted(cat_trigger_counts):
+        count = cat_trigger_counts[cat]
+        rate = round(count / total_triage, 4) if total_triage > 0 else 0.0
+        category_triggers[cat] = {"count": count, "rate": rate}
+
+    # -- 4. Save success/failure rate (from save.complete events) -------
+    outcome_counts = {"success": 0, "partial_failure": 0, "total_failure": 0}
+    for e in save_complete_events:
+        data = e.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        status = data.get("status", "")
+        if status in outcome_counts:
+            outcome_counts[status] += 1
+
+    total_outcomes = sum(outcome_counts.values())
+    success_rate = (
+        round(outcome_counts["success"] / total_outcomes, 4)
+        if total_outcomes > 0 else None
+    )
+
+    save_outcomes = {
+        "success": outcome_counts["success"],
+        "partial_failure": outcome_counts["partial_failure"],
+        "total_failure": outcome_counts["total_failure"],
+        "success_rate": success_rate,
+    }
+
+    # -- 5. Phase timing (from save.complete events) --------------------
+    phase_fields = ["triage_ms", "orchestrate_ms", "write_ms"]
+    phase_accum = {f: [] for f in phase_fields}
+    for e in save_complete_events:
+        data = e.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        pt = data.get("phase_timing", {})
+        if not isinstance(pt, dict):
+            continue
+        for f in phase_fields:
+            val = pt.get(f)
+            if isinstance(val, (int, float)) and val >= 0:
+                phase_accum[f].append(float(val))
+
+    phase_timing = {}
+    for f in phase_fields:
+        vals = phase_accum[f]
+        if vals:
+            phase_timing[f"avg_{f}"] = round(sum(vals) / len(vals), 1)
+        else:
+            phase_timing[f"avg_{f}"] = None
+
+    return {
+        "period": {"start": period_start, "end": period_end},
+        "total_events": len(events),
+        "save_duration": save_duration,
+        "refire_count": refire_count,
+        "category_triggers": category_triggers,
+        "save_outcomes": save_outcomes,
+        "phase_timing": phase_timing,
+    }
+
+
+def format_metrics_text(metrics: dict) -> str:
+    """Format metrics dict as human-readable text report.
+
+    Args:
+        metrics: dict returned by compute_metrics().
+
+    Returns:
+        Multi-line string suitable for terminal output.
+    """
+    lines = []
+    lines.append("=" * 68)
+    lines.append("  claude-memory Operational Metrics")
+    lines.append("=" * 68)
+    lines.append("")
+
+    period = metrics.get("period", {})
+    lines.append(
+        f"  Period        : {period.get('start', 'N/A')} "
+        f"to {period.get('end', 'N/A')}"
+    )
+    lines.append(f"  Total events  : {metrics.get('total_events', 0)}")
+    lines.append("")
+
+    # -- Save Duration --------------------------------------------------
+    sd = metrics.get("save_duration", {})
+    lines.append("  Save Flow Duration:")
+    lines.append("-" * 68)
+    if sd.get("count", 0) > 0:
+        lines.append(f"    Count : {sd['count']}")
+        lines.append(f"    Avg   : {sd['avg_ms']}ms")
+        lines.append(f"    P50   : {sd['p50_ms']}ms")
+        lines.append(f"    P95   : {sd['p95_ms']}ms")
+        lines.append(f"    Max   : {sd['max_ms']}ms")
+        dist = sd.get("distribution", {})
+        lines.append(f"    Distribution:")
+        lines.append(f"      <1s    : {dist.get('under_1s', 0)}")
+        lines.append(f"      1-5s   : {dist.get('1_5s', 0)}")
+        lines.append(f"      5-30s  : {dist.get('5_30s', 0)}")
+        lines.append(f"      30-60s : {dist.get('30_60s', 0)}")
+        lines.append(f"      >60s   : {dist.get('over_60s', 0)}")
+    else:
+        lines.append("    No save.complete events found.")
+    lines.append("")
+
+    # -- Re-fire Count --------------------------------------------------
+    rf = metrics.get("refire_count", {})
+    lines.append("  Re-fire Count Distribution:")
+    lines.append("-" * 68)
+    if rf.get("total_sessions", 0) > 0:
+        dist = rf.get("distribution", {})
+        lines.append(f"    Total sessions : {rf['total_sessions']}")
+        lines.append(f"    Avg fire count : {rf['avg_fire_count']}")
+        lines.append(f"    1 fire   : {dist.get('1', 0)}")
+        lines.append(f"    2 fires  : {dist.get('2', 0)}")
+        lines.append(f"    3+ fires : {dist.get('3_plus', 0)}")
+    else:
+        lines.append("    No triage.score events with fire_count found.")
+    lines.append("")
+
+    # -- Category Triggers ----------------------------------------------
+    ct = metrics.get("category_triggers", {})
+    lines.append("  Category Trigger Frequency:")
+    lines.append("-" * 68)
+    if ct:
+        for cat, info in sorted(ct.items()):
+            rate_pct = info["rate"] * 100
+            lines.append(
+                f"    {cat:25s} {info['count']:>5} "
+                f"({rate_pct:5.1f}%)"
+            )
+    else:
+        lines.append("    No category triggers found.")
+    lines.append("")
+
+    # -- Save Outcomes --------------------------------------------------
+    so = metrics.get("save_outcomes", {})
+    lines.append("  Save Outcomes:")
+    lines.append("-" * 68)
+    total_so = so.get("success", 0) + so.get("partial_failure", 0) + so.get("total_failure", 0)
+    if total_so > 0:
+        lines.append(f"    Success         : {so['success']}")
+        lines.append(f"    Partial failure : {so['partial_failure']}")
+        lines.append(f"    Total failure   : {so['total_failure']}")
+        sr = so.get("success_rate")
+        if sr is not None:
+            lines.append(f"    Success rate    : {sr * 100:.1f}%")
+    else:
+        lines.append("    No save outcome data found.")
+    lines.append("")
+
+    # -- Phase Timing ---------------------------------------------------
+    pt = metrics.get("phase_timing", {})
+    has_phase = any(v is not None for v in pt.values())
+    lines.append("  Phase Timing (avg):")
+    lines.append("-" * 68)
+    if has_phase:
+        for key in ["avg_triage_ms", "avg_orchestrate_ms", "avg_write_ms"]:
+            val = pt.get(key)
+            label = key.replace("avg_", "").replace("_ms", "")
+            if val is not None:
+                lines.append(f"    {label:15s} : {val}ms")
+            else:
+                lines.append(f"    {label:15s} : N/A")
+    else:
+        lines.append("    No phase timing data found.")
+    lines.append("")
+
+    lines.append("=" * 68)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Real-time log tailing (--watch)
+# ---------------------------------------------------------------------------
+
+def _format_watch_line(entry: dict) -> str:
+    """Format a single log event as a one-line watch output.
+
+    Format: [HH:MM:SS] [LEVEL] event_type {key data fields}
+    """
+    ts = entry.get("timestamp", "")
+    # Extract HH:MM:SS from ISO timestamp (e.g. 2026-03-20T12:34:56.789Z)
+    if len(ts) >= 19:
+        time_part = ts[11:19]
+    else:
+        time_part = "??:??:??"
+
+    level = entry.get("level", "info").upper()
+    event_type = entry.get("event_type", "unknown")
+
+    # Extract key data fields (compact representation)
+    data = entry.get("data", {})
+    dur = entry.get("duration_ms")
+    parts = []
+    if dur is not None:
+        parts.append(f"duration={dur}ms")
+    if isinstance(data, dict):
+        # Show select interesting fields, not the entire data blob
+        for key in ("status", "reason", "category", "fire_count",
+                     "prompt_length", "match_count", "results_count"):
+            if key in data:
+                parts.append(f"{key}={data[key]}")
+    error = entry.get("error")
+    if isinstance(error, dict) and "message" in error:
+        msg = str(error["message"])[:80]
+        parts.append(f"error={msg}")
+
+    data_str = " " + " ".join(parts) if parts else ""
+    return f"[{time_part}] [{level:7s}] {event_type}{data_str}"
+
+
+def watch_logs(root: Path, event_filter: str = None):
+    """Tail log files in real time, printing new events.
+
+    Monitors today's log files (and handles date rollover). Prints each
+    new event as a single formatted line. Runs until Ctrl+C.
+
+    Args:
+        root: Memory root directory (containing logs/ subdirectory).
+        event_filter: Optional event type prefix filter (e.g. "save"
+            shows only save.* events).
+    """
+    logs_dir = root / "logs"
+    if not logs_dir.is_dir():
+        print(f"No logs directory found at {logs_dir}", file=sys.stderr)
+        return
+
+    # Track file positions: {filepath_str: position}
+    file_positions = {}
+    current_date = None
+
+    def _scan_files(date_str: str) -> list:
+        """Find all .jsonl files for the given date across categories."""
+        files = []
+        if not logs_dir.is_dir():
+            return files
+        for category_dir in sorted(logs_dir.iterdir()):
+            if category_dir.is_symlink() or not category_dir.is_dir():
+                continue
+            if category_dir.name.startswith("."):
+                continue
+            if not _SAFE_NAME_RE.match(category_dir.name):
+                continue
+            log_file = category_dir / f"{date_str}.jsonl"
+            if log_file.is_file() and not log_file.is_symlink():
+                files.append(log_file)
+        return files
+
+    # Track (inode, size) per file to detect truncation/rotation
+    file_inodes = {}  # type: dict[str, tuple[int, int]]  # path -> (ino, size)
+
+    def _read_new_lines(filepath: Path) -> list:
+        """Read new lines from a log file since last known position.
+
+        Detects file truncation/rotation via inode+size check and resets
+        offset when the underlying file has changed.
+        """
+        path_str = str(filepath)
+        pos = file_positions.get(path_str, 0)
+        new_entries = []
+        try:
+            # Check for truncation/rotation before reading
+            try:
+                st = os.stat(path_str)
+                prev = file_inodes.get(path_str)
+                if prev is not None:
+                    prev_ino, prev_size = prev
+                    if st.st_ino != prev_ino or st.st_size < pos:
+                        # File was rotated or truncated -- reset to beginning
+                        pos = 0
+                file_inodes[path_str] = (st.st_ino, st.st_size)
+            except OSError:
+                pass  # fail-open: proceed with existing offset
+
+            with open(path_str, "r", encoding="utf-8") as fh:
+                fh.seek(pos)
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if isinstance(entry, dict):
+                            new_entries.append(entry)
+                    except (json.JSONDecodeError, ValueError):
+                        pass  # Fail-open: skip malformed lines
+                file_positions[path_str] = fh.tell()
+        except OSError:
+            pass  # Fail-open: skip unreadable files
+        return new_entries
+
+    # Print header
+    filter_msg = f" (filter: {event_filter}*)" if event_filter else ""
+    print(
+        f"Watching logs in {logs_dir}{filter_msg} "
+        f"-- press Ctrl+C to stop",
+        file=sys.stderr,
+    )
+
+    try:
+        while True:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+            # Handle date rollover: reset file positions for new day
+            if today != current_date:
+                current_date = today
+                # Don't clear positions -- old files stay tracked;
+                # new day files will be discovered below
+
+            log_files = _scan_files(today)
+
+            for lf in log_files:
+                entries = _read_new_lines(lf)
+                for entry in entries:
+                    et = entry.get("event_type", "")
+                    # Apply filter
+                    if event_filter and not et.startswith(event_filter):
+                        continue
+                    print(_format_watch_line(entry))
+
+            sys.stdout.flush()
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\nWatch stopped.", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -725,12 +1190,24 @@ def main():
         dest="output_format",
         help="Output format (default: text)",
     )
+    parser.add_argument(
+        "--metrics",
+        action="store_true",
+        help="Compute and display operational metrics instead of anomalies",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Tail log files in real time (press Ctrl+C to stop)",
+    )
+    parser.add_argument(
+        "--filter",
+        type=str,
+        default=None,
+        dest="event_filter",
+        help="Event type prefix filter for --watch (e.g. 'save')",
+    )
     args = parser.parse_args()
-
-    # Validate --days
-    if args.days < 1:
-        print("Error: --days must be >= 1", file=sys.stderr)
-        sys.exit(1)
 
     root = Path(args.root)
     if not root.is_dir():
@@ -740,6 +1217,30 @@ def main():
         )
         sys.exit(1)
 
+    # -- Watch mode (mutually exclusive with --metrics / analysis) ------
+    if args.watch:
+        watch_logs(root, event_filter=args.event_filter)
+        sys.exit(0)
+
+    # Validate --days (only relevant for analysis/metrics)
+    if args.days < 1:
+        print("Error: --days must be >= 1", file=sys.stderr)
+        sys.exit(1)
+
+    # -- Metrics mode ---------------------------------------------------
+    if args.metrics:
+        now = datetime.now(timezone.utc)
+        end_date = now.strftime("%Y-%m-%d")
+        start_date = (now - timedelta(days=args.days)).strftime("%Y-%m-%d")
+        events = _load_events(root, start_date, end_date)
+        metrics = compute_metrics(events)
+        if args.output_format == "json":
+            print(format_json(metrics))
+        else:
+            print(format_metrics_text(metrics))
+        sys.exit(0)
+
+    # -- Default: anomaly analysis mode ---------------------------------
     result = analyze(root, args.days)
 
     if args.output_format == "json":

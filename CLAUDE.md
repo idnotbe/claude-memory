@@ -48,6 +48,7 @@ The SKILL.md orchestration uses this to spawn per-category `memory-drafter` Agen
 | hooks/scripts/memory_enforce.py | Rolling window enforcement: scans category, retires oldest beyond limit | pydantic v2 (via memory_write imports) |
 | hooks/scripts/memory_judge.py | LLM-as-judge for retrieval verification (anti-position-bias, anti-injection, parallel batch splitting via ThreadPoolExecutor) | stdlib only (urllib.request, concurrent.futures) |
 | hooks/scripts/memory_logger.py | Shared JSONL structured logging (fail-open, atomic append) | stdlib only |
+| hooks/scripts/memory_log_analyzer.py | Log anomaly detection + `--metrics` operational dashboard + `--watch` real-time tailing | stdlib only |
 | agents/memory-drafter.md | Phase 1 intent drafting agent (tools: Read, Write only, no Bash) | Claude Code agent file |
 | hooks/scripts/memory_staging_utils.py | Shared staging path utility (deterministic /tmp/ staging dir) | stdlib only |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
