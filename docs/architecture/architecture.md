@@ -347,8 +347,12 @@ memory_retrieve.py (command hook, 15s timeout)
 memory_write_guard.py (5s timeout)
     |-- Reads stdin JSON: { tool_input: { file_path } }
     |-- Resolves path via os.path.realpath()
+    |-- Dual-path staging recognition via is_staging_path() from memory_staging_utils:
+    |     recognizes both /tmp/.claude-memory-staging-<hash>/ (new) and legacy .staging/ prefix
+    |-- Symlink traversal defense: if input path looks like staging but resolved path is NOT
+    |     staging (is_staging_path() returns false), DENY to prevent symlink escape
     |-- ALLOW: /tmp/.memory-write-pending*.json, /tmp/.memory-draft-*.json, /tmp/.memory-triage-context-*.txt
-    |-- ALLOW (auto-approve): .staging/ files passing 4 gates:
+    |-- ALLOW (auto-approve): staging files passing 4 gates:
     |     Gate 1: Extension whitelist (.json, .txt only)
     |     Gate 2: Filename pattern whitelist (intent-*, input-*, draft-*, context-*, etc.)
     |     Gate 3: Hard link defense (nlink > 1 on existing files -> require user approval)
@@ -363,9 +367,12 @@ memory_write_guard.py (5s timeout)
     v
 memory_staging_guard.py (5s timeout)
     |-- Reads stdin JSON: { tool_name: "Bash", tool_input: { command } }
-    |-- Regex scan for Bash write patterns targeting .claude/memory/.staging/:
-    |     cat/echo/printf > .staging/, tee .staging/, cp/mv/install .staging/,
-    |     ln/link .staging/, redirect >{1,2} .staging/
+    |-- Imports STAGING_DIR_PREFIX and _LEGACY_STAGING_PREFIX from memory_staging_utils
+    |-- Builds dynamic regex from both new (/tmp/.claude-memory-staging-<hash>/) and
+    |     legacy (.claude/memory/.staging/) path prefixes, plus /tmp resolved variants
+    |-- Regex scan for Bash write patterns targeting any staging path:
+    |     cat/echo/printf > <staging>, tee <staging>, cp/mv/install <staging>,
+    |     ln/link <staging>, redirect >{1,2} <staging>
     |-- If detected: DENY with message directing to Write tool
     |-- Otherwise: exit 0 (pass-through)
 
@@ -376,7 +383,9 @@ memory_validate_hook.py (10s timeout)
     |-- Reads stdin JSON: { tool_input: { file_path } }
     |-- Resolves path
     |-- If NOT in memory directory: exit 0 (irrelevant)
-    |-- If in .staging/: skip validation (diagnostic nlink warning only)
+    |-- Staging detection via is_staging_path() from memory_staging_utils:
+    |     recognizes both /tmp/.claude-memory-staging-<hash>/ and legacy .staging/ marker
+    |-- If in staging: skip validation (diagnostic nlink warning only)
     |-- If in memory directory (bypassed PreToolUse guard):
     |     |-- Log bypass detection (WARNING)
     |     |-- Skip config file (memory-config.json in root)
@@ -532,7 +541,7 @@ memory_validate_hook.py (10s timeout)
 - `assemble_create()`: Sets schema_version, category, id (slugified title), record_status="active", timestamps, tags, related_files, confidence, content, initial change entry, times_updated=0.
 - `assemble_update()`: Starts from existing data. Preserves immutable fields. Unions tags and related_files. Shallow-merges content (top-level content keys from input overlay existing). Appends change entry. Increments times_updated.
 - Pydantic validation: Validates assembled JSON against `build_memory_model(category)` before writing.
-- Draft output: Written to `.staging/draft-<category>-<timestamp>-<pid>.json` (non-atomic, uses regular `open()`).
+- Draft output: Written to `<staging_dir>/draft-<category>-<timestamp>-<pid>.json` (non-atomic, uses regular `open()`).
 
 ### 3.7 memory_write.py (Schema-Enforced CRUD)
 
@@ -560,11 +569,11 @@ memory_validate_hook.py (10s timeout)
 - Auto-enforcement: After creating session_summary, spawns `memory_enforce.py` via subprocess (unless `--skip-auto-enforce` flag is set).
 - `--skip-auto-enforce` flag: Prevents auto-enforce subprocess after session_summary create. Used by `memory_orchestrate.py` which runs its own enforce step.
 - `--result-file <path>` flag: Writes save result JSON to specified file path (shell injection safe -- path validated before use).
-- `cleanup_staging()`: Removes transient files matching specific patterns. Path containment validated (must end with `memory/.staging`).
+- `cleanup_staging()`: Removes transient files matching specific patterns. Path containment validated (accepts both legacy `.staging/` and XDG-based `<staging_dir>` paths).
 - `cleanup-intents` action: Removes stale `intent-*.json` files from staging directory. Used during SKILL.md SETUP Step 2.
 - `update-sentinel-state` action: Updates sentinel JSON (`.triage-handled`) to a given state (pending/saving/saved/failed).
 - `write_save_result()`: Validates result JSON schema (allowed keys, type enforcement, length caps), atomic write.
-- `_read_input()`: Security gate -- input must be from `.claude/memory/.staging/`, no `..` components.
+- `_read_input()`: Security gate -- input must be from staging directory (legacy `.staging/` or `<staging_dir>`), no `..` components.
 - `_check_dir_components()`: Rejects directory names with brackets or other injection characters (S5F defense).
 
 ### 3.8 memory_enforce.py (Rolling Window)
@@ -874,7 +883,8 @@ Two categories of config keys:
 1. **Script-read** (parsed by Python scripts at runtime):
    - `triage.enabled`, `triage.max_messages` (10-200), `triage.thresholds.*` (0.0-1.0 per category)
    - `triage.parallel.*` (enabled, category_models, verification_model, default_model)
-   - `retrieval.enabled`, `retrieval.max_inject` (0-20), `retrieval.judge.*`
+   - `retrieval.enabled`, `retrieval.max_inject` (0-20), `retrieval.judge.*` (enabled, model, timeout_per_call, candidate_pool_size, fallback_top_k, include_conversation_context, context_turns)
+   - `retrieval.judge.dual_verification` (bool, default false -- config key exists for schema compatibility but not yet implemented by scripts; cancelled due to recall collapse)
    - `retrieval.confidence_abs_floor`, `retrieval.output_mode`, `retrieval.match_strategy`
    - `delete.grace_period_days`
    - `logging.enabled`, `logging.level`, `logging.retention_days`
@@ -884,6 +894,8 @@ Two categories of config keys:
    - `memory_root`, `categories.*.enabled`, `categories.*.folder`, `categories.*.auto_capture`
    - `categories.*.retention_days`, `auto_commit`, `max_memories_per_category`
    - `delete.archive_retired`
+   - `architecture.simplified_flow` (bool, default true -- v6 3-phase flow when true, v5 5-phase flow when false)
+   - `triage.parallel.verification_enabled` (bool, default false -- enables optional Phase 1.5 VERIFY)
 
 Config validation: Scripts clamp values to valid ranges (e.g., `max_inject` clamped [0,20], `max_messages` clamped [10,200]). Invalid model names fall back to defaults. NaN/Infinity values rejected.
 
@@ -1011,7 +1023,7 @@ Claude Code's Guardian (`bash_guardian.py` and `write_guardian.py`) scans:
 
 **Conflict points and mitigations:**
 
-1. **Heredoc with `.claude` paths in Bash (PRIMARY -- RESOLVED in v6)**: Previously the most frequent Guardian conflict. The Phase 3 haiku Task subagent would generate Bash heredocs containing `.claude` paths, triggering Guardian approval prompts. **Eliminated** by removing Phase 3 entirely -- `memory_orchestrate.py` subprocess handles all save operations via Python `open()`, which is invisible to Guardian. `memory_staging_guard.py` remains as a safety net for any residual Bash write attempts to staging.
+1. **Heredoc with `.claude` paths in Bash (PRIMARY -- ELIMINATED in v6)**: Previously the most frequent Guardian conflict. The Phase 3 haiku Task subagent would generate Bash heredocs containing `.claude` paths, triggering Guardian approval prompts. **Eliminated** by v6 architecture simplification -- the entire Phase 3 Task subagent is removed. `memory_orchestrate.py` subprocess handles all save operations via Python `open()`, which is invisible to Guardian. `memory_staging_guard.py` remains as a safety net for any residual Bash write attempts to staging. The `--result-file` flag in `memory_orchestrate.py` replaced the former `write-save-result-direct` approach, eliminating shell injection vectors from dynamically constructed Bash commands.
 
 2. **Python string literals in source code**: Guard scripts split path markers at runtime (`".clau" + "de"`) to avoid Guardian scanning source files and flagging them.
 
@@ -1020,6 +1032,8 @@ Claude Code's Guardian (`bash_guardian.py` and `write_guardian.py`) scans:
 4. **Write tool to memory directory**: `memory_write_guard.py` auto-approves staging files (with safety gates) to avoid user approval prompts during automated saves. Non-staging memory files are denied (must go through memory_write.py via Bash).
 
 5. **`find -delete` or `rm` with `.claude` paths**: Guardian may flag these. Mitigation: SKILL.md prohibits these commands. Uses Python glob+os.remove instead.
+
+6. **Staging directory security**: `PinnedStagingDir` (from `memory_staging_utils.py`) provides fd-pinned writes to the staging directory, eliminating TOCTOU windows between path validation and file creation. Opens the directory with `O_DIRECTORY|O_NOFOLLOW`, validates ownership via `fstat(fd)`, and uses `dir_fd` for all subsequent file operations. Used by `memory_draft.py` and `memory_orchestrate.py` for all staging writes.
 
 ---
 

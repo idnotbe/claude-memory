@@ -1,6 +1,6 @@
 # claude-memory Plugin -- Product Requirements Document (PRD)
 
-Version: 5.1.0 | Date: 2026-03-22 | Audience: Claude (AI)
+Version: 6.0.0 | Date: 2026-03-24 | Audience: Claude (AI)
 
 ---
 
@@ -314,7 +314,7 @@ Restores retired memory to active:
 
 **Behavior:**
 - Blocks any Write tool call targeting files inside `.claude/memory/` (the memory directory).
-- Auto-approves writes to `.staging/` subdirectory with safety gates:
+- Auto-approves writes to staging directories (both XDG-based `<staging_dir>` and legacy `.staging/`) using `is_staging_path()` from `memory_staging_utils`, with safety gates:
   - Gate 1: Extension whitelist (.json, .txt only).
   - Gate 2: Filename pattern whitelist (intent-*, input-*, draft-*, context-*, etc.).
   - Gate 3: Hard link defense (checks st_nlink for existing files; nlink > 1 = require user approval).
@@ -328,7 +328,7 @@ Restores retired memory to active:
 **Hook type:** PreToolUse:Bash
 
 **Behavior:**
-- Blocks Bash commands that write to `.claude/memory/.staging/` via heredoc, cat, echo, printf, tee, cp, mv, redirect, or ln.
+- Blocks Bash commands that write to staging directories (both `<staging_dir>` and legacy `.claude/memory/.staging/`) using dynamic regex from `memory_staging_utils` constants, via heredoc, cat, echo, printf, tee, cp, mv, redirect, or ln.
 - Prevents Guardian bash_guardian.py false positives caused by heredoc content triggering write detection.
 - Does NOT block `python3` script execution (which is the approved write path).
 
@@ -426,6 +426,7 @@ Restores retired memory to active:
 - `retrieval.enabled` (bool, default true)
 - `retrieval.max_inject` (int, clamped 0-20, default 3)
 - `retrieval.judge.*` (enabled, model, timeout, pool size, etc.)
+- `retrieval.judge.dual_verification` (bool, config key exists but not yet implemented by scripts)
 - `retrieval.confidence_abs_floor` (float, default 0.0 = disabled)
 - `retrieval.output_mode` ("legacy" or "tiered")
 - `delete.grace_period_days` (int, default 30)
@@ -443,6 +444,8 @@ Restores retired memory to active:
 - `max_memories_per_category` (int, default 100)
 - `retrieval.match_strategy` (string)
 - `delete.archive_retired` (bool, default true)
+- `architecture.simplified_flow` (bool, default true -- v6 3-phase flow)
+- `triage.parallel.verification_enabled` (bool, default false)
 
 ### 3.10 Logging and Observability
 
@@ -604,6 +607,10 @@ Restores retired memory to active:
 - Directory component validation: rejects brackets and injection characters in directory names (S5F defense).
 - Hard link defense: PreToolUse write guard checks `st_nlink` for existing staging files.
 - Symlink defense: Secure file creation uses `O_NOFOLLOW`. Cleanup skips symlinks.
+- **PinnedStagingDir:** TOCTOU defense using `O_DIRECTORY|O_NOFOLLOW` + `fstat` + `dir_fd` to pin directory identity at open time and verify it hasn't been swapped before operations.
+- **Parent chain validation:** Symlink/traversal defense that validates every component in the path chain, preventing symbolic link attacks at intermediate directories.
+- **`write-save-result-direct` removal:** Replaced by `--result-file <path>` flag to eliminate shell injection vector from inline JSON on command line.
+- **XDG staging:** Staging directory uses XDG-based deterministic path (`/tmp/.claude-memory-staging-<hash>`) instead of in-tree `.staging/`, eliminating the class of attacks exploiting world-writable directories within the project tree.
 
 #### 4.3.6 Thread Safety
 
@@ -817,21 +824,23 @@ This means the PreToolUse guard is the critical defense, and the PostToolUse hoo
 
 ## 7. Test Coverage
 
-### 7.1 Test Files
+### 7.1 Test Files (30 files as of 2026-03-24)
 
 | Test File | Coverage Area |
 |-----------|--------------|
-| `test_memory_triage.py` | Triage scoring, thresholds, category patterns, config loading, transcript parsing, context file generation |
-| `test_memory_retrieve.py` | Retrieval hook flow, scoring, recency, confidence labeling, output formatting, save confirmation, orphan detection |
-| `test_memory_write.py` | CRUD operations, merge protections, OCC, anti-resurrection, auto-fix, validation, atomic writes, staging utilities |
-| `test_memory_candidate.py` | Candidate selection, scoring, structural CUD, vetoes, lifecycle events, excerpt building |
-| `test_memory_draft.py` | Draft assembly (create/update), input validation, path security, schema compliance |
-| `test_memory_index.py` | Index rebuild, validate, query, health report, GC |
+| `test_memory_triage.py` | Triage scoring, thresholds, category patterns, config, transcript parsing, context files |
+| `test_memory_retrieve.py` | Retrieval hook, scoring, recency, confidence, output, save confirmation, orphan detection |
+| `test_memory_write.py` | CRUD, merge protections, OCC, anti-resurrection, auto-fix, validation, atomic writes, staging |
+| `test_memory_candidate.py` | Candidate selection, scoring, structural CUD, vetoes, lifecycle, excerpts |
+| `test_memory_draft.py` | Draft assembly (create/update), input validation, path security, schema |
+| `test_memory_index.py` | Index rebuild, validate, query, health, GC |
 | `test_memory_write_guard.py` | Write guard decisions, staging auto-approve, path detection, exemptions |
 | `test_memory_staging_guard.py` | Staging guard pattern detection, Bash command blocking |
 | `test_memory_validate_hook.py` | PostToolUse validation, quarantine, staging skip, category detection |
 | `test_memory_judge.py` | LLM judge API calls, batch splitting, anti-position-bias, error handling |
 | `test_memory_logger.py` | Structured logging, config parsing, session ID extraction, cleanup |
+| `test_memory_orchestrate.py` | Orchestration pipeline, CUD resolution, action modes, save execution |
+| `test_memory_staging_utils.py` | Staging path resolution, PinnedStagingDir, is_staging_path, validation |
 | `test_fts5_search_engine.py` | FTS5 search engine, tokenization, indexing, querying, threshold |
 | `test_fts5_benchmark.py` | Search performance benchmarks |
 | `test_rolling_window.py` | Session rolling window enforcement, config reading, deletion guard |
@@ -840,6 +849,15 @@ This means the PreToolUse guard is the critical defense, and the PostToolUse hoo
 | `test_adversarial_descriptions.py` | Category description injection attacks |
 | `test_v2_adversarial_fts5.py` | FTS5-specific adversarial attacks |
 | `test_log_analyzer.py` | Log analysis tooling |
+| `test_log_analyzer_metrics.py` | Log analyzer --metrics mode, save duration, category frequency |
+| `test_screen_noise_reduction.py` | Screen noise reduction verification (run_in_background, single subprocess) |
+| `test_triage_observability.py` | Triage logging events, idempotency skip events, phase timing |
+| `test_save_timing.py` | Save pipeline timing capture, phase_timing dict validation |
+| `test_triage_interruption.py` | Triage interruption handling, re-fire prevention guards |
+| `test_hook_stderr.py` | Hook stderr handling, error output isolation |
+| `test_contract_drift.py` | Contract drift detection between code and config/docs |
+| `test_config_defaults.py` | Config default values, range clamping, validation |
+| `test_rejection_loop.py` | Rejection loop prevention, guardian interaction |
 | `conftest.py` | Shared test fixtures |
 
 ---
@@ -924,7 +942,7 @@ memory_index.py (index management)
 ```json
 {
   "name": "claude-memory",
-  "version": "5.1.0",
+  "version": "6.0.0",
   "commands": ["./commands/memory.md", "./commands/memory-config.md", "./commands/memory-save.md"],
   "agents": ["./agents/memory-drafter.md"],
   "skills": ["./skills/memory-management", "./skills/memory-search"],
