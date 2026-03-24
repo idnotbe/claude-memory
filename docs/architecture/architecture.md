@@ -40,8 +40,9 @@ Claude Code Runtime
  |     |-- memory_write_guard.py        (PreToolUse: block direct writes to memory dir)
  |     |-- memory_staging_guard.py      (PreToolUse: block Bash writes to staging dir)
  |     |-- memory_validate_hook.py      (PostToolUse: schema validate, quarantine invalid)
+ |     |-- memory_staging_utils.py       (Shared staging path utility, PinnedStagingDir)
  |     |-- memory_logger.py             (Shared JSONL structured logging, fail-open)
- |     |-- memory_log_analyzer.py       (Log anomaly detector, offline analysis)
+ |     |-- memory_log_analyzer.py       (Log anomaly detector, operational dashboard)
  |
  |-- .claude/memory/                     (Per-project memory storage root)
  |     |-- memory-config.json           (Runtime config)
@@ -277,15 +278,18 @@ USER submits a prompt
 memory_retrieve.py (command hook, 15s timeout)
     |
     |-- Block 1: Save Confirmation
-    |     |-- Reads .staging/last-save-result.json (if exists, < 24h old)
+    |     |-- Checks both get_staging_dir() and legacy .staging/ for last-save-result.json
+    |     |-- Reads last-save-result.json (if exists, < 24h old)
     |     |-- Outputs <memory-note> with saved categories/titles
     |     |-- One-shot delete of result file
     |
     |-- Block 2: Orphan Crash Detection
+    |     |-- Checks both get_staging_dir() and legacy .staging/ paths
     |     |-- If triage-data.json exists AND no last-save-result AND no .triage-pending
     |     |     AND age > 300s: outputs orphan warning note
     |
     |-- Block 3: Pending Save Notification
+    |     |-- Checks both get_staging_dir() and legacy .staging/ paths
     |     |-- If .triage-pending.json exists: outputs pending save note
     |
     |-- Skip short prompts (< 10 chars)
@@ -399,7 +403,7 @@ memory_validate_hook.py (10s timeout)
 
 **Output:** stdout JSON: `{"decision": "block", "reason": "..."}` or nothing (allow stop).
 
-**Dependencies:** stdlib only. Optional lazy import of `memory_logger`.
+**Dependencies:** stdlib only. Imports `memory_staging_utils` for `get_staging_dir()` and `PinnedStagingDir`. Optional lazy import of `memory_logger`.
 
 **Error handling:** Fail-open. Top-level try/except catches all exceptions and returns exit 0 (allows stop). Individual file operations (flag, sentinel, context files, triage-data.json) have individual try/except blocks that fall back gracefully.
 
@@ -411,10 +415,13 @@ memory_validate_hook.py (10s timeout)
 - `extract_text_content()`: Strips fenced code blocks and inline code before keyword matching to reduce false positives.
 - `score_text_category()`: Per-line regex scan. Primary matches score `primary_weight` (0.2-0.35). If a booster pattern exists within +/- 4 lines, score `boosted_weight` (0.5-0.6) instead. Capped at `max_primary` + `max_boosted` hits. Normalized by dividing raw score by denominator.
 - `score_session_summary()`: Formula: `min(1.0, tool_uses*0.05 + distinct_tools*0.1 + exchanges*0.02)`.
-- `write_context_files()`: Writes `.staging/context-<cat>.txt` with category, score, description, and `<transcript_data>` block containing keyword-matched excerpts (text categories) or head+tail transcript excerpts (session_summary). Capped at 50KB. Written with `O_NOFOLLOW` to prevent symlink attacks.
+- `write_context_files()`: Writes `context-<cat>.txt` to staging dir via `PinnedStagingDir` for TOCTOU-safe writes (O_DIRECTORY|O_NOFOLLOW fd pinning + fstat ownership validation + dir_fd-based O_EXCL temp+rename). Includes category, score, description, and `<transcript_data>` block containing keyword-matched excerpts (text categories) or head+tail transcript excerpts (session_summary). Capped at 50KB.
 - `build_triage_data()`: Assembles structured JSON with categories[], parallel_config for downstream skill consumption.
+- Sentinel `.triage-handled`: JSON state machine with format `{session_id, state, timestamp, pid}`. States: pending/saving/saved/failed. `_SENTINEL_BLOCK_STATES = frozenset({"pending", "saving", "saved"})`. Session-scoped idempotency -- skips if same session_id AND state in block states.
+- `_acquire_triage_lock()`: Exclusive file lock using `O_CREAT|O_EXCL` on `.stop_hook_lock` in staging dir. 120s stale timeout. Prevents concurrent triage from parallel Stop hook invocations.
+- `_increment_fire_count()`: Tracks per-session invocation count via `.triage-fire-count` file. Incremented atomically per invocation, logged for diagnostics.
+- `_check_save_result_guard()`: Checks `last-save-result.json` for matching session_id. Independent of sentinel; falls back to sentinel cross-reference.
 - Flag file `.stop_hook_active`: Created when triage blocks stop. Consumed on next triage invocation -- if fresh (< 5min), allows stop immediately (prevents re-fire loop). Uses exception-based stat+unlink to avoid TOCTOU.
-- Sentinel `.triage-handled`: Touched when triage fires. If fresh on next invocation, skips evaluation (idempotency for same session).
 
 ### 3.2 memory_retrieve.py (UserPromptSubmit Hook)
 
@@ -422,13 +429,14 @@ memory_validate_hook.py (10s timeout)
 
 **Output:** stdout text (added to Claude's context automatically on exit 0).
 
-**Dependencies:** stdlib + `memory_search_engine` (sibling import). Optional lazy import of `memory_logger`, `memory_judge`.
+**Dependencies:** stdlib + `memory_search_engine` (sibling import). Imports `memory_staging_utils` for `get_staging_dir()` (with legacy `.staging/` fallback). Optional lazy import of `memory_logger`, `memory_judge`.
 
 **Error handling:** Fail-open throughout. JSON parse errors, missing files, config errors all result in exit 0 (no injection, no crash).
 
 **LLM judgment:** Optional LLM judge (`memory_judge.py`) when `retrieval.judge.enabled=true` AND `ANTHROPIC_API_KEY` is set. The judge is a filter applied after BM25 ranking, not a replacement.
 
 **Key internals:**
+- Dual staging path: Blocks 1-3 check both `get_staging_dir()` result and legacy `.staging/` path for backwards compatibility with pre-v6 staging directories.
 - Three notification blocks run before search: save confirmation (Block 1), orphan crash detection (Block 2), pending save (Block 3).
 - Short prompt filter: < 10 chars -> skip.
 - Index auto-rebuild: if `index.md` missing but memory root exists, spawns `memory_index.py --rebuild` via subprocess (10s timeout).
@@ -528,7 +536,7 @@ memory_validate_hook.py (10s timeout)
 
 ### 3.7 memory_write.py (Schema-Enforced CRUD)
 
-**Input:** CLI: `--action create|update|retire|archive|unarchive|restore|cleanup-staging|write-save-result`, plus action-specific args.
+**Input:** CLI: `--action create|update|retire|archive|unarchive|restore|cleanup-staging|write-save-result|cleanup-intents|update-sentinel-state` (10 actions total), plus action-specific args.
 
 **Output:** stdout JSON with status. Exit code 0 on success, 1 on error.
 
@@ -545,11 +553,16 @@ memory_validate_hook.py (10s timeout)
 - `check_merge_protections()`: Enforces immutable fields, grow-only tags (eviction at cap only), grow-only related_files (dangling removal allowed), append-only changes[], record_status immutable via UPDATE.
 - `FlockIndex`: Portable mkdir-based lock. `os.mkdir()` is atomic on all filesystems including NFS. 15s timeout, 60s stale detection (breaks stale locks), 50ms poll interval. Falls back to proceeding without lock on timeout (legacy behavior). `require_acquired()` method for strict enforcement (used by `memory_enforce.py`).
 - `atomic_write_text()` / `atomic_write_json()`: Uses `tempfile.mkstemp()` in target directory + `os.rename()`.
-- Index management: `add_to_index()` (sorted insert), `remove_from_index()` (filter by path), `update_index_entry()` (replace matching line).
+- Index management: `add_to_index()` (sorted insert with path dedup -- checks existing paths before appending), `remove_from_index()` (filter by path), `update_index_entry()` (replace matching line).
+- `do_create()` overwrite guard: Rejects create if an active file already exists at target path. Prevents accidental overwrites of existing memories.
 - Anti-resurrection: During CREATE inside flock, checks if target file exists with `record_status="retired"` and `retired_at` < 24h ago. Returns `ANTI_RESURRECTION_ERROR`.
 - Slug rename on UPDATE: If title changed > 50% (by word_difference_ratio), generates new slug, checks for collision, renames file.
-- Auto-enforcement: After creating session_summary, spawns `memory_enforce.py` via subprocess.
+- Auto-enforcement: After creating session_summary, spawns `memory_enforce.py` via subprocess (unless `--skip-auto-enforce` flag is set).
+- `--skip-auto-enforce` flag: Prevents auto-enforce subprocess after session_summary create. Used by `memory_orchestrate.py` which runs its own enforce step.
+- `--result-file <path>` flag: Writes save result JSON to specified file path (shell injection safe -- path validated before use).
 - `cleanup_staging()`: Removes transient files matching specific patterns. Path containment validated (must end with `memory/.staging`).
+- `cleanup-intents` action: Removes stale `intent-*.json` files from staging directory. Used during SKILL.md SETUP Step 2.
+- `update-sentinel-state` action: Updates sentinel JSON (`.triage-handled`) to a given state (pending/saving/saved/failed).
 - `write_save_result()`: Validates result JSON schema (allowed keys, type enforcement, length caps), atomic write.
 - `_read_input()`: Security gate -- input must be from `.claude/memory/.staging/`, no `..` components.
 - `_check_dir_components()`: Rejects directory names with brackets or other injection characters (S5F defense).
@@ -622,7 +635,7 @@ memory_validate_hook.py (10s timeout)
 
 **Output:** stdout JSON with `permissionDecision: "allow" | "deny"` or nothing (pass-through).
 
-**Dependencies:** stdlib only. Optional `memory_logger`.
+**Dependencies:** stdlib only. Imports `memory_staging_utils` for `is_staging_path()` and `STAGING_DIR_PREFIX`. Optional `memory_logger`.
 
 **Error handling:** JSON parse failure -> exit 0 (pass-through).
 
@@ -630,7 +643,7 @@ memory_validate_hook.py (10s timeout)
 
 **Key internals:**
 - Path marker construction: `_DOT_CLAUDE = ".clau" + "de"` -- split string to avoid Guardian pattern matching on the source code itself.
-- Staging auto-approve gates: 4 sequential safety checks (extension whitelist, filename pattern regex, hard link defense via nlink check, new file pass-through).
+- Staging auto-approve gates: 4 sequential safety checks (extension whitelist, filename pattern regex, hard link defense via nlink check, new file pass-through). Uses `is_staging_path()` to detect both XDG-based and legacy staging paths.
 - Config file exemption: `memory-config.json` allowed only when directly in memory root (not in subfolders like `decisions/memory-config.json`).
 - All other paths containing `/.claude/memory/` segment -> DENY with helpful error message.
 
@@ -640,14 +653,14 @@ memory_validate_hook.py (10s timeout)
 
 **Output:** stdout JSON with `permissionDecision: "deny"` or nothing.
 
-**Dependencies:** stdlib only. Optional `memory_logger`.
+**Dependencies:** stdlib only. Imports constants from `memory_staging_utils` for dynamic regex construction. Optional `memory_logger`.
 
 **Error handling:** JSON parse failure -> exit 0.
 
 **LLM judgment:** None.
 
 **Key internals:**
-- Single regex `_STAGING_WRITE_PATTERN` detects: cat/echo/printf redirects, tee, cp/mv/install/dd, ln/link, and shell redirects (>, >>) targeting `.claude/memory/.staging/`.
+- `_STAGING_WRITE_PATTERN`: Dynamic regex built using constants from `memory_staging_utils` (`STAGING_DIR_PREFIX`), targeting both legacy `.claude/memory/.staging/` and XDG-based staging paths. Detects: cat/echo/printf redirects, tee, cp/mv/install/dd, ln/link, and shell redirects (>, >>).
 - Rationale: Forces subagents to use Write tool for staging files, preventing Guardian false positives from heredoc body content.
 
 ### 3.13 memory_validate_hook.py (PostToolUse:Write Validator)
@@ -656,7 +669,7 @@ memory_validate_hook.py (10s timeout)
 
 **Output:** stdout JSON with `permissionDecision: "deny"` (on invalid) or nothing.
 
-**Dependencies:** Optional pydantic v2 (lazy-bootstrapped from `.venv`). Imports `memory_write.validate_memory()` if pydantic available.
+**Dependencies:** Optional pydantic v2 (lazy-bootstrapped from `.venv`). Imports `memory_write.validate_memory()` if pydantic available. Uses `is_staging_path()` from `memory_staging_utils` for staging file detection.
 
 **Error handling:** Falls back to basic validation if pydantic unavailable.
 
@@ -671,9 +684,9 @@ memory_validate_hook.py (10s timeout)
 
 ### 3.14 memory_log_analyzer.py (Log Anomaly Detector)
 
-**Input:** CLI: `--root`, `[--days]`, `[--format]`.
+**Input:** CLI: `--root`, `[--days]`, `[--format]`, `[--metrics]`, `[--watch]`.
 
-**Output:** JSON or text report of detected anomalies.
+**Output:** JSON or text report of detected anomalies; `--metrics` outputs operational dashboard; `--watch` outputs real-time tailed events.
 
 **Dependencies:** stdlib only.
 
@@ -683,8 +696,36 @@ memory_validate_hook.py (10s timeout)
 
 **Key internals:**
 - Anomaly detectors: skip rate spikes (90%+ critical), zero-length prompts (50%+ of skips), category never triggers, booster never hits, error spikes (10%+).
+- `--metrics` mode: Operational dashboard showing aggregate stats (event counts, durations, error rates, category distributions) across log files.
+- `--watch` mode: Real-time log tailing with anomaly detection on incoming events.
 - Minimum sample size thresholds prevent false alarms on small datasets.
 - Symlink-safe path traversal throughout.
+
+### 3.15 memory_staging_utils.py (Shared Staging Path Utility)
+
+**Input:** Imported as module by `memory_triage.py`, `memory_retrieve.py`, `memory_orchestrate.py`, `memory_write_guard.py`, `memory_staging_guard.py`, `memory_validate_hook.py`, `memory_draft.py`, `memory_write.py`.
+
+**Output:** Staging paths, `PinnedStagingDir` context manager.
+
+**Dependencies:** stdlib only (hashlib, os, stat, secrets, time).
+
+**Error handling:** Functions raise on critical failures (invalid ownership, permission violations). Callers handle errors.
+
+**LLM judgment:** None.
+
+**Key internals:**
+- `_resolve_staging_base()`: 4-tier priority for base directory selection: XDG_RUNTIME_DIR (if set) > `/run/user/$UID` (if exists) > macOS `confstr('CS_DARWIN_USER_TEMP_DIR')` > `~/.cache` fallback.
+- `get_staging_dir(cwd)`: Computes deterministic staging path as `<base>/.claude-memory-staging-<hash>` where `<hash>` is `SHA-256(euid:realpath(cwd))[:12]`. Returns path string without creating directory.
+- `ensure_staging_dir()`: Creates staging directory with `0o700` permissions. Validates parent chain ownership and permissions.
+- `validate_staging_dir()`: Checks directory ownership (must match euid), permissions (must be 0o700), and rejects symlinks.
+- `is_staging_path(path)`: Returns `True` for XDG-based staging paths (`STAGING_DIR_PREFIX`) and legacy `/tmp/.claude-memory-staging-` paths (`_LEGACY_STAGING_PREFIX`). Does NOT cover the deprecated `.claude/memory/.staging/` path (guard scripts handle that via separate path-matching logic).
+- `PinnedStagingDir`: Context manager for TOCTOU-safe staging directory operations. Opens directory fd with `O_DIRECTORY|O_NOFOLLOW`, validates ownership via `fstat()`. All operations use `dir_fd` parameter:
+  - `write_file()`: O_EXCL temp file creation + `os.rename()` under dir_fd for atomic writes.
+  - `read_file()`: Reads via dir_fd-relative open.
+  - `unlink()`: Removes file via dir_fd.
+  - `listdir()`: Lists directory contents via dir_fd.
+  - `exists()`: Checks file existence via dir_fd.
+- `_cleanup_stale_staging()`: Removes sibling staging directories older than 7 days (hardcoded). Only runs for non-`/tmp/` paths (`/tmp/` paths are cleaned by the OS). Best-effort, silently ignores errors.
 
 ---
 
@@ -868,28 +909,25 @@ Used by UPDATE action in `memory_write.py`:
 - If mismatch: returns `OCC_CONFLICT` error (caller must re-read and retry).
 - This prevents lost updates when two sessions try to update the same file.
 
-### 6.3 Parallel Subagent Execution
+### 6.3 Parallel Subagent Execution (v6 3-Phase Architecture)
 
-Phase 1 (Intent Drafting):
-- Multiple Agent subagents spawned in parallel (one per triggered category).
+Phase 1 DRAFT (Intent Drafting):
+- Multiple Agent subagents (`memory-drafter.md`) spawned in parallel with `run_in_background: true`.
 - Each reads its own context file and writes its own intent file.
 - No shared state. No contention.
 - If one fails, it's skipped; others continue.
 
-Phase 1.5 (Candidate Selection + Draft Assembly):
-- Multiple Bash calls spawned in parallel (SKILL.md instructs this).
-- `memory_candidate.py` reads index.md (read-only) -- safe for parallel execution.
-- `memory_draft.py` writes unique draft files (PID + timestamp in filename) -- no collision.
+Phase 1.5 VERIFY (Optional, disabled by default):
+- When enabled: `memory_orchestrate.py --action prepare` runs deterministically (no parallelism).
+- Verification Agent subagents spawned in parallel for risk-eligible categories.
+- Each reads its own draft + context file (read-only). No shared state.
 
-Phase 2 (Verification):
-- Multiple Task subagents spawned in parallel.
-- Each reads its own draft + context file (read-only).
-- No shared state.
-
-Phase 3 (Save):
-- Single Task subagent executes commands SEQUENTIALLY (combined with `;`).
+Phase 2 COMMIT (Single Subprocess):
+- `memory_orchestrate.py --action run` executes ALL mechanical steps internally (candidate selection, CUD resolution, draft assembly, save execution, enforcement, cleanup).
+- Candidate selection and draft assembly run sequentially per category inside the subprocess.
 - All index mutations happen inside FlockIndex lock.
 - `memory_enforce.py` acquires its own FlockIndex lock (strict mode).
+- No subagents involved -- entirely deterministic Python.
 
 ### 6.4 Race Condition Risks
 
@@ -897,7 +935,7 @@ Phase 3 (Save):
 
 2. **Concurrent session stops**: If two Claude Code instances stop simultaneously for the same project, both could read the index, both could pass OCC checks on different files, and both could write. The FlockIndex lock serializes index mutations but not the entire pipeline.
 
-3. **Enforce during Phase 3**: `memory_write.py` auto-triggers `memory_enforce.py` after session_summary CREATE. The explicit enforce in Phase 3's command list creates a double-enforcement. Both acquire the FlockIndex lock, so they won't corrupt state, but the second one is redundant.
+3. **Double enforcement (RESOLVED)**: Previously, `memory_write.py` auto-triggered `memory_enforce.py` after session_summary CREATE, and the Phase 3 command list ran an explicit enforce -- creating double-enforcement. **RESOLVED by `--skip-auto-enforce`**: `memory_orchestrate.py` passes `--skip-auto-enforce` to `memory_write.py` during `execute_saves()`, then runs its own single enforce step.
 
 4. **Staging file cleanup vs. pending saves**: If the save subagent crashes mid-execution, some commands may have succeeded (files written) while staging files remain. The `.triage-pending.json` sentinel captures this, but recovery (next session's `/memory:save`) re-triages from scratch, not from the partial state.
 
@@ -949,28 +987,21 @@ Context injection (UserPromptSubmit): Plain text written to stdout is appended t
 
 ### 7.2 Claude Code Agent/Task Subagent API
 
-Agent subagents (Phase 1):
+Agent subagents (Phase 1 DRAFT):
 ```
 Agent(
   subagent_type: "memory-drafter",    // References agents/memory-drafter.md
   model: "haiku|sonnet|opus",         // From config category_models
+  run_in_background: true,            // Parallel execution, reduced screen noise
   prompt: "Category: ...\nContext file: ...\nOutput: ..."
-)
-```
-
-Task subagents (Phase 2, 3):
-```
-Task(
-  model: "sonnet|haiku",
-  subagent_type: "general-purpose",
-  prompt: "..."                       // Inline instructions
 )
 ```
 
 Key constraints:
 - Agent subagents have restricted tool access (defined in agent file YAML frontmatter `tools: Read, Write`).
-- Task subagents have general tool access.
+- `run_in_background: true` enables parallel spawning and reduces visible terminal output.
 - Subagents cannot access the main conversation context (they get only the prompt passed to them).
+- Task subagents (formerly used for Phase 2 verification and Phase 3 save) are eliminated in v6. Phase 1.5 VERIFY (optional, disabled by default) uses standard Agent subagents if enabled.
 
 ### 7.3 Guardian Interaction Surface
 
@@ -980,7 +1011,7 @@ Claude Code's Guardian (`bash_guardian.py` and `write_guardian.py`) scans:
 
 **Conflict points and mitigations:**
 
-1. **Heredoc with `.claude` paths in Bash**: Guardian flags heredoc body content that mentions `.claude` paths. Mitigation: SKILL.md Rule 0 -- all staging file content must be written via Write tool, not Bash. `memory_staging_guard.py` enforces this.
+1. **Heredoc with `.claude` paths in Bash (PRIMARY -- RESOLVED in v6)**: Previously the most frequent Guardian conflict. The Phase 3 haiku Task subagent would generate Bash heredocs containing `.claude` paths, triggering Guardian approval prompts. **Eliminated** by removing Phase 3 entirely -- `memory_orchestrate.py` subprocess handles all save operations via Python `open()`, which is invisible to Guardian. `memory_staging_guard.py` remains as a safety net for any residual Bash write attempts to staging.
 
 2. **Python string literals in source code**: Guard scripts split path markers at runtime (`".clau" + "de"`) to avoid Guardian scanning source files and flagging them.
 
@@ -996,49 +1027,32 @@ Claude Code's Guardian (`bash_guardian.py` and `write_guardian.py`) scans:
 
 ### 8.1 Stop Hook Re-fire Loop
 
-**Problem:** The `.stop_hook_active` flag is consumed (unlinked) on check. If the user stops again before the save completes, the flag is gone and triage re-fires, potentially blocking stop again. The `.triage-handled` sentinel mitigates this (5min TTL), but the sentinel is cleaned up by staging cleanup after successful save, creating a window where re-fire can occur.
+**Problem:** Re-fire prevention relies on 5 independent guards checked in order:
+1. `.stop_hook_active` flag (TTL 5min): consumed on check, prevents immediate re-fire
+2. `.triage-handled` JSON sentinel: session-scoped state machine (pending/saving/saved/failed)
+3. `last-save-result.json` guard: checks session_id in result file
+4. Triage lock (`O_CREAT|O_EXCL`): prevents concurrent triage from parallel Stop hooks
+5. Fire count: tracked per invocation for diagnostics
 
-**Sequence:**
-1. Triage fires, blocks stop, creates `.stop_hook_active` + `.triage-handled`
-2. Save starts, cleanup deletes `.triage-handled`
-3. User re-stops during save
-4. Triage fires again (no flag, no sentinel) -- blocks stop again
-5. Now the agent has two pending save operations
+**Residual risk:** After successful save, staging cleanup removes the sentinel. If the user re-stops in the narrow window after cleanup but before the session ends, guards 1 (consumed) and 2 (cleaned) may be absent. Guards 3 (last-save-result) and 4 (triage lock) provide backup, but a theoretical re-fire window remains if last-save-result is also consumed by a concurrent retrieve hook.
 
 ### 8.2 Multi-Phase Orchestration Complexity
 
-The 5-phase pipeline (0, 1, 1.5, 2, 3) with 3 different subagent types creates significant complexity:
-
-- **Phase 0** is just JSON parsing -- could be a script.
-- **Phase 1** needs LLM judgment (correct) but uses Agent subagents with restricted tools.
-- **Phase 1.5** is deterministic -- the main agent is instructed to follow mechanical rules, but it's an LLM interpreting prose instructions.
-- **Phase 2** needs LLM judgment (correct) but is a simple quality check.
-- **Phase 3** is just running commands -- a Task subagent runs pre-computed Bash.
-
-The entire Phase 1.5 + 3 could be a single script, eliminating the need for the main LLM to orchestrate deterministic steps and the Phase 3 subagent to merely execute commands.
+**RESOLVED in v6** by 3-phase simplification. The former 5-phase pipeline (0, 1, 1.5, 2, 3) with 3 different subagent types has been reduced to 3 phases: SETUP (deterministic parse/cleanup/config), Phase 1 DRAFT (per-category Agent subagents), and Phase 2 COMMIT (single `memory_orchestrate.py --action run` subprocess). All mechanical steps (candidate selection, CUD resolution, draft assembly, save execution, enforcement, cleanup) are now inside the Python subprocess. Only Phase 1 DRAFT requires LLM judgment (intent drafting). Optional Phase 1.5 VERIFY is available but disabled by default.
 
 ### 8.3 Screen Noise from Intermediate Steps
 
-Each subagent creates visible output in the user's terminal:
-- Phase 1: N subagent spawn/completion messages
-- Phase 1.5: M Bash call outputs (candidate.py, draft.py)
-- Phase 2: N verification subagent messages
-- Phase 3: 1 save subagent with command outputs
-
-For a session triggering 3 categories, this is approximately 10+ visible console interactions, all during what should be a silent auto-capture.
+**RESOLVED in v6** by screen-noise-reduction (`run_in_background`, single subprocess). Phase 1 DRAFT subagents run with `run_in_background: true`, and Phase 2 COMMIT is a single `memory_orchestrate.py` subprocess call. The former multi-step visible output (Phase 1.5 Bash calls, Phase 2 verification messages, Phase 3 save subagent commands) is eliminated. Remaining visible output is limited to Phase 1 subagent spawn/completion notifications and the single Phase 2 subprocess result.
 
 ### 8.4 Mixed Execution Models
 
-The system uses four different execution models:
-1. **Hooks** (deterministic scripts communicating via stdin/stdout JSON)
-2. **Skills** (LLM-interpreted prose instructions)
-3. **Subagents** (Agent with agent file, Task with inline prompt)
-4. **Direct Bash** (Python scripts run via Bash tool)
+**PARTIALLY RESOLVED** -- reduced from 4 to 2 primary execution models (hooks + skills/agents). Direct Bash eliminated (orchestrator subprocess handles all mechanical steps).
 
-This means:
-- The same operation (e.g., "select a candidate") could theoretically be implemented in any of these models.
-- Debugging requires understanding which model is executing at any point.
-- The LLM must switch between "follow instructions literally" (Phase 1.5), "use judgment" (Phase 1, 2), and "just run commands" (Phase 3) within a single interaction.
+Remaining models:
+1. **Hooks** (deterministic scripts communicating via stdin/stdout JSON)
+2. **Skills/Agents** (LLM-interpreted: SKILL.md for orchestration, Agent subagents for drafting)
+
+The LLM's role is now limited to: interpreting SETUP steps, spawning Phase 1 subagents, and invoking the single Phase 2 subprocess. It no longer interprets mechanical instructions (CUD resolution table), runs direct Bash commands for intermediate steps, or manages Phase 3 Task subagents.
 
 ### 8.5 PostToolUse Limitation
 
@@ -1049,21 +1063,16 @@ This means:
 
 ### 8.6 Staging Directory as Shared Mutable State
 
-The `.staging/` directory is the central communication channel between all phases:
-- Triage writes context files and triage-data.json
+The staging directory (now XDG-based via `memory_staging_utils.get_staging_dir()`) is the central communication channel between all phases:
+- Triage writes context files and triage-data.json (via `PinnedStagingDir` for TOCTOU-safe I/O)
 - Phase 1 subagents write intent files
-- Phase 1.5 writes new-info, input, and draft files
-- Phase 3 reads drafts and cleans up
+- Phase 2 (`memory_orchestrate.py`) reads intents, writes intermediate files, executes saves, and cleans up
 
-If any phase crashes or produces unexpected output, subsequent phases may read stale or corrupt data. The pre-phase cleanup (removing stale intent files) partially addresses this, but context files and triage-data.json are not cleaned between phases.
+`PinnedStagingDir` mitigates TOCTOU attacks by pinning the directory fd (O_DIRECTORY|O_NOFOLLOW), validating ownership via fstat, and performing all I/O via dir_fd. However, the fundamental issue remains: if any phase crashes or produces unexpected output, subsequent phases may read stale or corrupt data. The pre-phase cleanup (removing stale intent files in SETUP Step 2) partially addresses this, but context files and triage-data.json are not cleaned between phases.
 
 ### 8.7 Dual Enforcement Path for Session Summaries
 
-Session summary rolling window enforcement is triggered in two places:
-1. `memory_write.py` do_create(): auto-spawns `memory_enforce.py` after successful session_summary create (subprocess).
-2. SKILL.md Phase 3: explicit `memory_enforce.py --category session_summary` command in the save subagent's command list.
-
-This is documented as "safety belt" but creates redundant work and potential confusion if the auto-enforcement fails silently.
+**RESOLVED** by `--skip-auto-enforce` flag in `memory_orchestrate.py`. Previously, enforcement was triggered in two places: (1) `memory_write.py` auto-spawn after session_summary create, and (2) explicit Phase 3 command. Now `memory_orchestrate.py` passes `--skip-auto-enforce` to `memory_write.py` during `execute_saves()`, suppressing the auto-spawn. A single enforce step runs after all saves complete, controlled by the orchestrator.
 
 ### 8.8 Config Split Between Script-Read and Agent-Interpreted
 

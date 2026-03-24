@@ -95,14 +95,19 @@ User asks "What do you remember about X?" or "What did we decide about Y?" and C
 5. Compares scores against configurable thresholds (default range 0.4-0.6).
 6. If any category exceeds its threshold:
    - Sets the stop flag (`.claude/.stop_hook_active`) to prevent re-fire loops.
-   - Touches sentinel file (`.staging/.triage-handled`) for idempotency.
-   - Writes per-category context files (`.staging/context-<cat>.txt`) with transcript excerpts.
-   - Writes `triage-data.json` to staging (atomic write via tmp+rename).
+   - Writes sentinel JSON (`<staging_dir>/.triage-handled`) -- JSON state machine with `{session_id, state, timestamp, pid}`. States: `pending`->`saving`->`saved`|`failed`. State `pending`/`saving`/`saved` blocks re-triage (same session, within TTL 1800s); `failed` allows re-triage.
+   - Writes per-category context files (`<staging_dir>/context-<cat>.txt`) with transcript excerpts.
+   - Writes `triage-data.json` to `<staging_dir>/` (atomic write via tmp+rename).
    - Outputs `{"decision": "block", "reason": "..."}` to stdout with human-readable message + structured data reference.
 
-**Re-fire prevention mechanisms:**
-- `check_stop_flag()`: Checks `.claude/.stop_hook_active` flag with 5-minute TTL. If fresh flag exists, the hook exits immediately (allows the stop through).
-- Sentinel file: `.staging/.triage-handled` with TTL check prevents duplicate triage within a session.
+**Re-fire prevention mechanisms (5 layers):**
+- `check_stop_flag()`: File-based flag (`.claude/.stop_hook_active`) with 5-minute TTL. If fresh flag exists, the hook exits immediately (allows the stop through).
+- JSON sentinel: Session-scoped state machine (`<staging_dir>/.triage-handled`) -- blocks re-triage when state is `pending`/`saving`/`saved` for the same session within TTL (1800s). `failed` state allows retry.
+- `_check_save_result_guard()`: If `last-save-result.json` exists and is recent (same session), skip -- the session has already saved successfully.
+- `_acquire_triage_lock()`: `O_CREAT|O_EXCL` exclusive lock on `.stop_hook_lock` with 120s stale timeout -- prevents concurrent triage from parallel stop events.
+- `sentinel_recheck`: Under triage lock, re-checks sentinel (double-check pattern prevents race between lock acquisition and sentinel write).
+
+**Informational metric:** `_increment_fire_count()` tracks per-workspace fire count (`.triage-fire-count`), included in all triage log events for diagnostics. Does not block.
 
 **Category pattern definitions:**
 
@@ -183,17 +188,18 @@ The orchestrator performs all deterministic steps as subprocesses:
 
 **Behavior:**
 
-1. **Save confirmation (Block 1):** Checks for `last-save-result.json`. If recent (<24h), displays what was saved, then deletes the file.
-2. **Orphan detection (Block 2):** Checks for stale `triage-data.json` without a save result. Notifies user if orphaned data found.
-3. **Pending notification (Block 3):** Checks for `.triage-pending.json`. Notifies user of pending saves from last session.
+1. **Save confirmation (Block 1):** Checks for `last-save-result.json` in `<staging_dir>` (via `get_staging_dir()` with legacy `.staging/` fallback). If recent (<24h), displays what was saved, then deletes the file.
+2. **Orphan detection (Block 2):** Checks for stale `triage-data.json` in `<staging_dir>` (via `get_staging_dir()` with legacy `.staging/` fallback) without a save result. Notifies user if orphaned data found.
+3. **Pending notification (Block 3):** Checks for `.triage-pending.json` in `<staging_dir>` (via `get_staging_dir()` with legacy `.staging/` fallback). Notifies user of pending saves from last session.
 4. **Short prompt skip:** Prompts < 10 characters are skipped (greetings, acks).
 5. **Index rebuild on demand:** If `index.md` is missing but memory root exists, auto-rebuilds.
 6. **FTS5 BM25 search:** Tokenizes user prompt, constructs FTS5 query, searches title+tags index.
 7. **Hybrid body scoring:** For top-K candidates, reads JSON files, extracts body text, adds body bonus (0-3 points).
-8. **Recency check:** Reads JSON for top candidates to check `updated_at` (30-day recency window) and `record_status` (filters retired/archived).
-9. **Threshold + Top-K:** Applies 25% noise floor, limits to max_inject (default 3, configurable 0-20).
-10. **Confidence labeling:** Labels results as high/medium/low based on ratio to best score, with optional absolute floor.
-11. **Output:** Prints XML elements (`<memory-context>` wrapper with `<result>` elements) to stdout, which Claude receives as context.
+8. **Description scoring (`score_description()`):** Adds up to 2 bonus points for entries matching category description keywords, applied only to already-matched entries.
+9. **Recency check:** Reads JSON for top candidates to check `updated_at` (30-day recency window) and `record_status` (filters retired/archived).
+10. **Threshold + Top-K:** Applies 25% noise floor, limits to max_inject (default 3, configurable 0-20).
+11. **Confidence labeling:** Labels results as high/medium/low based on ratio to best score, with optional absolute floor.
+12. **Output:** Prints XML elements (`<memory-context>` wrapper with `<result>` elements) to stdout, which Claude receives as context.
 
 **Optional LLM Judge (`memory_judge.py`):**
 When enabled via config + `ANTHROPIC_API_KEY` env var:
@@ -203,6 +209,7 @@ When enabled via config + `ANTHROPIC_API_KEY` env var:
 - Anti-injection: untrusted data wrapped in `<memory_data>` XML tags.
 - Parallel batch splitting via ThreadPoolExecutor when candidates > 6.
 - Falls back to unfiltered results on any failure.
+- `retrieval.judge.dual_verification` config key enables a second verification pass for borderline candidates.
 
 **Output modes:**
 - `legacy` (default): All results as `<result>` elements.
@@ -292,6 +299,12 @@ Restores retired memory to active:
 
 - `cleanup-staging`: Removes transient files (triage-data, context-*, draft-*, intent-*, etc.) with path containment check.
 - `write-save-result`: Writes `last-save-result.json` with schema validation (allowed keys, length caps).
+- `cleanup-intents`: Removes stale `intent-*.json` from staging (called during SETUP Step 2).
+- `update-sentinel-state`: Updates sentinel JSON state machine to a given state (called by `memory_orchestrate.py`).
+- `--result-file <path>` flag: Writes save result to a file (replaces old `write-save-result-direct` which was removed for shell injection safety).
+- `--skip-auto-enforce` flag: Prevents `memory_write.py` from auto-triggering enforce after `session_summary` create (used by orchestrator which runs enforce separately).
+- C1 overwrite guard: `do_create()` rejects CREATE if an active file already exists at target path.
+- C2 index dedup: `add_to_index()` deduplicates by path before appending.
 
 ### 3.4 Guard Rails
 
@@ -455,6 +468,16 @@ Restores retired memory to active:
 - `guard.write_deny`, `guard.write_allow_staging`: Write guard decisions.
 - `guard.staging_deny`: Staging guard denials.
 - `validate.*`: PostToolUse validation results, quarantines, staging skips.
+- `triage.idempotency_skip`: Fired when triage is skipped due to idempotency guards (5 variants: `stop_flag`, `sentinel`, `save_result`, `lock_held`, `sentinel_recheck`).
+- `save.start`, `save.complete`: Emitted by `memory_orchestrate.py` at the beginning and end of the save pipeline.
+- `retrieval.inject`, `retrieval.judge_result`, `retrieval.fallback`: Retrieval pipeline events for injection, judge filtering, and fallback behavior.
+
+**Phase timing:**
+`last-save-result.json` includes a `phase_timing` dict with `triage_ms`, `orchestrate_ms`, `write_ms`, `total_ms` for end-to-end save flow profiling.
+
+**Log analyzer (`memory_log_analyzer.py`):**
+- `--metrics` mode: Operational dashboard showing save duration stats, re-fire distribution, category frequency, success rates, and phase timing averages.
+- `--watch` mode: Real-time log tailing with `--filter` prefix filtering for targeted monitoring.
 
 ### 3.11 Slash Commands
 
@@ -721,11 +744,16 @@ States:
 
 **Problem:** After the triage hook blocks a stop to save memories, the user might try to stop again while saves are in progress. Without mitigation, the triage hook would fire again, potentially creating duplicate saves or infinite loops.
 
-**Evidence:** The codebase has TWO overlapping mechanisms to prevent this:
+**Evidence:** The codebase has FIVE overlapping mechanisms to prevent this:
 1. `check_stop_flag()` / `set_stop_flag()`: File-based flag (`.claude/.stop_hook_active`) with 5-minute TTL.
-2. Sentinel file (`.staging/.triage-handled`): Touch-based idempotency with TTL check.
+2. JSON sentinel (`<staging_dir>/.triage-handled`): Session-scoped state machine with TTL check prevents duplicate triage within a session.
+3. `_check_save_result_guard()`: If `last-save-result.json` exists and is recent (same session), skip -- the session has already saved.
+4. `_acquire_triage_lock()`: `O_CREAT|O_EXCL` exclusive lock on `.stop_hook_lock` with 120s stale timeout.
+5. `sentinel_recheck`: Under triage lock, re-checks sentinel (double-check pattern prevents race between lock acquisition and sentinel write).
 
-Both exist because neither alone was sufficient. The flag approach uses the `.claude/` parent directory (outside memory root), while the sentinel uses the staging directory. This dual mechanism indicates the problem was difficult to solve reliably.
+**Informational metric:** `_increment_fire_count()` tracks per-workspace fire count (`.triage-fire-count`), included in all triage log events. Does not block.
+
+All five blocking guards exist because no single mechanism was sufficient in all edge cases. The layers address different failure modes: concurrent stop events, rapid re-fires, same-session duplicates, and lock-sentinel races.
 
 ### 6.2 Screen Noise from Multi-Phase Save Flow
 
@@ -737,6 +765,8 @@ Both exist because neither alone was sufficient. The flag approach uses the `.cl
 - The Phase 3 subagent instruction ends with: "Return ONLY a single-line summary."
 
 Despite these mitigations, the multi-phase flow inherently creates visible tool calls (Agent spawns, Bash executions, Write tool calls for staging files).
+
+**Status: RESOLVED in v6.** Architecture simplification (3-phase, `run_in_background: true` for drafters, single `memory_orchestrate.py` subprocess for COMMIT) eliminated multi-phase visible output.
 
 ### 6.3 Guardian Compatibility Issues
 
@@ -753,6 +783,8 @@ Despite these mitigations, the multi-phase flow inherently creates visible tool 
 - Staging guard exists specifically to prevent Bash heredoc writes that trigger Guardian.
 - Write-save-result uses Write tool + `--result-file` indirection instead of inline JSON on command line.
 
+**Status: LARGELY RESOLVED in v6.** Python subprocess from `memory_orchestrate.py` is invisible to Guardian. Phase 1 drafter Write-only restriction remains. Guardian compatibility code in guard scripts still present.
+
 ### 6.4 Complex 5-Phase Orchestration
 
 **Problem:** The save flow involves 5 phases, 3 types of subagents (memory-drafter Agent, verification Task, save Task), multiple Python scripts, and numerous staging files. This complexity creates maintenance burden and failure modes.
@@ -762,6 +794,8 @@ Despite these mitigations, the multi-phase flow inherently creates visible tool 
 - Error handling at every phase boundary (skip on failure, preserve staging for retry, pending sentinel for next session).
 - Cost note warns about 12 subagent calls when all 6 categories trigger.
 - Multiple file handoff points (context files -> intent files -> new-info files -> input files -> draft files -> save commands).
+
+**Status: RESOLVED in v6.** Simplified to 3-phase (SETUP, Phase 1 DRAFT, Phase 2 COMMIT) with 1 subagent type (memory-drafter). Max 6 subagent calls (one per category). `memory_orchestrate.py --action run` replaces Phase 1.5 LLM orchestration + Phase 3 haiku saver.
 
 ### 6.5 Tokenizer Divergence
 
@@ -814,13 +848,13 @@ This means the PreToolUse guard is the critical defense, and the PostToolUse hoo
 
 ```
 memory_triage.py (Stop hook)
-  imports: memory_logger (lazy, optional)
+  imports: memory_staging_utils, memory_logger (lazy, optional)
   reads: transcript JSONL, memory-config.json
-  writes: .staging/context-*.txt, .staging/triage-data.json, .staging/.triage-handled, .claude/.stop_hook_active
+  writes: <staging_dir>/context-*.txt, <staging_dir>/triage-data.json, <staging_dir>/.triage-handled, .claude/.stop_hook_active
 
 memory_retrieve.py (UserPromptSubmit hook)
-  imports: memory_search_engine, memory_logger (lazy)
-  reads: index.md, memory JSONs, .staging/last-save-result.json, .staging/.triage-pending.json
+  imports: memory_staging_utils, memory_search_engine, memory_logger (lazy)
+  reads: index.md, memory JSONs, <staging_dir>/last-save-result.json, <staging_dir>/.triage-pending.json
   calls: memory_index.py --rebuild (subprocess, on demand)
   calls: memory_judge.py (when judge enabled)
 
@@ -828,16 +862,16 @@ memory_search_engine.py (shared engine + CLI)
   imports: memory_logger (lazy)
   reads: index.md, memory JSONs (search mode)
 
-memory_candidate.py (Phase 1.5)
+memory_candidate.py (Phase 2 COMMIT, via orchestrator)
   reads: index.md, memory JSONs (excerpt)
   calls: memory_index.py --rebuild (subprocess, on demand)
 
-memory_draft.py (Phase 1.5)
+memory_draft.py (Phase 2 COMMIT, via orchestrator)
   imports: memory_write (slugify, now_utc, build_memory_model, etc.)
   reads: input JSON, candidate JSON (update)
-  writes: .staging/draft-*.json
+  writes: <staging_dir>/draft-*.json
 
-memory_write.py (Phase 3 + manual)
+memory_write.py (Phase 2 COMMIT + manual)
   imports: pydantic v2 (bootstraps from venv)
   reads: input JSON, target JSON (update/retire/archive/etc.)
   writes: memory JSONs (atomic), index.md
@@ -849,17 +883,30 @@ memory_enforce.py (rolling window)
   writes: memory JSONs (via retire_record), index.md
 
 memory_write_guard.py (PreToolUse:Write)
-  imports: memory_logger (lazy)
+  imports: memory_staging_utils, memory_logger (lazy)
 
 memory_staging_guard.py (PreToolUse:Bash)
-  imports: memory_logger (lazy)
+  imports: memory_staging_utils, memory_logger (lazy)
 
 memory_validate_hook.py (PostToolUse:Write)
-  imports: memory_write (lazy, via pydantic bootstrap), memory_logger (lazy)
+  imports: memory_staging_utils, memory_write (lazy, via pydantic bootstrap), memory_logger (lazy)
 
 memory_judge.py (LLM judge)
   imports: memory_logger (lazy)
   calls: Anthropic Messages API
+
+memory_orchestrate.py (Phase 2 COMMIT orchestrator)
+  imports: memory_staging_utils, memory_write
+  reads: <staging_dir>/intent-*.json, memory-config.json
+  writes: <staging_dir>/manifest-*.json, <staging_dir>/last-save-result.json
+  calls: memory_candidate.py (subprocess, for update/retire candidate selection)
+  calls: memory_draft.py (subprocess, for draft assembly)
+  calls: memory_write.py (subprocess, for CUD execution)
+  calls: memory_enforce.py (subprocess, for rolling window enforcement)
+
+memory_staging_utils.py (shared staging path utility)
+  no internal imports (stdlib only)
+  used by: memory_triage, memory_retrieve, memory_orchestrate, memory_write_guard, memory_staging_guard, memory_validate_hook
 
 memory_logger.py (shared logging)
   no internal imports
