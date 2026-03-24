@@ -1041,12 +1041,14 @@ Claude Code's Guardian (`bash_guardian.py` and `write_guardian.py`) scans:
 
 ### 8.1 Stop Hook Re-fire Loop
 
-**Problem:** Re-fire prevention relies on 5 independent guards checked in order:
+**Problem:** Re-fire prevention relies on 5 blocking guards plus 1 diagnostic metric, checked in order:
 1. `.stop_hook_active` flag (TTL 5min): consumed on check, prevents immediate re-fire
 2. `.triage-handled` JSON sentinel: session-scoped state machine (pending/saving/saved/failed)
 3. `last-save-result.json` guard: checks session_id in result file
 4. Triage lock (`O_CREAT|O_EXCL`): prevents concurrent triage from parallel Stop hooks
-5. Fire count: tracked per invocation for diagnostics
+5. Sentinel recheck (under lock): double-check pattern prevents lock-sentinel race
+
+**Diagnostic metric:** `_increment_fire_count()` tracks per-session invocation count via `.triage-fire-count`. Does not block.
 
 **Residual risk:** After successful save, staging cleanup removes the sentinel. If the user re-stops in the narrow window after cleanup but before the session ends, guards 1 (consumed) and 2 (cleaned) may be absent. Guards 3 (last-save-result) and 4 (triage lock) provide backup, but a theoretical re-fire window remains if last-save-result is also consumed by a concurrent retrieve hook.
 

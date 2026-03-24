@@ -22,7 +22,7 @@ Architecture: v6.0.0 -- 3-phase flow: SETUP (deterministic parse/cleanup) -> Pha
 
 ### Write Actions
 
-`memory_write.py` supports 6 actions: `create`, `update`, `retire` (soft retire), `archive`, `unarchive`, and `restore`. The `retire` action sets `record_status="retired"` (soft retire with grace period). `archive`/`unarchive` handle long-term preservation (`active` <-> `archived`). `restore` transitions `retired` -> `active` (clears retirement fields, re-adds to index).
+`memory_write.py` supports 10 actions: `create`, `update`, `retire` (soft retire), `archive`, `unarchive`, `restore`, `cleanup-staging`, `write-save-result`, `cleanup-intents`, and `update-sentinel-state`. The `retire` action sets `record_status="retired"` (soft retire with grace period). `archive`/`unarchive` handle long-term preservation (`active` <-> `archived`). `restore` transitions `retired` -> `active` (clears retirement fields, re-adds to index).
 
 ### Parallel Per-Category Processing
 

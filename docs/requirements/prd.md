@@ -610,7 +610,7 @@ Restores retired memory to active:
 - **PinnedStagingDir:** TOCTOU defense using `O_DIRECTORY|O_NOFOLLOW` + `fstat` + `dir_fd` to pin directory identity at open time and verify it hasn't been swapped before operations.
 - **Parent chain validation:** Symlink/traversal defense that validates every component in the path chain, preventing symbolic link attacks at intermediate directories.
 - **`write-save-result-direct` removal:** Replaced by `--result-file <path>` flag to eliminate shell injection vector from inline JSON on command line.
-- **XDG staging:** Staging directory uses XDG-based deterministic path (`/tmp/.claude-memory-staging-<hash>`) instead of in-tree `.staging/`, eliminating the class of attacks exploiting world-writable directories within the project tree.
+- **XDG staging:** Staging directory uses XDG-based deterministic path (4-tier resolution: XDG_RUNTIME_DIR > /run/user/$UID > macOS confstr > ~/.cache, **no `/tmp/` fallback**) instead of in-tree `.staging/`, eliminating the class of attacks exploiting world-writable directories.
 
 #### 4.3.6 Thread Safety
 
@@ -717,8 +717,9 @@ Where `<hash>` is `SHA-256(f"{os.geteuid()}:{os.path.realpath(cwd)}")[:12]`.
   last-save-result.json         # Save outcome (with phase_timing)
   .triage-handled               # Sentinel: triage consumed by save flow
   .triage-pending.json          # Fallback: drafters failed, retrieval detects
-  .index.lockdir/               # FlockIndex lock directory
 ```
+
+> **Note:** `.index.lockdir/` (FlockIndex lock directory) is in the **memory storage root** (`.claude/memory/.index.lockdir/`), NOT in the staging directory.
 
 > **Legacy note:** In v5.x, staging was located at `.claude/memory/.staging/` inside the project tree. The v6 external staging layout eliminates symlink/TOCTOU attacks on shared `/tmp/` directories. Legacy `.staging/` paths are still recognized by guards for backward compatibility.
 
