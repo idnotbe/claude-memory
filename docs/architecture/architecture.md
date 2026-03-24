@@ -1,4 +1,4 @@
-# claude-memory Plugin -- Architecture Document (v5.1.0)
+# claude-memory Plugin -- Architecture Document (v6.0.0)
 
 Target audience: Claude (AI agent). This document describes how every component works, how they interact, what state they manage, and where known weaknesses exist.
 
@@ -15,11 +15,11 @@ Claude Code Runtime
  |     |
  |     |-- Stop[*]         --> memory_triage.py        (1 deterministic command hook)
  |     |-- PreToolUse[Write] --> memory_write_guard.py  (Block direct memory writes)
- |     |-- PreToolUse[Bash]  --> memory_staging_guard.py (Block Bash writes to .staging/)
+ |     |-- PreToolUse[Bash]  --> memory_staging_guard.py (Block Bash writes to staging dir)
  |     |-- PostToolUse[Write] --> memory_validate_hook.py (Schema validate + quarantine)
  |     |-- UserPromptSubmit[*] --> memory_retrieve.py   (Auto-inject relevant memories)
  |
- |-- skills/memory-management/SKILL.md   (LLM-interpreted orchestration for Phases 0-3)
+ |-- skills/memory-management/SKILL.md   (LLM-interpreted orchestration: SETUP + Phase 1 DRAFT + Phase 2 COMMIT)
  |-- agents/memory-drafter.md            (Phase 1 subagent definition, tools: Read+Write only)
  |-- commands/
  |     |-- memory.md                     (Slash command: status, retire, archive, restore, gc)
@@ -38,7 +38,7 @@ Claude Code Runtime
  |     |-- memory_enforce.py            (Rolling window enforcement for session_summary)
  |     |-- memory_index.py              (Index rebuild, validate, health, gc)
  |     |-- memory_write_guard.py        (PreToolUse: block direct writes to memory dir)
- |     |-- memory_staging_guard.py      (PreToolUse: block Bash writes to .staging/)
+ |     |-- memory_staging_guard.py      (PreToolUse: block Bash writes to staging dir)
  |     |-- memory_validate_hook.py      (PostToolUse: schema validate, quarantine invalid)
  |     |-- memory_logger.py             (Shared JSONL structured logging, fail-open)
  |     |-- memory_log_analyzer.py       (Log anomaly detector, offline analysis)
@@ -46,7 +46,7 @@ Claude Code Runtime
  |-- .claude/memory/                     (Per-project memory storage root)
  |     |-- memory-config.json           (Runtime config)
  |     |-- index.md                     (Enriched index: title + path + tags per entry)
- |     |-- .staging/                    (Transient working directory for save pipeline)
+ |     |-- (staging in <staging_dir>)    (Transient working directory for save pipeline, outside project tree)
  |     |-- sessions/                    (session_summary JSON files)
  |     |-- decisions/                   (decision JSON files)
  |     |-- runbooks/                    (runbook JSON files)
@@ -70,13 +70,12 @@ Claude Code Runtime
 | Hook (command) | `memory_triage.py` | Stop event | Deterministic. Reads stdin JSON, writes stdout JSON. No LLM. |
 | Hook (command) | `memory_retrieve.py` | UserPromptSubmit | Deterministic search + optional LLM judge. Stdout added to context. |
 | Hook (command) | `memory_write_guard.py` | PreToolUse:Write | Deterministic allow/deny. |
-| Hook (command) | `memory_staging_guard.py` | PreToolUse:Bash | Deterministic deny for Bash writes to .staging/. |
+| Hook (command) | `memory_staging_guard.py` | PreToolUse:Bash | Deterministic deny for staging writes. |
 | Hook (command) | `memory_validate_hook.py` | PostToolUse:Write | Detection-only. Schema validate, quarantine invalid. Cannot prevent write. |
-| Skill (LLM) | `SKILL.md` | Loaded after triage blocks stop | LLM reads SKILL.md instructions, orchestrates Phases 0-3. |
-| Agent subagent | `memory-drafter.md` | Phase 1 | LLM with tools: Read, Write only. No Bash (Guardian-safe). |
-| Task subagent | Verification | Phase 2 | LLM checks draft quality against context. |
-| Task subagent | Save | Phase 3 | Haiku model executes pre-computed Bash commands. |
-| Bash (direct) | `memory_write.py`, `memory_candidate.py`, `memory_draft.py`, `memory_enforce.py` | Phases 1.5 and 3 | Deterministic Python scripts run via Bash tool. |
+| Skill (LLM) | `SKILL.md` | Loaded after triage blocks stop | LLM reads SKILL.md: SETUP (parse + cleanup + config), dispatches Phase 1 DRAFT, invokes Phase 2 COMMIT. |
+| Agent subagent | `memory-drafter.md` | Phase 1 DRAFT | LLM with tools: Read, Write only. `run_in_background: true`. No Bash (Guardian-safe). |
+| Agent subagent (optional) | Verification | Phase 1.5 VERIFY | Optional (disabled by default). Verifies risk-eligible categories (decision, constraint, DELETE, low-confidence). |
+| Subprocess | `memory_orchestrate.py --action run` | Phase 2 COMMIT | Deterministic Python. Runs candidate selection, CUD resolution, draft assembly, write, enforce internally. |
 
 ---
 
@@ -93,154 +92,177 @@ USER types /stop or session ends
     v
 memory_triage.py (command hook, 30s timeout)
     |-- Reads stdin JSON: { transcript_path, cwd }
-    |-- Checks .stop_hook_active flag (TTL 5min): if fresh, allow stop (exit 0 silent)
-    |-- Checks .triage-handled sentinel (TTL 5min): if fresh, skip (idempotency)
+    |-- Re-fire prevention (5 independent guards, checked in order):
+    |     1. .stop_hook_active flag (TTL 5min): if fresh, allow stop (exit 0 silent)
+    |     2. .triage-handled JSON sentinel: session-scoped state machine
+    |        (states: pending/saving/saved/failed; format: {session_id, state, timestamp, pid})
+    |        Skip if same session_id AND state in {pending, saving, saved}
+    |     3. last-save-result.json guard: checks session_id in result file
+    |        (independent of sentinel; falls back to sentinel cross-reference)
+    |     4. Triage lock (O_CREAT|O_EXCL): exclusive file lock per staging dir
+    |        Prevents concurrent triage from parallel Stop hook invocations
+    |     5. Fire count: incremented per invocation, logged for diagnostics
+    |-- Re-checks sentinel under lock (double-check pattern after acquiring lock)
     |-- Reads transcript JSONL (last N messages, default 50)
     |-- Strips code blocks to reduce false positives
     |-- Scores 5 text-based categories via regex primary+booster with co-occurrence window
     |-- Scores SESSION_SUMMARY via activity metrics (tool_uses, distinct_tools, exchanges)
     |-- Compares each score against configurable threshold (default 0.4-0.6)
     |-- If ANY category exceeds threshold:
-    |     |-- Sets .stop_hook_active flag file
-    |     |-- Touches .triage-handled sentinel
-    |     |-- Writes per-category context-<cat>.txt files to .staging/
-    |     |-- Writes triage-data.json to .staging/ (atomic via tmp+rename)
+    |     |-- Sets .stop_hook_active flag file (O_CREAT|O_WRONLY|O_TRUNC|O_NOFOLLOW)
+    |     |-- Writes .triage-handled sentinel with state="pending"
+    |     |-- All staging I/O via PinnedStagingDir (O_DIRECTORY|O_NOFOLLOW + fstat + dir_fd ops)
+    |     |     for TOCTOU safety: pins directory fd, validates ownership, all ops use dir_fd
+    |     |-- Writes per-category context-<cat>.txt files to <staging_dir>
+    |     |-- Writes triage-data.json to <staging_dir> (atomic via tmp+rename under dir_fd)
     |     |-- Outputs stdout: {"decision": "block", "reason": "<message with <triage_data_file> tag>"}
     |-- If NO category exceeds threshold:
     |     |-- Outputs nothing (allow stop)
+    |-- Releases triage lock in finally block
     v
 [Claude Code blocks stop, loads memory-management skill]
     |
     v
-SKILL.md Phase 0: Parse Triage Output
-    |-- Clean stale intent-*.json files
-    |-- Read triage-data.json (file ref from <triage_data_file> tag, fallback inline <triage_data>)
-    |-- Extract categories[], parallel_config from JSON
+SKILL.md SETUP (deterministic, 3 steps)
+    |
+    |-- Step 1: Parse triage output (must run FIRST to obtain <staging_dir>)
+    |     |-- Try: read file path from <triage_data_file> tag -> read JSON -> extract staging_dir
+    |     |-- Fallback: extract inline <triage_data> JSON -> compute staging_dir from project path
+    |
+    |-- Step 2: Clean stale intent files
+    |     |-- python3 memory_write.py --action cleanup-intents --staging-dir <staging_dir>
+    |
+    |-- Step 3: Read config
+    |     |-- Read memory-config.json for category_models, verification_enabled
     v
-SKILL.md Phase 1: Parallel Intent Drafting
+SKILL.md Phase 1: DRAFT (LLM, Agent subagents, parallel)
     |-- For EACH triggered category, spawn Agent subagent:
     |     Agent(subagent_type="memory-drafter", model=config.category_models[cat],
-    |           prompt="Category: <cat>\nContext file: .staging/context-<cat>.txt\nOutput: .staging/intent-<cat>.json")
-    |-- memory-drafter agent (Read+Write only, no Bash):
-    |     |-- Reads context-<cat>.txt
+    |           run_in_background: true,
+    |           prompt="Category: <cat>\nContext file: <staging_dir>/context-<cat>.txt\nOutput: <staging_dir>/intent-<cat>.json")
+    |-- memory-drafter agent (tools: Read, Write ONLY -- no Bash, structurally prevents Guardian conflicts):
+    |     |-- Reads <staging_dir>/context-<cat>.txt
     |     |-- Analyzes transcript data between <transcript_data> tags
-    |     |-- Writes intent-<cat>.json: either SAVE intent or NOOP intent
-    |-- All subagents run in PARALLEL
+    |     |-- Writes <staging_dir>/intent-<cat>.json: either SAVE intent or NOOP intent
+    |-- ALL subagents spawned in PARALLEL (single message, multiple Agent calls)
+    |-- Wait for ALL background subagents to complete before proceeding
     v
-SKILL.md Phase 1.5: Deterministic Execution (Main Agent, NO LLM judgment)
+SKILL.md Phase 1.5: VERIFY (OPTIONAL -- disabled by default)
     |
-    |-- Step 1: Collect + validate intent JSONs
-    |     |-- Read .staging/intent-<cat>.json for each category
-    |     |-- Filter NOOPs, validate SAVE intent required fields
+    |-- Skip check: if triage.parallel.verification_enabled is false (default), skip to Phase 2
     |
-    |-- Step 2: Run candidate selection (parallel Bash calls)
-    |     |-- Write new_info_summary to .staging/new-info-<cat>.txt
-    |     |-- Run memory_candidate.py --category <cat> --new-info-file <path>
-    |     |     |-- Reads index.md, filters to target category
-    |     |     |-- Tokenizes new_info (3+ char tokens, higher precision than retrieval)
-    |     |     |-- Scores entries: title word match (2pts), tag match (3pts), prefix (1pt)
-    |     |     |-- Selects top-1 candidate if score >= 3
-    |     |     |-- Determines structural_cud: CREATE / UPDATE_OR_DELETE / UPDATE / NOOP
-    |     |     |-- Outputs JSON: { candidate, structural_cud, vetoes, hints, ... }
-    |
-    |-- Step 3: CUD Resolution (2-layer)
-    |     |-- L1 = structural_cud from candidate.py (mechanical)
-    |     |-- L2 = intended_action from intent JSON (LLM-derived, default "update")
-    |     |-- Resolution table:
-    |     |     CREATE + CREATE = CREATE
-    |     |     UPDATE_OR_DELETE + UPDATE = UPDATE
-    |     |     UPDATE_OR_DELETE + DELETE = DELETE
-    |     |     CREATE + UPDATE = CREATE (structural: no candidate)
-    |     |     CREATE + DELETE = NOOP (contradictory)
-    |     |     UPDATE_OR_DELETE + CREATE = CREATE (subagent override)
-    |     |     VETO + * = OBEY VETO (mechanical invariant)
-    |     |     NOOP + * = NOOP
-    |
-    |-- Step 4: Execute drafts (parallel Bash calls)
-    |     |-- Write partial_content to .staging/input-<cat>.json
-    |     |-- Run memory_draft.py --action create/update --category <cat> --input-file <path>
-    |     |     |-- Reads partial input JSON
-    |     |     |-- Assembles complete schema-valid memory JSON:
-    |     |     |     CREATE: adds schema_version, id (slugified title), timestamps, changes[]
-    |     |     |     UPDATE: preserves immutables, unions tags/files, appends change, shallow-merges content
-    |     |     |-- Validates against Pydantic model
-    |     |     |-- Writes draft to .staging/draft-<cat>-<timestamp>.json
-    |     |     |-- Outputs JSON: { status: "ok", draft_path: "..." }
-    |
-    |-- Step 5: Handle DELETE actions
-    |     |-- Write .staging/draft-<cat>-retire.json: { action: "retire", target, reason }
-    |
-    |-- Step 6: Summary check -- if ALL NOOP/VETO/error, skip Phase 2
+    |-- When ENABLED (verification_enabled: true):
+    |     |-- Step 1: Run orchestrator in prepare mode
+    |     |     python3 memory_orchestrate.py --staging-dir <staging_dir> --action prepare --memory-root <root>
+    |     |     (runs steps 1-6: collect intents, candidate, CUD, draft, manifest)
+    |     |
+    |     |-- Step 2: Identify risk-eligible categories from manifest
+    |     |     (decision, constraint categories; DELETE actions; confidence < 0.5)
+    |     |
+    |     |-- Step 3: Spawn verification Agent subagents in PARALLEL
+    |     |     (read draft + context, check accuracy/hallucination, verdict: PASS/BLOCK/REVISE)
+    |     |
+    |     |-- Step 4: Commit with exclusions
+    |     |     python3 memory_orchestrate.py --staging-dir <staging_dir> --action commit
+    |     |       --memory-root <root> --exclude-categories <blocked>
     v
-SKILL.md Phase 2: Content Verification (parallel Task subagents)
-    |-- For each draft, spawn Task subagent (verification_model from config, default sonnet):
-    |     |-- Read draft JSON + original context file
-    |     |-- Check: accuracy, hallucination, completeness, tag relevance
-    |     |-- BLOCK if hallucination/factual error, ADVISORY if minor quality issue
-    |     |-- Report PASS or FAIL
-    |-- All verification subagents run in PARALLEL
-    v
-SKILL.md Phase 3: Save (single foreground Task subagent, haiku model)
+SKILL.md Phase 2: COMMIT (deterministic, single subprocess)
     |
-    |-- Step 1: Main agent builds command list from resolved actions + verification results
-    |     |-- Excludes Phase 2 FAILs
-    |     |-- Validates draft paths: must start with .staging/draft-, no ..
-    |     |-- For CREATE: memory_write.py --action create --category <cat> --target <path> --input <draft>
-    |     |-- For UPDATE: memory_write.py --action update --category <cat> --target <path> --input <draft> --hash <md5>
-    |     |-- For DELETE: memory_write.py --action retire --target <path> --reason <why>
-    |     |-- If session_summary created: memory_enforce.py --category session_summary
+    |-- When verification is DISABLED (default):
+    |     python3 memory_orchestrate.py --staging-dir <staging_dir> --action run --memory-root <root>
     |
-    |-- Step 2: Spawn ONE foreground Task subagent (haiku)
-    |     |-- Executes all commands combined with ; separator
-    |     |-- On success: cleanup-staging + write-save-result
-    |     |-- On failure: write .triage-pending.json sentinel, preserve staging
-    |
-    |-- memory_write.py (per-command execution):
-    |     |-- CREATE:
-    |     |     |-- Reads input from .staging/
-    |     |     |-- auto_fix(): schema_version, timestamps, slugify id, sanitize title, dedup tags
-    |     |     |-- Forces record_status="active"
-    |     |     |-- Validates via Pydantic model
-    |     |     |-- Path containment + traversal check
-    |     |     |-- Anti-resurrection check (24h cooldown on retired file paths)
-    |     |     |-- Acquires FlockIndex lock
-    |     |     |-- Atomic write (tmp+rename)
-    |     |     |-- Adds to index.md (sorted)
-    |     |     |-- If session_summary: auto-triggers memory_enforce.py
+    |-- memory_orchestrate.py --action run (ALL steps inside Python):
     |     |
-    |     |-- UPDATE:
-    |     |     |-- Reads existing file + new input
-    |     |     |-- auto_fix() on new data
-    |     |     |-- Preserves immutable fields (created_at, schema_version, category, id)
-    |     |     |-- check_merge_protections():
-    |     |     |     - Immutable fields check
-    |     |     |     - record_status immutable via UPDATE
-    |     |     |     - Tags: grow-only below cap, eviction allowed at cap only with additions
-    |     |     |     - related_files: grow-only except dangling path removal
-    |     |     |     - changes[]: append-only, at least 1 new entry required
-    |     |     |-- FIFO overflow: changes[] capped at 50
-    |     |     |-- Slug rename if title changed >50% (word_difference_ratio)
-    |     |     |-- OCC: if --hash provided, checks MD5 inside flock (prevents TOCTOU)
-    |     |     |-- Acquires FlockIndex lock
-    |     |     |-- Atomic write
-    |     |     |-- Updates index entry
+    |     |-- Step 1: Collect + validate intent JSONs
+    |     |     |-- Reads <staging_dir>/intent-<cat>.json for each category
+    |     |     |-- Strips markdown fences from JSON content
+    |     |     |-- Filters NOOPs, validates SAVE intent required fields
     |     |
-    |     |-- RETIRE:
-    |     |     |-- Sets record_status="retired", retired_at, retired_reason
-    |     |     |-- Clears archived fields
-    |     |     |-- Appends change entry
-    |     |     |-- Acquires FlockIndex lock
-    |     |     |-- Atomic write + removes from index
+    |     |-- Step 2: Run candidate selection per category
+    |     |     |-- Subprocess: memory_candidate.py --category <cat> --new-info-file <path>
+    |     |     |     |-- Reads index.md, filters to target category
+    |     |     |     |-- Tokenizes new_info (3+ char tokens, higher precision than retrieval)
+    |     |     |     |-- Scores entries: title word match (2pts), tag match (3pts), prefix (1pt)
+    |     |     |     |-- Selects top-1 candidate if score >= 3
+    |     |     |     |-- Determines structural_cud: CREATE / UPDATE_OR_DELETE / UPDATE / NOOP
+    |     |     |-- Captures OCC hash for UPDATE candidates (MD5 of existing file)
     |     |
-    |     |-- ARCHIVE/UNARCHIVE/RESTORE: Similar lifecycle transitions with field management
-    |
-    |-- memory_enforce.py (if session_summary created):
-    |     |-- Acquires FlockIndex lock (strict: require_acquired())
-    |     |-- Scans sessions/ for active files, sorted by created_at oldest first
-    |     |-- If active count > max_retained (default 5):
-    |     |     |-- Retires oldest excess sessions
-    |     |     |-- Deletion guard: warns if unique content, but proceeds anyway
-    |     |     |-- Uses retire_record() from memory_write.py
+    |     |-- Step 3: CUD Resolution (2-layer)
+    |     |     |-- L1 = structural_cud from candidate.py (mechanical)
+    |     |     |-- L2 = intended_action from intent JSON (LLM-derived, default "update")
+    |     |     |-- Resolution table:
+    |     |     |     CREATE + CREATE = CREATE
+    |     |     |     UPDATE_OR_DELETE + UPDATE = UPDATE
+    |     |     |     UPDATE_OR_DELETE + DELETE = DELETE
+    |     |     |     CREATE + UPDATE = CREATE (structural: no candidate)
+    |     |     |     CREATE + DELETE = NOOP (contradictory)
+    |     |     |     UPDATE_OR_DELETE + CREATE = CREATE (subagent override)
+    |     |     |     VETO + * = OBEY VETO (mechanical invariant)
+    |     |     |     NOOP + * = NOOP
+    |     |
+    |     |-- Step 4: Assemble drafts per category
+    |     |     |-- Subprocess: memory_draft.py --action create/update --category <cat> --input-file <path>
+    |     |     |     |-- Reads partial input JSON
+    |     |     |     |-- Assembles complete schema-valid memory JSON:
+    |     |     |     |     CREATE: adds schema_version, id (slugified title), timestamps, changes[]
+    |     |     |     |     UPDATE: preserves immutables, unions tags/files, appends change, shallow-merges content
+    |     |     |     |-- Validates against Pydantic model
+    |     |     |     |-- Writes draft to <staging_dir>/draft-<cat>-<timestamp>-<pid>.json
+    |     |     |-- Generates target paths for each category
+    |     |
+    |     |-- Step 5: Handle DELETE actions
+    |     |     |-- Writes <staging_dir>/draft-<cat>-retire.json: { action: "retire", target, reason }
+    |     |
+    |     |-- Step 6: Build orchestration manifest
+    |     |     |-- If ALL NOOP: exits cleanly (status="all_noop"), no saves performed
+    |     |
+    |     |-- Step 7: execute_saves()
+    |     |     |-- Emits save.start log event (fail-open)
+    |     |     |-- Updates sentinel state to "saving"
+    |     |     |-- PinnedStagingDir for TOCTOU-safe I/O during save
+    |     |     |-- Per-category: memory_write.py --skip-auto-enforce
+    |     |     |     |-- CREATE:
+    |     |     |     |     |-- auto_fix(): schema_version, timestamps, slugify id, sanitize title, dedup tags
+    |     |     |     |     |-- Forces record_status="active"
+    |     |     |     |     |-- Validates via Pydantic model
+    |     |     |     |     |-- Path containment + traversal check
+    |     |     |     |     |-- Anti-resurrection check (24h cooldown on retired file paths)
+    |     |     |     |     |-- Acquires FlockIndex lock, atomic write (tmp+rename), adds to index.md
+    |     |     |     |-- UPDATE:
+    |     |     |     |     |-- auto_fix() on new data, preserves immutables (created_at, schema_version, category, id)
+    |     |     |     |     |-- check_merge_protections() (immutable fields, grow-only tags/related_files, append-only changes)
+    |     |     |     |     |-- FIFO overflow: changes[] capped at 50
+    |     |     |     |     |-- Slug rename if title changed >50% (word_difference_ratio)
+    |     |     |     |     |-- OCC: --hash checks MD5 inside flock (prevents TOCTOU)
+    |     |     |     |     |-- Acquires FlockIndex lock, atomic write, updates index entry
+    |     |     |     |-- RETIRE:
+    |     |     |     |     |-- Sets record_status="retired", retired_at, retired_reason
+    |     |     |     |     |-- Clears archived fields, appends change entry
+    |     |     |     |     |-- Acquires FlockIndex lock, atomic write + removes from index
+    |     |     |     |-- ARCHIVE/UNARCHIVE/RESTORE: Similar lifecycle transitions with field management
+    |     |     |-- Runs memory_enforce.py (if session_summary created):
+    |     |     |     |-- Acquires FlockIndex lock (strict: require_acquired())
+    |     |     |     |-- Scans sessions/ for active files, sorted by created_at oldest first
+    |     |     |     |-- If active count > max_retained (default 5):
+    |     |     |     |     |-- Retires oldest excess sessions via retire_record()
+    |     |     |-- Writes last-save-result.json (with session_id for cross-session tracking)
+    |     |     |-- Cleans staging files (triage-data, context-*, draft-*, input-*, intent-*, new-info-*)
+    |     |     |-- Phase timing capture:
+    |     |     |     triage_ms (triage start -> orchestrate start)
+    |     |     |     orchestrate_ms (orchestrate start -> write start)
+    |     |     |     write_ms (write start -> write end)
+    |     |     |     total_ms (triage start -> write end)
+    |     |     |-- Updates sentinel state to "saved"
+    |     |     |-- Emits save.complete log event
+    |     |
+    |     |-- On partial failure:
+    |     |     |-- Writes .triage-pending.json with failed categories
+    |     |     |-- Preserves staging files for recovery
+    |     |     |-- Sets sentinel to "failed"
+    |     |
+    |     |-- On orchestrator crash (non-zero exit):
+    |     |     |-- Exception handler writes .triage-pending.json, sets sentinel to "failed"
+    |     |     |-- Do NOT retry -- recovery happens on next triage
 ```
 
 ### 2.2 Retrieval Flow (User Prompt -> Memory Injection)
@@ -497,7 +519,7 @@ memory_validate_hook.py (10s timeout)
 
 **Key internals:**
 - Venv bootstrap: Same pattern as `memory_write.py` -- if pydantic not importable, `os.execv()` under `.venv/bin/python3`.
-- Input path validation: Must be in `.claude/memory/.staging/` or `/tmp/`. No `..` components.
+- Input path validation: Must be in `.claude/memory/.staging/`, `<staging_dir>`, or legacy `/tmp/` paths. No `..` components.
 - Candidate path validation: Must exist, be `.json`, resolve within `.claude/memory/`.
 - `assemble_create()`: Sets schema_version, category, id (slugified title), record_status="active", timestamps, tags, related_files, confidence, content, initial change entry, times_updated=0.
 - `assemble_update()`: Starts from existing data. Preserves immutable fields. Unions tags and related_files. Shallow-merges content (top-level content keys from input overlay existing). Appends change entry. Increments times_updated.
@@ -675,54 +697,61 @@ memory_validate_hook.py (10s timeout)
 | Stop[*] | memory_triage.py | Every stop attempt | Block (stdout JSON) or allow (silent) |
 | UserPromptSubmit[*] | memory_retrieve.py | Every user prompt | Add context to stdout or silent |
 | PreToolUse[Write] | memory_write_guard.py | Every Write tool call | Allow, deny, or pass-through |
-| PreToolUse[Bash] | memory_staging_guard.py | Every Bash tool call | Deny or pass-through |
+| PreToolUse[Bash] | memory_staging_guard.py | Every Bash tool call | Deny for staging dir writes, or pass-through |
 | PostToolUse[Write] | memory_validate_hook.py | After every Write tool call | Quarantine invalid, or pass-through |
 
 All hooks communicate via stdin JSON (hook input) and stdout JSON (hook output). Exit code 0 always. Decision encoded in stdout content.
 
 ### What Runs as Skill (LLM-interpreted SKILL.md instructions)
 
-The memory-management skill (`SKILL.md`) is loaded when the Stop hook blocks stop. The main Claude agent reads SKILL.md and follows its Phase 0-3 orchestration instructions. This is NOT a script -- it's a prompt that the LLM interprets and executes step by step.
+The memory-management skill (`SKILL.md`) is loaded when the Stop hook blocks stop. The main Claude agent reads SKILL.md and follows its 3-phase orchestration: SETUP (deterministic parse/cleanup/config), Phase 1 DRAFT (spawn per-category subagents), and Phase 2 COMMIT (single `memory_orchestrate.py` subprocess call). This is NOT a script -- it's a prompt that the LLM interprets and executes step by step.
 
 Key properties:
-- Phase 0, 1.5, and 3 command-building are mechanical instructions the LLM must follow literally.
-- Phase 1 and 2 spawn subagents.
+- SETUP (3 steps) and Phase 1 DRAFT (subagent spawning) are the only LLM-orchestrated portions.
+- Phase 2 COMMIT is a single subprocess call -- all mechanical steps (candidate selection, CUD resolution, draft assembly, save execution, enforcement, cleanup) run inside `memory_orchestrate.py`.
+- Optional Phase 1.5 VERIFY (disabled by default) inserts a verification step between prepare and commit.
 - The LLM's judgment is involved in interpreting SKILL.md instructions and deciding execution flow, but the actual memory operations are all deterministic Python scripts.
 
 ### What Runs as Subagents
 
 | Phase | Type | Model | What | Tools |
 |-------|------|-------|------|-------|
-| Phase 1 | Agent (memory-drafter) | Config per-category (default haiku) | Draft intent JSON from context | Read, Write ONLY |
-| Phase 2 | Task | Config verification_model (default sonnet) | Verify draft quality | General |
-| Phase 3 | Task | haiku | Execute save commands | General (Bash) |
+| Phase 1 DRAFT | Agent (memory-drafter) | Config per-category (default haiku) | Draft intent JSON from context | Read, Write ONLY |
+| Phase 1.5 VERIFY (optional) | Agent | Config verification_model (default sonnet) | Verify risk-eligible drafts | General |
 
-Agent vs Task distinction:
-- Agent subagents use a named agent file (`memory-drafter.md`) that defines their persona, instructions, and available tools.
-- Task subagents are ad-hoc with an inline prompt and general tool access.
+Phase 1 drafters use a named agent file (`memory-drafter.md`) that defines their persona, instructions, and available tools (Read + Write only). They run with `run_in_background: true` for parallel execution. Phase 1.5 verification agents are optional (disabled by default) and only verify risk-eligible categories (decision, constraint, DELETE actions, low-confidence drafts).
 
-### What Runs as Direct Bash Commands
+### What Runs as Subprocesses
 
 | Script | Called By | Phase |
 |--------|-----------|-------|
-| memory_candidate.py | Main agent (SKILL.md Phase 1.5 Step 2) | 1.5 |
-| memory_draft.py | Main agent (SKILL.md Phase 1.5 Step 4) | 1.5 |
-| memory_write.py | Phase 3 Task subagent | 3 |
-| memory_enforce.py | Phase 3 Task subagent (and auto-triggered by memory_write.py after session_summary create) | 3 |
-| memory_index.py | Slash commands, auto-rebuild in retrieve/candidate | On-demand |
-| memory_search_engine.py | Slash commands | On-demand |
+| `memory_orchestrate.py --action run` | Main agent (SKILL.md Phase 2 COMMIT) | 2 |
+| `memory_orchestrate.py --action prepare` | Main agent (when Phase 1.5 VERIFY is enabled) | 1.5 |
+| `memory_orchestrate.py --action commit` | Main agent (after Phase 1.5 verification completes) | 1.5 |
+| `memory_write.py --action cleanup-intents` | Main agent (SKILL.md SETUP Step 2) | SETUP |
+
+Scripts called internally by `memory_orchestrate.py` (NOT by main agent or subagents):
+
+| Script | Called By | Context |
+|--------|-----------|---------|
+| `memory_candidate.py` | `memory_orchestrate.py` (subprocess) | Step 2: candidate selection per category |
+| `memory_draft.py` | `memory_orchestrate.py` (subprocess) | Step 4: draft assembly per category |
+| `memory_write.py` | `memory_orchestrate.py` (subprocess, `--skip-auto-enforce`) | Step 7: execute_saves() per category |
+| `memory_enforce.py` | `memory_orchestrate.py` (subprocess) | Step 7: rolling window enforcement after session_summary |
+| `memory_index.py` | Slash commands, auto-rebuild in retrieve/candidate | On-demand |
+| `memory_search_engine.py` | Slash commands | On-demand |
 
 ### Inconsistencies in the Orchestration Model
 
-1. **Mixed execution contexts for the same operation**: `memory_write.py` is called both by the Phase 3 Task subagent (Bash tool) AND automatically by itself (subprocess for enforce after session_summary create). This creates a confusing dependency chain.
+1. **Mixed execution contexts for the same operation**: `memory_write.py` is called both by `memory_orchestrate.py` (subprocess during execute_saves) AND automatically by itself (subprocess for enforce after session_summary create). This creates a confusing dependency chain. The `--skip-auto-enforce` flag mitigates double-enforcement in the orchestrate path.
 
-2. **SKILL.md as prose, not code**: Phases 0, 1.5, and 3 are written as LLM instructions that must be followed literally (e.g., "write this file, run this command"). This is fragile -- the LLM may interpret instructions differently across sessions, skip steps, or add unnecessary steps.
+2. **SKILL.md as prose, not code**: PARTIALLY RESOLVED in v6 -- Phases 1.5 and 3 mechanical steps moved to `memory_orchestrate.py`. SKILL.md now only orchestrates SETUP (3 steps) and Phase 1 DRAFT (subagent spawning). Phase 2 COMMIT is a single subprocess call. Remaining fragility: SETUP steps and subagent spawning are still LLM-interpreted prose.
 
-3. **Three subagent types for different phases**: Phase 1 uses Agent subagents (named agent file, restricted tools), Phase 2 uses Task subagents (general), Phase 3 uses a Task subagent (general but with Bash). The rationale (Phase 1 = tool restriction for Guardian safety) is valid but adds complexity.
+3. **Three subagent types for different phases**: RESOLVED in v6 -- only 1 subagent type (Agent via `memory-drafter.md`). Optional Phase 1.5 verification uses standard Agent subagents, not Task. The Phase 3 Task/haiku save subagent is eliminated entirely.
 
-4. **Deterministic steps run by LLM**: Phase 1.5 is explicitly labeled "no LLM judgment" but is still orchestrated by the main LLM agent, which must correctly interpret 6 steps of instructions, run parallel Bash calls, parse JSON output, apply the CUD resolution table, etc. Any misinterpretation produces incorrect saves.
+4. **Deterministic steps run by LLM**: RESOLVED in v6 -- all deterministic steps (candidate selection, CUD resolution, draft assembly, save execution, enforcement, cleanup) run inside `memory_orchestrate.py` Python subprocess. The LLM no longer interprets mechanical instructions or applies the CUD resolution table.
 
-5. **Guardian compatibility workarounds**: The entire .staging/ file architecture, the Write tool for staging files (instead of simpler Bash heredocs), the string-splitting for path markers in guard scripts (`".clau" + "de"`) -- all exist to work around Claude Code's Guardian security scanner. This is a significant source of complexity.
+5. **Guardian compatibility workarounds**: Phase 1 drafter's Write-only tool restriction remains (structurally prevents Guardian conflicts for staging file writes). The Bash heredoc workaround for the Phase 3 haiku saver is eliminated (no Phase 3 saver). The staging directory moved from `.staging/` (inside `.claude/memory/`) to `<staging_dir>` (XDG-based path, no `/tmp/` fallback -- see `memory_staging_utils._resolve_staging_base()`), which also resolves Claude Code's hardcoded `.claude/` protected directory prompts. String-splitting in guard scripts (`".clau" + "de"`) is still present for Guardian compatibility.
 
 ---
 
@@ -730,31 +759,27 @@ Agent vs Task distinction:
 
 ### 5.1 Staging Directory Lifecycle
 
-Location: `.claude/memory/.staging/`
+Location: `<staging_dir>` (deterministic path: `<resolved_base>/.claude-memory-staging-<hash>/` where `<hash>` is SHA-256 prefix of project's real path; base resolved via XDG_RUNTIME_DIR > /run/user/$UID > macOS per-user temp > ~/.cache fallback). See `memory_staging_utils.py` for resolution logic.
 
 ```
 [Triage fires]
-   |-- Creates: triage-data.json (atomic)
+   |-- Creates: triage-data.json (atomic via tmp+rename under PinnedStagingDir)
    |-- Creates: context-<cat>.txt (per triggered category)
-   |-- Creates: .triage-handled (sentinel timestamp)
+   |-- Creates/updates: .triage-handled (JSON sentinel: {session_id, state, timestamp, pid})
    v
-[Phase 0: Skill loads]
-   |-- Cleans: intent-*.json (stale from previous sessions)
+[SETUP: Skill loads]
+   |-- Cleans: intent-*.json (stale from previous sessions, via memory_write.py --action cleanup-intents)
    v
-[Phase 1: Drafters run]
+[Phase 1 DRAFT: Drafters run]
    |-- Creates: intent-<cat>.json (per category)
    v
-[Phase 1.5: Main agent]
+[Phase 2 COMMIT: memory_orchestrate.py --action run]
    |-- Creates: new-info-<cat>.txt (per category, for candidate.py)
    |-- Creates: input-<cat>.json (per category, for draft.py)
-   v
-[Phase 1.5: draft.py runs]
    |-- Creates: draft-<cat>-<timestamp>-<pid>.json (per category)
-   v
-[Phase 3: Save subagent]
-   |-- Reads: draft-*.json files
+   |-- Creates: orchestration-result.json (manifest)
    |-- On success: cleanup-staging removes all transient files
-   |-- On success: Creates last-save-result.json (atomic)
+   |-- On success: Creates last-save-result.json (atomic, includes session_id)
    |-- On failure: Creates .triage-pending.json, preserves all staging files
    v
 [Next session: retrieve.py]
@@ -764,7 +789,7 @@ Location: `.claude/memory/.staging/`
 ```
 
 Staging cleanup patterns (what gets removed on success):
-- `triage-data.json`, `context-*.txt`, `draft-*.json`, `input-*.json`, `intent-*.json`, `new-info-*.txt`, `.triage-handled`, `.triage-pending.json`
+- `triage-data.json`, `context-*.txt`, `draft-*.json`, `input-*.json`, `intent-*.json`, `new-info-*.txt`, `.triage-handled`, `.triage-pending.json`, `orchestration-result.json`
 
 Files that survive cleanup:
 - `last-save-result.json` (consumed by next session's retrieve hook)
@@ -774,9 +799,10 @@ Files that survive cleanup:
 | File | Created By | Consumed By | TTL | Purpose |
 |------|-----------|-------------|-----|---------|
 | `.claude/.stop_hook_active` | memory_triage.py (when blocking stop) | memory_triage.py (next invocation) | 5 min (300s) | Prevents re-fire loop. If user re-stops within 5min, allows through. |
-| `.staging/.triage-handled` | memory_triage.py (when blocking stop) | memory_triage.py (next invocation) | 5 min (300s) | Idempotency sentinel. Prevents duplicate triage in same session. |
-| `.staging/.triage-pending.json` | Phase 3 error handler (main agent) | memory_retrieve.py (next session) | None | Signals that a save failed. Contains `{timestamp, categories, reason}`. |
-| `.staging/last-save-result.json` | Phase 3 save subagent | memory_retrieve.py (next session) | 24 hours (checked at read time) | One-shot save confirmation. Contains `{saved_at, categories, titles, errors}`. |
+| `<staging_dir>/.triage-handled` | memory_triage.py (when blocking stop) | memory_triage.py (next invocation) | 30 min (1800s) | JSON sentinel state machine: `{session_id, state, timestamp, pid}`. States: pending/saving/saved/failed. Session-scoped idempotency. |
+| `<staging_dir>/.triage-pending.json` | memory_orchestrate.py (on failure) | memory_retrieve.py (next session) | None | Signals that a save failed. Contains `{timestamp, categories, reason}`. |
+| `<staging_dir>/last-save-result.json` | memory_orchestrate.py execute_saves() | memory_retrieve.py (next session) | 24 hours (checked at read time) | One-shot save confirmation. Contains `{saved_at, session_id, categories, titles, errors}`. |
+| `<staging_dir>/.triage-lock` | memory_triage.py (O_CREAT\|O_EXCL) | memory_triage.py (released in finally) | Stale after 5 min | Exclusive triage lock preventing concurrent triage from parallel Stop hooks. |
 | `.index.lockdir/` | FlockIndex (mkdir) | FlockIndex (rmdir on exit) | 60s (stale detection) | Portable mutex for index mutations. |
 
 ### 5.3 Index File (index.md)

@@ -28,8 +28,8 @@ Architecture: v6.0.0 -- 3-phase flow: SETUP (deterministic parse/cleanup) -> Pha
 
 When the Stop hook triggers categories, it produces:
 1. **Human-readable message** (backwards-compatible) listing triggered categories
-2. **`triage-data.json`** file at `/tmp/.claude-memory-staging-<hash>/triage-data.json` (referenced via `<triage_data_file>` tag; falls back to inline `<triage_data>` JSON on write failure). Includes `staging_dir` field for downstream script path resolution.
-3. **Context files** at `/tmp/.claude-memory-staging-<hash>/context-<CATEGORY>.txt` with generous transcript excerpts
+2. **`triage-data.json`** file at `<staging_dir>/triage-data.json` (referenced via `<triage_data_file>` tag; falls back to inline `<triage_data>` JSON on write failure). The `staging_dir` field inside the JSON provides the resolved staging base path for downstream script path resolution.
+3. **Context files** at `<staging_dir>/context-<CATEGORY>.txt` with generous transcript excerpts
 
 The SKILL.md orchestration uses this to spawn per-category `memory-drafter` Agent subagents (`tools: Read, Write` only -- no Bash, structurally preventing Guardian conflicts) for parallel intent drafting. After all drafters complete, a single `memory_orchestrate.py --action run` subprocess performs candidate selection, CUD resolution, draft assembly, and save execution (including sentinel management, enforcement, cleanup, and result file writing). Optional Phase 1.5 verification (disabled by default) inserts a verify step between prepare and commit. See `skills/memory-management/SKILL.md` for the full 3-phase flow (SETUP, Phase 1 DRAFT, Phase 2 COMMIT).
 
@@ -50,7 +50,7 @@ The SKILL.md orchestration uses this to spawn per-category `memory-drafter` Agen
 | hooks/scripts/memory_logger.py | Shared JSONL structured logging (fail-open, atomic append) | stdlib only |
 | hooks/scripts/memory_log_analyzer.py | Log anomaly detection + `--metrics` operational dashboard + `--watch` real-time tailing | stdlib only |
 | agents/memory-drafter.md | Phase 1 intent drafting agent (tools: Read, Write only, no Bash) | Claude Code agent file |
-| hooks/scripts/memory_staging_utils.py | Shared staging path utility (deterministic /tmp/ staging dir) | stdlib only |
+| hooks/scripts/memory_staging_utils.py | Shared staging path utility: PinnedStagingDir (TOCTOU-safe fd-pinned I/O), 4-tier staging base resolution (XDG_RUNTIME_DIR > /run/user/$UID > macOS confstr > ~/.cache), parent chain validation, is_staging_path() | stdlib only |
 | hooks/scripts/memory_write_guard.py | PreToolUse guard blocking direct writes | stdlib only |
 | hooks/scripts/memory_staging_guard.py | PreToolUse:Bash guard blocking heredoc writes to staging | stdlib only |
 | hooks/scripts/memory_validate_hook.py | PostToolUse validation + quarantine | pydantic v2 (optional) |
@@ -111,7 +111,7 @@ Known threat vectors (implementation details in `action-plans/_ref/TEST-PLAN.md`
 - **FTS5 injection:** Restrict queries to safe chars, use parameterized queries only.
 - **LLM judge integrity:** Wrap untrusted data in XML tags, use deterministic shuffling (anti-position-bias).
 - **Thread safety:** No shared mutable state in parallel judge executions.
-- **PostToolUse scope:** Only intercepts Write tool calls; Python `open()` writes (memory_write.py, memory_draft.py) are invisible. Staging files (`/tmp/.claude-memory-staging-*` and legacy `.staging/`) are excluded via `os.path.realpath()` + prefix/marker check — traversal-safe.
+- **PostToolUse scope:** Only intercepts Write tool calls; Python `open()` writes (memory_write.py, memory_draft.py) are invisible. Staging files (`<staging_dir>` resolved by `memory_staging_utils.get_staging_dir()`, and legacy `.staging/`) are excluded via `os.path.realpath()` + prefix/marker check — traversal-safe.
 
 ## Action Plans
 

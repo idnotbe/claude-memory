@@ -153,12 +153,13 @@ When `triage.parallel.verification_enabled: true`:
 
 **Phase 2: COMMIT (deterministic, single Python subprocess).**
 Single call: `python3 memory_orchestrate.py --staging-dir <dir> --action run --memory-root <root>`.
+The orchestrator emits `save.start` and `save.complete` logging events (via `memory_logger.py`) bracketing the full save flow.
 The orchestrator performs all deterministic steps as subprocesses:
 1. Collect intents, candidate selection (with OCC hash capture), CUD resolution.
 2. Draft assembly via `memory_draft.py`, target path generation for CREATEs.
 3. Save execution via `memory_write.py` (with `--skip-auto-enforce`).
 4. Enforcement (`memory_enforce.py`) for session_summary creates.
-5. Result file writing (`last-save-result.json`) for next-session confirmation.
+5. Result file writing (`last-save-result.json`) for next-session confirmation. The result includes a `phase_timing` dict with `triage_ms`, `orchestrate_ms`, `write_ms`, and `total_ms` fields for observability.
 6. Staging cleanup on success; `.triage-pending.json` + sentinel update on failure.
 
 #### 3.1.3 CUD Verification Rules Table
@@ -632,21 +633,14 @@ Every hook script follows fail-open principles:
 
 ### 5.1 Storage Layout
 
+Memory storage and staging are **separate directory trees**. Memory storage lives inside the project; staging lives in a secure per-user external directory.
+
+#### Memory Storage (project-local)
+
 ```
 .claude/memory/
   memory-config.json          # Per-project configuration
   index.md                    # Enriched index (auto-generated, derived artifact)
-  .staging/                   # Transient files (cleaned after save)
-    triage-data.json
-    context-<category>.txt
-    intent-<category>.json
-    input-<category>.json
-    new-info-<category>.txt
-    draft-<category>-<timestamp>.json
-    last-save-result.json
-    .triage-handled
-    .triage-pending.json
-    .index.lockdir/           # FlockIndex lock directory
   sessions/                   # session_summary memories
   decisions/                  # decision memories
   runbooks/                   # runbook memories
@@ -660,6 +654,43 @@ Every hook script follows fail-open principles:
     guard/
     validate/
 ```
+
+#### Staging Directory (external, per-user)
+
+Staging files are stored **outside** the project tree in a secure per-user directory to eliminate the `/tmp/` symlink attack class. The staging directory path is:
+
+```
+<staging_base>/.claude-memory-staging-<hash>/
+```
+
+Where `<hash>` is `SHA-256(f"{os.geteuid()}:{os.path.realpath(cwd)}")[:12]`.
+
+**4-tier staging base resolution** (via `memory_staging_utils._resolve_staging_base()`):
+
+| Priority | Candidate | Conditions |
+|----------|-----------|------------|
+| 1 | `XDG_RUNTIME_DIR` | Set, absolute, 0700, owned by euid, is directory (strict: rejects WSL2's 0777) |
+| 2 | `/run/user/$UID` | Linux systemd, exists, 0700, owned by euid (even if `XDG_RUNTIME_DIR` not set) |
+| 3 | macOS `CS_DARWIN_USER_TEMP_DIR` | Via `os.confstr()`, bypasses `TMPDIR` env var, owner-only permissions |
+| 4 | `$XDG_CACHE_HOME/claude-memory/staging/` | Universal fallback (defaults to `~/.cache/claude-memory/staging/`), created with 0700 |
+
+**No `/tmp/` fallback** -- the goal is to eliminate the `/tmp/` attack class entirely.
+
+```
+<staging_base>/.claude-memory-staging-<hash>/
+  triage-data.json              # Triage output (categories, scores)
+  context-<category>.txt        # Per-category transcript excerpts
+  intent-<category>.json        # Phase 1 drafter output (SAVE or NOOP)
+  input-<category>.json         # Orchestrator input for draft assembly
+  new-info-<category>.txt       # Extracted new information per category
+  draft-<category>-<ts>.json    # Assembled draft memory JSON
+  last-save-result.json         # Save outcome (with phase_timing)
+  .triage-handled               # Sentinel: triage consumed by save flow
+  .triage-pending.json          # Fallback: drafters failed, retrieval detects
+  .index.lockdir/               # FlockIndex lock directory
+```
+
+> **Legacy note:** In v5.x, staging was located at `.claude/memory/.staging/` inside the project tree. The v6 external staging layout eliminates symlink/TOCTOU attacks on shared `/tmp/` directories. Legacy `.staging/` paths are still recognized by guards for backward compatibility.
 
 ### 5.2 Record Lifecycle
 
