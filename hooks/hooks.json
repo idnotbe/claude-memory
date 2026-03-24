@@ -1,5 +1,5 @@
 {
-  "description": "v5.0.0: 1 deterministic command-type Stop hook (memory_triage.py) + PreToolUse/PostToolUse Write guards + UserPromptSubmit retrieval. See SKILL.md for file format instructions.",
+  "description": "v6.0.0: 1 deterministic command-type Stop hook (memory_triage.py) + PreToolUse/PostToolUse Write guards + UserPromptSubmit retrieval. See SKILL.md for file format instructions.",
   "hooks": {
     "Stop": [
       {

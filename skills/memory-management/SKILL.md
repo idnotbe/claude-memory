@@ -35,7 +35,13 @@ Each category has a configurable `description` field in `memory-config.json` (un
 
 ## Memory Consolidation
 
-**Staging directory**: Memory staging files are stored in `/tmp/.claude-memory-staging-<hash>/` (on Linux; `/private/tmp/.claude-memory-staging-<hash>/` on macOS) where `<hash>` is a deterministic SHA-256 prefix derived from the project path. This avoids Claude Code's hardcoded `.claude/` protected directory prompts. The `triage-data.json` file includes a `staging_dir` field with the exact path. All staging file references below use `<staging_dir>` as shorthand.
+**Staging directory**: Memory staging files are stored in `<staging_base>/.claude-memory-staging-<hash>/` where `<hash>` is a deterministic SHA-256 prefix derived from `UID:realpath(project_path)`. The staging base is resolved via a 4-tier priority in `memory_staging_utils._resolve_staging_base()`:
+1. `XDG_RUNTIME_DIR` -- if set, 0700, owned by euid, is a directory (rejects WSL2's 0777)
+2. `/run/user/$UID` -- Linux systemd fallback, same ownership/permission checks
+3. macOS per-user temp -- via `os.confstr("CS_DARWIN_USER_TEMP_DIR")`, bypasses TMPDIR
+4. `$XDG_CACHE_HOME/claude-memory/staging` (or `~/.cache/claude-memory/staging`) -- universal fallback, created with 0700
+
+No `/tmp/` fallback -- this eliminates the `/tmp/` symlink attack class. The `triage-data.json` file includes a `staging_dir` field with the exact resolved path. All staging file references below use `<staging_dir>` as shorthand.
 
 When a triage hook fires with a save instruction:
 
@@ -46,7 +52,7 @@ Only run this check when **no** `<triage_data>` or `<triage_data_file>` tag is p
 current hook output (i.e., manual `/memory:save` invocation or recovery). If triage output IS
 present, skip directly to SETUP -- the current triage data is fresh.
 
-1. Determine the staging directory: Read the `staging_dir` field from `triage-data.json` if available, or compute it using `memory_staging_utils.get_staging_dir()` (path is `<resolved_tmp>/.claude-memory-staging-<hash>/` where `<hash>` is derived from the project path). Check if ANY of these exist:
+1. Determine the staging directory: Read the `staging_dir` field from `triage-data.json` if available, or compute it using `memory_staging_utils.get_staging_dir()` (path is `<staging_base>/.claude-memory-staging-<hash>/` where `<staging_base>` is the 4-tier resolved base and `<hash>` is derived from `UID:realpath(project_path)`). Check if ANY of these exist:
    - `<staging_dir>/.triage-pending.json`
    - `<staging_dir>/triage-data.json` WITHOUT a corresponding `<staging_dir>/last-save-result.json`
 2. If found, clean up ALL staging files before proceeding:
@@ -320,7 +326,7 @@ Users can also manage sessions directly:
 - `categories.<name>.auto_capture` -- enable/disable auto-capture (default: true)
 - `categories.<name>.retention_days` -- auto-expire after N days (0 = permanent; 90 for sessions)
 - `categories.session_summary.max_retained` -- max session summaries to keep (default: 5)
-- `retrieval.max_inject` -- max memories injected per prompt (default: 5)
+- `retrieval.max_inject` -- max memories injected per prompt (default: 3)
 - `max_memories_per_category` -- max files per folder (default: 100)
 - `triage.parallel.enabled` -- enable parallel subagent drafting (default: true)
 - `triage.parallel.category_models` -- per-category model for drafting (see default config for per-category defaults; fallback: haiku)

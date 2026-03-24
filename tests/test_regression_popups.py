@@ -739,8 +739,8 @@ class TestStagingPathOutsideClaudeDir:
     """Verify SKILL.md never instructs Write tool for .claude/memory/.staging/.
 
     P3 popup fix moved staging from .claude/memory/.staging/ to
-    /tmp/.claude-memory-staging-<hash>/. This test ensures no
-    Write tool instructions target the old path.
+    <staging_base>/.claude-memory-staging-<hash>/ (XDG 4-tier resolution).
+    This test ensures no Write tool instructions target the old path.
     """
 
     def test_no_write_to_old_staging(self):
@@ -756,15 +756,18 @@ class TestStagingPathOutsideClaudeDir:
             f"SKILL.md references old staging path .claude/memory/.staging/ "
             f"at line(s): "
             + ", ".join(f"{ln}" for ln, _ in matches)
-            + "\nAll staging should use /tmp/.claude-memory-staging-<hash>/"
+            + "\nAll staging should use <staging_base>/.claude-memory-staging-<hash>/"
         )
 
-    def test_staging_uses_tmp_prefix(self):
-        """SKILL.md staging references should use /tmp/ prefix."""
+    def test_staging_uses_xdg_tier_description(self):
+        """SKILL.md staging references should describe XDG 4-tier resolution."""
         text = SKILL_MD.read_text(encoding="utf-8")
-        # Should reference /tmp/.claude-memory-staging
-        assert "/tmp/.claude-memory-staging" in text, (
-            "SKILL.md should reference /tmp/.claude-memory-staging prefix"
+        # Should reference the 4-tier staging base resolution
+        assert "<staging_base>/.claude-memory-staging-" in text, (
+            "SKILL.md should reference <staging_base>/.claude-memory-staging- prefix"
+        )
+        assert "No `/tmp/` fallback" in text, (
+            "SKILL.md should explicitly state no /tmp/ fallback"
         )
 
     def test_no_write_tool_to_claude_staging(self):

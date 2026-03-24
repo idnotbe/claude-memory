@@ -31,6 +31,37 @@ claude-memory solves this by silently capturing knowledge during sessions and in
 - **Fail-open**: Every hook is designed to silently fail rather than block the user's workflow.
 - **Defense-in-depth**: Multiple overlapping security layers (guards, validation, sanitization, containment checks).
 
+### 1.4 Design Consistency Principles
+
+In well-designed systems, similar problems are solved with similar solutions. Design consistency reduces cognitive load for maintainers, makes behavior predictable, and ensures that deviations stand out as intentional signals rather than accidental drift. When a component behaves differently from its peers, the difference should be documented and justified — not arbitrary.
+
+#### 1.4.1 Consistency Axes
+
+claude-memory enforces consistency across the following axes. Each axis defines a uniform pattern that all components in the same category follow unless a documented exception applies:
+
+1. **Error handling boundary.** Hook scripts (triage, retrieve, write_guard, staging_guard, validate_hook) uniformly fail-open: unexpected exceptions are caught, and the user's workflow proceeds unimpeded — either the operation is allowed through (PreToolUse hooks) or validation is silently skipped (PostToolUse hooks). CLI/CRUD scripts (memory_write, memory_draft, memory_enforce, memory_candidate) uniformly fail-closed: validation failures produce non-zero exit codes. `memory_orchestrate.py` is a documented hybrid: fail-closed for structural errors, fail-open for individual category failures within a batch.
+
+2. **Data flow contracts.** Hook scripts receive input via stdin JSON and produce structured output via stdout. CLI tools receive input via argparse and file paths, and produce output via stdout (JSON for machine-readable tools, text for human-oriented tools like `--health`). Diagnostics go to stderr in both categories. Output format varies by purpose (JSON, XML for retrieval, text for status reports), but the stdin/stdout/stderr contract is uniform.
+
+3. **Staging-storage symmetry.** Transient staging operations and final persistent writes follow the same core invariant: write-new-then-swap (never modify a file in place). The underlying mechanism varies — `os.rename()` in `atomic_write_text()`, `os.replace()` in orchestration, `O_CREAT|O_EXCL` with fd-pinning in `PinnedStagingDir` — but all guarantee atomicity. Where staging requires additional protections (fd-pinning for TOCTOU safety, `O_EXCL` for collision avoidance), these are additive layers on top of the shared write-new-then-swap base. Both staging and persistent paths apply symlink defense (`O_NOFOLLOW`). Path containment uses `resolve().relative_to()` for persistent writes and fd-pinned `dir_fd` verification for staging writes — different mechanisms achieving the same goal, suited to their respective threat models.
+
+4. **Security at system boundaries.** Input sanitization (control chars, Unicode attack sequences, index-injection markers, confidence label spoofing) is applied at every boundary where user-controlled data enters or exits the system — the write path, retrieval output, and search output. Untrusted data boundaries use XML wrapping: user content in element bodies, system metadata in attributes. See Section 4.3 for the full security specification.
+
+5. **Lifecycle structure.** All record lifecycle operations (retire, archive, unarchive, restore) follow the same structural progression: resolve path → check existence → read JSON → verify current state → set new fields and clear opposite fields → append change entry → acquire FlockIndex → atomic write → update index → return result. The common shape is uniform; minor variations exist (e.g., idempotency handling differs: `retire` succeeds silently on already-retired records, `unarchive` errors on non-archived records).
+
+6. **Naming and convention.** Files follow `memory_<purpose>.py`. Functions use `snake_case` (public) and `_snake_case` (private). Constants use `UPPER_SNAKE_CASE`. Config keys use `snake_case` with dot-notation nesting. Logging events use `subsystem.action` dot-notation (e.g., `triage.score`, `guard.write_deny`).
+
+#### 1.4.2 Documented Divergences
+
+Where a component intentionally breaks a uniform pattern, the divergence is documented inline (in the diverging script's source) with the technical justification. Cross-script divergences are also noted in CLAUDE.md where applicable. Examples:
+- **Tokenizer thresholds**: `memory_candidate.py` uses 3+ char tokens (precision), `memory_search_engine.py` uses 2+ chars (recall).
+- **Pydantic bootstrap**: `memory_validate_hook.py` uses lazy site-packages injection instead of `os.execv()` (stdin already consumed).
+- **stdin reading**: `memory_triage.py` uses `read_stdin()` with `select.select()` instead of `json.load(sys.stdin)` (Claude Code Stop hooks do not send EOF).
+
+Each documented divergence exists because the standard approach would cause a functional failure in that specific context.
+
+**Forward-looking policy:** New scripts must adhere to the 6 consistency axes above for their category (hook or CLI). If a new script cannot comply with an axis, the divergence must include an inline comment explaining why the standard approach does not apply, and should be noted in CLAUDE.md if the divergence crosses script boundaries.
+
 ---
 
 ## 2. User Stories and Use Cases

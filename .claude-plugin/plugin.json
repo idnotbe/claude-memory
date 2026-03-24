@@ -1,6 +1,6 @@
 {
   "name": "claude-memory",
-  "version": "5.1.0",
+  "version": "6.0.0",
   "description": "Structured memory management for Claude Code. Auto-captures decisions, runbooks, constraints, tech debt, session summaries, and preferences as JSON files with intelligent retrieval.",
   "author": {
     "name": "idnotbe",
